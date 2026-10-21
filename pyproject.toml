@@ -1,0 +1,65 @@
+[project]
+name = "yt2wiki"
+version = "0.1.0"
+description = "Local, evidence-grounded compiler that turns a YouTube video into an illustrated wiki-style technical article."
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "MIT" }
+
+dependencies = [
+    "faster-whisper>=1.1",
+    "yt-dlp>=2025.1",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "pillow>=10.0",
+    "numpy>=1.26,<3",
+    "tqdm>=4.66",
+    "psutil>=5.9",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "torch>=2.7",
+    "transformers>=4.57",
+    "accelerate>=1.0",
+    "bitsandbytes>=0.45",
+    "sentencepiece>=0.2",
+    "safetensors>=0.4",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+yt2wiki = "yt2wiki.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["yt2wiki*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+pythonpath = ["src", "tests"]
+asyncio_mode = "auto"
+markers = [
+    "slow: requires real model weights / GPU",
+    "network: requires internet access",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["E501", "B008", "B905"]

@@ -1,0 +1,293 @@
+# yt2wiki model registry.
+#
+# Every entry declares the *role* a model plays, its upstream repo, licence,
+# native footprint and the per-profile variant that should be loaded.  The
+# registry is the single source of truth used by the pipeline, the API (for
+# reprocessing with a different model) and the evaluation harness.
+#
+# `variant` fields are passed verbatim to the backend loader.  Keep them
+# conservative: a variant that fails to load must trigger a *recorded* fallback
+# rather than a silent quality change.
+
+schema_version: 1
+
+profiles:
+  compact:
+    description: 8 GB GPU. Quantised models, small vision batches, no concurrency.
+    vram_budget_gb: 7.0
+    concurrency: 1
+    vision_batch: 6
+    vision_image_tokens: 384
+    vision_max_new_tokens: 384
+  standard:
+    description: 12 GB GPU. BF16 mid-size models, conservative batching.
+    vram_budget_gb: 11.0
+    concurrency: 1
+    vision_batch: 4
+    vision_image_tokens: 512
+    vision_max_new_tokens: 448
+  enhanced:
+    description: 16 GB GPU. Best qualified models within the production budget.
+    vram_budget_gb: 15.0
+    concurrency: 1
+    vision_batch: 3
+    vision_image_tokens: 640
+    vision_max_new_tokens: 512
+
+# Short aliases so CLI users can say `--llm 4b` instead of a repo id.
+aliases:
+  whisper: whisper-large-v3
+  vl: vl-8b
+  text: text-9b
+  verify: verify-3b
+
+models:
+  # ---------------------------------------------------------------- ASR ----
+  whisper-large-v3:
+    role: asr
+    engine: faster-whisper
+    repo: Systran/faster-whisper-large-v3
+    revision: main
+    license: MIT
+    params_b: 1.55
+    provider: Systran / OpenAI (distilled CTranslate2 port)
+    notes: >
+      Best accuracy/VRAM trade-off in CTranslate2. int8_float16 keeps VRAM near
+      3 GB on Blackwell while retaining fp16-quality logits.
+    variants:
+      compact: {compute_type: int8_float16, beam_size: 5}
+      standard: {compute_type: int8_float16, beam_size: 5}
+      enhanced: {compute_type: float16, beam_size: 5}
+    vram_gb: {compact: 3.0, standard: 3.1, enhanced: 3.2}
+    fallbacks: [whisper-small]
+
+  whisper-small:
+    role: asr
+    engine: faster-whisper
+    repo: Systran/faster-whisper-small
+    revision: main
+    license: MIT
+    params_b: 0.244
+    provider: Systran
+    notes: >
+      Emergency fallback. Measurably worse on dense technical vocabulary; use
+      only when large-v3 cannot be allocated.
+    variants:
+      compact: {compute_type: int8_float16, beam_size: 5}
+      standard: {compute_type: int8_float16, beam_size: 5}
+      enhanced: {compute_type: int8_float16, beam_size: 5}
+    vram_gb: {compact: 1.0, standard: 1.0, enhanced: 1.0}
+    fallbacks: []
+
+  # -------------------------------------------------------------- Vision ---
+  vl-8b:
+    role: vision
+    engine: transformers
+    repo: Qwen/Qwen3-VL-8B-Instruct-FP8
+    revision: main
+    license: Apache-2.0
+    params_b: 8.2
+    provider: Alibaba Qwen
+    notes: >
+      FP8 block-wise checkpoint. Roughly half of BF16 for a small measured
+      quality cost; the only 8B-class VLM that fits a 16 GB card with room for
+      vision activations and KV cache.
+    variants:
+      enhanced:
+        dtype: float8_e4m3fn
+        device_map: auto
+    vram_gb: {enhanced: 10.6}
+    fallbacks: [vl-4b]
+
+  vl-4b:
+    role: vision
+    engine: transformers
+    repo: Qwen/Qwen3-VL-4B-Instruct
+    revision: main
+    license: Apache-2.0
+    params_b: 4.3
+    provider: Alibaba Qwen
+    notes: >
+      BF16 4B. Good screen-text reading quality at ~9 GB.
+    variants:
+      standard:
+        dtype: bfloat16
+        device_map: auto
+    vram_gb: {standard: 8.9}
+    fallbacks: [vl-2b]
+
+  vl-2b:
+    role: vision
+    engine: transformers
+    repo: Qwen/Qwen3-VL-2B-Instruct
+    revision: main
+    license: Apache-2.0
+    params_b: 2.2
+    provider: Alibaba Qwen
+    notes: >
+      BF16 2B. Fits the 8 GB compact profile with ~3 GB headroom for image
+      activations. Acceptable for dense UI text at 1024px crops.
+    variants:
+      compact:
+        dtype: bfloat16
+        device_map: auto
+    vram_gb: {compact: 4.3}
+    fallbacks: []
+
+  vl-qwen35-4b:
+    role: vision
+    engine: llamacpp-server
+    repo: unsloth/Qwen3.5-4B-GGUF
+    revision: main
+    license: Apache-2.0
+    params_b: 4.3
+    provider: Alibaba Qwen (quantised by Unsloth)
+    notes: >
+      Qwen3.5-4B Q4_K_M served by a local llama-server child process
+      (one resident VLM per job; sequential GPU use preserved). Selected
+      for the compact profile after the V9-Z2 bake-off: more verified
+      illustration wins than vl-2b at 4.5 GB measured peak with two known
+      over-strict omissions (relation dialog, generic dashboard).
+    variants:
+      compact:
+        gguf_file: Qwen3.5-4B-Q4_K_M.gguf
+        mmproj_file: mmproj-F16.gguf
+        ctx_size: 16384
+        ubatch: 2048
+        n_gpu_layers: 99
+        reasoning: off
+        port: 0
+    vram_gb: {compact: 4.5}
+    fallbacks: [vl-2b]
+
+  vl-gemma-12b:
+    role: vision
+    engine: llamacpp-server
+    repo: unsloth/gemma-4-12B-it-qat-GGUF
+    revision: 980b060c40a53e9ac159e501a3e0f66a6365af
+    license: Apache-2.0
+    params_b: 12.7
+    provider: Google (quantised by Unsloth)
+    notes: >
+      Gemma 4 12B UD-Q4_K_XL served by a local llama-server child process.
+      Selected for the standard profile after the V9-Z2 bake-off: clearly
+      better editorial choices than vl-4b at 9.5 GB measured peak.
+      Does NOT fit 8 GB (measured); the slim config still exceeds it and
+      the c2048 config rejects the judge workload.
+    variants:
+      standard:
+        gguf_file: gemma-4-12B-it-qat-UD-Q4_K_XL.gguf
+        # Distinct filename: the generic mmproj-F16.gguf in the same
+        # directory belongs to Qwen3.5 (different bytes). See _resolve.
+        mmproj_file: gemma4-mmproj-F16.gguf
+        ctx_size: 8192
+        ubatch: 2048
+        n_gpu_layers: 99
+        reasoning: off
+        port: 0
+    vram_gb: {standard: 9.5}
+    fallbacks: [vl-4b]
+
+  # ---------------------------------------------------------------- Text ---
+  text-9b:
+    role: text
+    engine: transformers
+    repo: Qwen/Qwen3.5-9B
+    revision: main
+    license: Apache-2.0
+    params_b: 9.4
+    provider: Alibaba Qwen
+    notes: >
+      BF16 native would need ~19 GB, so the enhanced profile runs a validated
+      4-bit NF4 quantisation. Exact-value fidelity is checked against the
+      higher-precision baseline in the evaluation suite.
+    variants:
+      enhanced:
+        dtype: bfloat16
+        load_in_4bit: true
+        bnb_4bit_quant_type: nf4
+        bnb_4bit_compute_dtype: bfloat16
+        bnb_4bit_use_double_quant: true
+        device_map: auto
+    vram_gb: {enhanced: 6.5}
+    fallbacks: [text-4b]
+
+  text-4b:
+    role: text
+    engine: transformers
+    repo: Qwen/Qwen3.5-4B
+    revision: main
+    license: Apache-2.0
+    params_b: 4.4
+    provider: Alibaba Qwen
+    notes: >
+      Native BF16. Default for the standard profile; quantised form is the
+      compact-profile choice.
+    variants:
+      standard:
+        dtype: bfloat16
+        device_map: auto
+      compact:
+        dtype: bfloat16
+        load_in_4bit: true
+        bnb_4bit_quant_type: nf4
+        bnb_4bit_compute_dtype: bfloat16
+        bnb_4bit_use_double_quant: true
+        device_map: auto
+    vram_gb: {standard: 9.3, compact: 3.2}
+    fallbacks: [text-2b]
+
+  text-2b:
+    role: text
+    engine: transformers
+    repo: Qwen/Qwen3.5-2B
+    revision: main
+    license: Apache-2.0
+    params_b: 2.2
+    provider: Alibaba Qwen
+    notes: Emergency text fallback for very tight allocation.
+    variants:
+      compact:
+        dtype: bfloat16
+        device_map: auto
+    vram_gb: {compact: 5.2}
+    fallbacks: []
+
+  # ------------------------------------------------------------- Verifier --
+  # Deliberately a different family from the composing model so that the
+  # verification pass is not the same system grading its own homework.
+  verify-3b:
+    role: verify
+    engine: transformers
+    repo: HuggingFaceTB/SmolLM3-3B
+    revision: main
+    license: Apache-2.0
+    params_b: 3.1
+    provider: Hugging Face
+    notes: >
+      Independent instruct model used for claim-level cross-checking and for
+      the "did we omit something critical" pass. Never used to author prose.
+    variants:
+      compact: {dtype: bfloat16, device_map: auto}
+      standard: {dtype: bfloat16, device_map: auto}
+      enhanced: {dtype: bfloat16, device_map: auto}
+    vram_gb: {compact: 6.3, standard: 6.3, enhanced: 6.3}
+    fallbacks: []
+
+# Profile -> role -> model key.
+assignments:
+  compact:
+    asr: whisper-large-v3
+    vision: vl-qwen35-4b
+    text: text-4b
+    verify: verify-3b
+  standard:
+    asr: whisper-large-v3
+    vision: vl-gemma-12b
+    text: text-4b
+    verify: verify-3b
+  enhanced:
+    asr: whisper-large-v3
+    vision: vl-8b
+    text: text-9b
+    verify: verify-3b
