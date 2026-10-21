@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv*/
+.pytest_cache/
+.mypy_cache/
+
+# Data and generated artifacts (never publish)
+data/
+.cache/
+.worktrees/
+v9z4-work/
+*.sqlite3
+*.sqlite3-*
+*.wal
+*.shm
+*.log
+*.zip
+*.gguf
+*.bin
+*.pt
+*.safetensors
+models/
+downloads/
+videos/
+frames/
+articles/
+exports/
+
+# Personal and local
+.env
+.env.local
+*.env
+config/inference.json
+config/inference_status.json
+secrets/
+private/
+
+# Large research archives
+research/
+eval/output/
+eval/*.zip
+v9review/
+*.mp4
+*.webm
+*.wav
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
