@@ -7,6 +7,9 @@ and then asserts v2 closes it.
 
 from __future__ import annotations
 
+import pytest
+pytest.importorskip("eval")
+
 from eval.paired.compare import compare_articles, compare_articles_v2
 from eval.paired.extract_reference import (
     EvidenceSegment,

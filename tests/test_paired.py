@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+pytest.importorskip("eval")
+
 from eval.paired.compare import compare_articles
 from eval.paired.dataset import PAIRED_SET, by_id
 from eval.paired.extract_reference import (

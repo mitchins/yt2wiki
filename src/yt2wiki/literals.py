@@ -23,7 +23,7 @@ UNITS = (
     "V|VDC|VAC|mA|A|rpm"
 )
 MEASURE_RE = re.compile(
-    rf"(?<![\w.])(\d+(?:[.,]\d+)?)\s*({UNITS})\b(?![\w])"
+    rf"(?<![\w.])(\d+(?:[.,]\d+)?)\s*({UNITS})(?![\w])"
 )
 PORT_RE = re.compile(r"(?<![\w.])port\s*[:=]?\s*(\d{2,5})(?!\d)(?!\.\d)", re.IGNORECASE)
 IP_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")

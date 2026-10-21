@@ -187,7 +187,8 @@ def test_vision_projectors_are_model_specific():
     are different bytes; the registry must resolve distinct files."""
     import yaml
     from pathlib import Path
-    reg = yaml.safe_load(open("config/models.yaml"))
+    reg_path = Path(__file__).resolve().parents[1] / "config" / "models.yaml"
+    reg = yaml.safe_load(reg_path.read_text(encoding="utf-8"))
     q = reg["models"]["vl-qwen35-4b"]["variants"]["compact"]
     g = reg["models"]["vl-gemma-12b"]["variants"]["standard"]
     assert q["mmproj_file"] != g["mmproj_file"]

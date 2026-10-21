@@ -121,10 +121,11 @@ class RemoteOpenAIBackend(BaseBackend):
         payload: dict[str, Any] = {"messages": msgs, "max_tokens": max_new_tokens, "temperature": temperature}
         if self.model_name:
             payload["model"] = self.model_name
-        data = self._post(payload)
         try:
+            data = self._post(payload)
             return (data["choices"][0]["message"]["content"] or "").strip()
-        except Exception:
+        except Exception:  # noqa: BLE001 - ranking is advisory
+            log.warning("remote rank_images failed", exc_info=True)
             return ""
 
     def describe_batch(self, images: Sequence[Any], prompt: str, *, max_new_tokens: int = 120, temperature: float = 0.0, system: str | None = None, batch_size: int = 4) -> list[str]:

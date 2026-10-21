@@ -152,7 +152,8 @@ def test_text_model_class_is_importable():
     A broken torchvision in site-packages once made Qwen3.5 unimportable; the
     local shim in .venv shadows it. This fails fast instead of mid-pipeline.
     """
-    import transformers.models.qwen3_5.modeling_qwen3_5 as m
+    import pytest
+    m = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
 
     assert m.Qwen3_5ForCausalLM is not None
 

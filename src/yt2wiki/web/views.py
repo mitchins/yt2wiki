@@ -205,10 +205,10 @@ def _snippet_html(snip: str) -> str:
 
     if not snip:
         return ""
-    text = html.escape(snip)
-    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", snip)
     text = re.sub(r"\(https?://[^)\s]*\)", "", text)
     text = re.sub(r"[#*`>]+", "", text)
+    text = html.escape(text)
     text = text.replace("[[", "<mark>").replace("]]", "</mark>")
     return " ".join(text.split())
 

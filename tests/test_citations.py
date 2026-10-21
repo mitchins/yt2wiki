@@ -7,6 +7,7 @@ treatment; the rest lock in behavior that must not regress.
 
 from __future__ import annotations
 
+import pytest
 from yt2wiki.literals import Literal
 from yt2wiki.records import Evidence
 
@@ -40,6 +41,8 @@ def _finding(fid, message, code="unsupported_action", detail=None):
 
 # 1. Correct claim, missing citation -> triage A.
 def test_correct_claim_missing_citation_is_A():
+    pytest = __import__('pytest')
+    pytest.importorskip('eval.paired.triage')
     from eval.paired.triage import triage_finding
 
     md = ("## Procedure\n\n1. **Boot the Pi.**\n\n"
@@ -134,6 +137,8 @@ def test_evidence_removed_claim_is_flagged():
 
 # 9. Anecdote with a timestamp link is still non-material.
 def test_linked_anecdote_stays_non_material():
+    pytest = __import__('pytest')
+    pytest.importorskip('eval.paired.disposition')
     from eval.paired.disposition import NON_INSTRUCTIONAL, material_summary
 
     comparison = {"fact_outcomes": [

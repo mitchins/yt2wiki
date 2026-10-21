@@ -137,6 +137,7 @@ class TransformersLLM(BaseBackend):
 
     def chat_with_dump(self, messages, *, dump_path=None, **kwargs) -> Any:
         """chat_json that persists the raw reply for later failure analysis."""
+        retries = kwargs.pop("retries", 1)
         raw = self.chat(messages, **kwargs)
         if dump_path is not None:
             try:
@@ -147,7 +148,7 @@ class TransformersLLM(BaseBackend):
         try:
             return extract_json(raw)
         except ValueError:
-            if kwargs.pop("retries", 1) <= 0:
+            if retries <= 0:
                 raise
             strict = list(messages) + [{
                 "role": "user",

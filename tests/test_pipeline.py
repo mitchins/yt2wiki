@@ -66,10 +66,10 @@ def test_model_override_role_validation(tmp_path):
                       model_overrides={"nonsense": "text-4b"})
 
 
-def test_stage_tuning_keys_reference_real_knobs():
+def test_stage_tuning_keys_reference_real_knobs(tmp_path):
     from yt2wiki.config import Settings, Tuning
 
-    settings = Settings.load(data_dir="/tmp/yt2wiki-test", profile="standard")
+    settings = Settings.load(data_dir=tmp_path, profile="standard")
     available = set(Tuning().fingerprint_dict())
     for stage, keys in STAGE_TUNING_KEYS.items():
         assert stage in STAGES
@@ -108,7 +108,7 @@ def test_fts5_search_round_trip(env):
     assert rows and rows[0]["article_id"] == "a1"
 
 
-def test_json_dumps_handles_dataclasses_and_paths():
+def test_json_dumps_handles_dataclasses_and_paths(tmp_path):
     from dataclasses import dataclass
 
     from yt2wiki.db.schema import json_dumps
@@ -149,12 +149,12 @@ def test_service_upload_source_is_content_addressed(env, tmp_path):
     assert Path(stored["upload_path"]).is_file()
 
 
-def test_cancel_flag(env):
+def test_cancel_flag(env, tmp_path):
     _, db, service = env
     sid = _source(env[0], db)
     job = service.create_job(sid)
     assert not service.cancel_check(job)
-    assert service.request_cancel(job) is False or True
+    assert service.request_cancel(job) is False
     db.execute("UPDATE jobs SET state='running' WHERE job_id=?", (job,))
     assert service.request_cancel(job)
     assert service.cancel_check(job)
@@ -205,7 +205,7 @@ def test_transcript_stage_uses_supplied_manual_captions(tmp_path):
     ctx.current_stage = "inspect"
     inspect.run(ctx)
     ctx.current_stage = "transcribe"
-    transcript.run(ctx) if False else transcribe.run(ctx)
+    transcribe.run(ctx)
 
     decision = ctx.artifacts["transcript_source"]
     assert decision["mode"] == "captions"
@@ -301,12 +301,12 @@ def test_run_job_honours_stage_subset(env):
 # GPU headroom planning
 
 
-def test_headroom_prefers_a_card_that_fits():
+def test_headroom_prefers_a_card_that_fits(tmp_path):
     from yt2wiki.backends.headroom import plan
     from yt2wiki.config import Settings
     from yt2wiki.gpu import GpuSample
 
-    settings = Settings.load(data_dir="/tmp/yt2wiki-test", profile="standard")
+    settings = Settings.load(data_dir=tmp_path, profile="standard")
     gpus = [
         GpuSample(index=0, name="small-8GB", total_gb=8.0, used_gb=1.0, free_gb=7.0),
         GpuSample(index=1, name="big-16GB", total_gb=16.0, used_gb=1.0, free_gb=15.0),
@@ -321,20 +321,20 @@ def test_headroom_prefers_a_card_that_fits():
         assert info.ok
         assert info.reason == "ok"
 
-        settings_compact = Settings.load(data_dir="/tmp/yt2wiki-test", profile="compact")
+        settings_compact = Settings.load(data_dir=tmp_path, profile="compact")
         tiny = plan(settings_compact, "asr")
         assert tiny.device_index == 0
     finally:
         hr.nvidia_smi_gpus = original
 
 
-def test_headroom_caps_when_nothing_fits():
+def test_headroom_caps_when_nothing_fits(tmp_path):
     from yt2wiki.backends.headroom import plan, vram_budget_bytes
     from yt2wiki.config import Settings
     from yt2wiki.gpu import GpuSample
     import yt2wiki.backends.headroom as hr
 
-    settings = Settings.load(data_dir="/tmp/yt2wiki-test", profile="enhanced")
+    settings = Settings.load(data_dir=tmp_path, profile="enhanced")
     gpus = [GpuSample(index=0, name="busy-16GB", total_gb=16.0, used_gb=12.0, free_gb=4.0)]
     original = hr.nvidia_smi_gpus
     hr.nvidia_smi_gpus = lambda: gpus
@@ -347,14 +347,14 @@ def test_headroom_caps_when_nothing_fits():
     assert vram_budget_bytes(3.5) > 0
 
 
-def test_loader_reports_headroom_for_role():
+def test_loader_reports_headroom_for_role(tmp_path):
     from yt2wiki.backends.loader import ModelManager
     from yt2wiki.config import Settings
     from yt2wiki.gpu import GpuSample
     from types import SimpleNamespace
     import yt2wiki.backends.headroom as hr
 
-    settings = Settings.load(data_dir="/tmp/yt2wiki-test", profile="compact")
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
     manager = ModelManager(settings)
     gpus = [GpuSample(index=0, name="a", total_gb=8.0, used_gb=0.0, free_gb=8.0)]
     original = hr.nvidia_smi_gpus
@@ -443,7 +443,7 @@ def test_transcribe_fingerprint_ignores_procedure_artifact(tmp_path):
     assert ctx.stage_fingerprint("transcribe") == before
 
 
-def test_loader_retries_on_cuda_oom(monkeypatch):
+def test_loader_retries_on_cuda_oom(monkeypatch, tmp_path):
     from yt2wiki.config import Settings
     from yt2wiki.backends import loader as L
     from yt2wiki.backends.base import BaseBackend
@@ -471,7 +471,7 @@ def test_loader_retries_on_cuda_oom(monkeypatch):
             return self.report
 
     spec = ModelSpec(key="fake-text", role="text", engine="transformers", repo="r")
-    settings = Settings.load(data_dir="/tmp/yt2wiki-test", profile="compact")
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
     manager = L.ModelManager(settings)
     monkeypatch.setattr(manager, "build", lambda role, s: _Fake(f"{len(attempts)}"))
     monkeypatch.setattr(manager, "headroom_for",
@@ -485,13 +485,13 @@ def test_loader_retries_on_cuda_oom(monkeypatch):
     assert any(e.get("error", "").startswith("OOM on this card") for e in manager.load_log)
 
 
-def test_headroom_plan_can_exclude_a_device():
+def test_headroom_plan_can_exclude_a_device(tmp_path):
     from yt2wiki.backends.headroom import Headroom, plan
     from yt2wiki.config import Settings
     from yt2wiki.gpu import GpuSample
     import yt2wiki.backends.headroom as hr
 
-    settings = Settings.load(data_dir="/tmp/yt2wiki-test", profile="compact")
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
     gpus = [
         GpuSample(index=0, name="a", total_gb=8.0, used_gb=0.0, free_gb=8.0),
         GpuSample(index=1, name="b", total_gb=16.0, used_gb=0.0, free_gb=16.0),

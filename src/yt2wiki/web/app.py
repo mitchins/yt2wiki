@@ -435,7 +435,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         url = str(payload.get("url") or "").strip()
         if not url.startswith(("http://", "https://")):
             raise HTTPException(400, "Enter an http:// or https:// base URL first.")
-        result = inference.test_endpoint(url, str(payload.get("api_key_env") or "").strip())
+        result = inference.test_endpoint(url, str(payload.get("api_key_env") or "").strip(),
+                                         model=str(payload.get("model") or "").strip())
         name = str(payload.get("name") or "").strip().lower()
         if name and name in inference.load(settings.paths)["providers"]:
             inference.record_test(settings.paths, name, result)

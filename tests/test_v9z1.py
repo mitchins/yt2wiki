@@ -452,7 +452,8 @@ def _ocr_dict(words):
 
 
 def test_ocr_stats_prefers_richer_psm_pass(monkeypatch, tmp_path):
-    import pytesseract
+    pytesseract = pytest.importorskip("pytesseract")
+    pytest.importorskip("pytesseract"); import pytesseract
     from PIL import Image
     from yt2wiki.v9 import judge as J
     p = tmp_path / "f.png"
@@ -473,7 +474,8 @@ def test_ocr_stats_prefers_richer_psm_pass(monkeypatch, tmp_path):
 
 
 def test_ocr_stats_fail_closed_when_tesseract_fails(monkeypatch, tmp_path):
-    import pytesseract
+    pytesseract = pytest.importorskip("pytesseract")
+    pytest.importorskip("pytesseract"); import pytesseract
     from PIL import Image
     from yt2wiki.v9 import judge as J
     p = tmp_path / "f.png"

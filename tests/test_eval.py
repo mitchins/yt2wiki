@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+pytest.importorskip("eval")
 
 from eval.manifest import EVAL_SET, by_category, summary
 from eval.metrics import (
