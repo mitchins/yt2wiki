@@ -3,9 +3,9 @@
 **Tracking:** https://github.com/mitchins/yt2wiki/issues/8
 **PR:** https://github.com/mitchins/yt2wiki/pull/9 `fix/sonar-initial-findings`
 **Branch:** `fix/sonar-initial-findings` based on `origin/main` (`625aa2e93b89e86268e65b987dd0309cd62f219b`)
-**Commits:** `4c64955` (initial fix), `a7cf68b` (CodeRabbit review), `9401392` (empty trigger, discarded), plus `623...` history
+**Commits:** `4c64955` (initial fix), `a7cf68b` (CodeRabbit review), `97a90e6` (P0 upload isolation), `f4b145b` (final report), plus `623...` history
 **Sonar project:** `mitchins_yt2wiki` https://sonarcloud.io/dashboard?id=mitchins_yt2wiki&branch=main
-**GitHub Actions runs:** baseline `39766235084` (main failure), PR #9 `39772110677` (initial failure → `39772548251` PASSED after triage, `39773257247` latest with offload)
+**GitHub Actions runs:** baseline `39766235084` (main failure), PR #9 `39772110677` (initial failure → `39772548251` PASSED after triage, `39773257247` cancelled, `39856219920` PASSED P0 fix, `39773355741` docs, latest `39856219920`)
 **Date:** 2026-10-22
 
 ---
@@ -171,6 +171,8 @@ Gate D is documented, not applied — operator approval required.
 - **Isolation:** All edits on `fix/sonar-initial-findings-625` worktree, no `git stash` dirt applied to `main`, no deploy.
 
 **Stop conditions not triggered:** No high-risk fix requiring architecture change, no private credentials accessed, Sonar config understood from evidence, CI fork/Dependabot checks preserved (`if` condition unchanged), no broad refactoring.
+
+**P0 follow-up (PR #9 — Final Upload Data-Loss Correction, `97a90e6`):** Replaced `shutil.rmtree(dest.parent)` (shared `uploads/`) with `dest.unlink(missing_ok=True)` and `try/except` → `finally` so failed registrations also clean only their temp file. Verified with `tests/test_upload_isolation.py` (3 tests, 6 scenarios: A, B, dedup A, failure cleanup, media readability, dir persistence) — all 199 passed, Sonar `pullRequest 9` still `PASSED` (`new_coverage 96.3%`), CI `39856219920` green. S8707 disposition corrected to distinguish OS readability from application path authorisation. No Sonar threshold or `0.2.0` baseline change in this PR, per instruction. CodeRabbit review requested for the focused diff.
 
 ---
 
