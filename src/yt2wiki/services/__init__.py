@@ -30,38 +30,124 @@ class Service:
     # sources
     def create_youtube_source(self, url: str) -> str:
         sid = source_id_for_youtube(url)
-        existing = self.db.query_one("SELECT source_id FROM sources WHERE source_id=?", (sid,))
-        if existing:
-            return sid
-        self.db.execute(
-            """INSERT INTO sources(source_id, kind, origin_url, created_at, title, meta_json)
-               VALUES(?,?,?,?,?,?)""",
-            (sid, "youtube", url, time.time(), "pending acquisition", json_dumps({})),
-        )
+        # Race-safe: concurrent inserts for same sid must not raise 500 for legitimate duplicate.
+        import sqlite3
+
+        try:
+            self.db.execute(
+                """INSERT INTO sources(source_id, kind, origin_url, created_at, title, meta_json)
+                   VALUES(?,?,?,?,?,?)""",
+                (sid, "youtube", url, time.time(), "pending acquisition", json_dumps({})),
+            )
+        except sqlite3.IntegrityError:
+            # Another thread inserted the same source_id concurrently — idempotent.
+            pass
         return sid
 
     def create_upload_source(self, path: Path) -> str:
-        # S8707: validate CLI-supplied path before hashing / copying (sink is file_hash -> open)
+        # S8707: validate before hashing / copying (sink is file_hash -> open)
+        # Race-safe, idempotent registration for concurrent duplicate uploads.
+        import errno
+        import os
+        import shutil
+        import sqlite3
+        import uuid as _uuid
+
         p = Path(path)
         if not p.is_file():
             raise FileNotFoundError(f"upload source not found or not a file: {p}")
         sid = source_id_for_file(p)
-        existing = self.db.query_one("SELECT source_id FROM sources WHERE source_id=?", (sid,))
-        if existing:
-            return sid
+        expected_hash = sid.removeprefix("file-")
         stored = self.paths.upload_path(sid, p.name)
         stored.parent.mkdir(parents=True, exist_ok=True)
-        if p.resolve() != stored.resolve():
-            import shutil
 
-            # Stream the copy: never hold a whole video in memory.
-            shutil.copyfile(p, stored)
-        self.db.execute(
-            """INSERT INTO sources(source_id, kind, upload_path, created_at, title, meta_json)
-               VALUES(?,?,?,?,?,?)""",
-            (sid, "upload", str(stored), time.time(), p.name, json_dumps({})),
+        # Fast path: if source already registered and its file is valid, dedup.
+        existing = self.db.query_one(
+            "SELECT source_id, upload_path FROM sources WHERE source_id=?", (sid,)
         )
-        return sid
+        if existing and existing["upload_path"]:
+            existing_path = Path(existing["upload_path"])
+            try:
+                if existing_path.is_file() and file_hash(existing_path) == expected_hash:
+                    return sid
+            except (FileNotFoundError, OSError):
+                pass
+            # If the canonical file is missing/corrupt, fall through to ensure `stored` is valid.
+            # For concurrent duplicates with same filename, `stored == existing_path`, so recreating `stored` restores it.
+
+        # If stored already exists and is valid, ensure DB and return (handles file-race without DB race).
+        if stored.exists():
+            try:
+                if file_hash(stored) == expected_hash:
+                    try:
+                        self.db.execute(
+                            """INSERT INTO sources(source_id, kind, upload_path, created_at, title, meta_json)
+                               VALUES(?,?,?,?,?,?)""",
+                            (sid, "upload", str(stored), time.time(), p.name, json_dumps({})),
+                        )
+                    except sqlite3.IntegrityError:
+                        pass
+                    return sid
+                else:
+                    stored.unlink(missing_ok=True)
+            except (FileNotFoundError, OSError):
+                pass
+
+        # Need to atomically publish `p` -> `stored` without overwriting a valid winner and without leaving orphans.
+        tmp = stored.with_name(f".tmp.{_uuid.uuid4().hex}.{stored.name}")
+        try:
+            shutil.copyfile(p, tmp)
+            try:
+                if file_hash(tmp) != expected_hash:
+                    tmp.unlink(missing_ok=True)
+                    raise OSError(f"temp file hash mismatch for {sid}")
+            except FileNotFoundError:
+                raise OSError(f"temp file vanished for {sid}") from None
+            # Atomic publish: hard-link fails if exists (no overwrite), falls back to rename.
+            try:
+                os.link(tmp, stored)
+            except FileExistsError:
+                pass
+            except OSError as e:
+                if e.errno == errno.EEXIST:
+                    pass
+                else:
+                    if not stored.exists():
+                        try:
+                            tmp.rename(stored)
+                        except FileExistsError:
+                            pass
+                        except OSError:
+                            if stored.exists():
+                                pass
+                            else:
+                                raise
+            if not stored.exists() and tmp.exists():
+                try:
+                    tmp.rename(stored)
+                except FileExistsError:
+                    pass
+                except OSError:
+                    pass
+            if not stored.exists():
+                raise OSError(f"failed to publish upload {stored}")
+            # DB insert: only IntegrityError is swallowed for legitimate duplicate.
+            try:
+                self.db.execute(
+                    """INSERT INTO sources(source_id, kind, upload_path, created_at, title, meta_json)
+                       VALUES(?,?,?,?,?,?)""",
+                    (sid, "upload", str(stored), time.time(), p.name, json_dumps({})),
+                )
+            except sqlite3.IntegrityError:
+                pass
+            return sid
+        finally:
+            try:
+                if tmp.exists():
+                    # Hard-link case: tmp and stored share inode; unlinking tmp keeps stored.
+                    tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def get_source(self, source_id: str) -> dict[str, Any] | None:
         row = self.db.query_one("SELECT * FROM sources WHERE source_id=?", (source_id,))

@@ -139,12 +139,10 @@ def test_upload_failure_cleans_temp_without_deleting_others(tmp_path, monkeypatc
 
     monkeypatch.setattr(Service, "create_upload_source", failing)
 
-    # Attempt upload that will fail
+    # Attempt upload that will fail — must return error, not spurious 200 success
     r_fail = _upload(client, "fail.mp4", b"fail-content")
-    # The web handler will propagate the exception as 500; we just check that
-    # the temp file was cleaned and other files remain.
-    # Depending on FastAPI error handling, it may be 500
-    assert r_fail.status_code in (500, 200), r_fail.text  # 500 expected
+    assert r_fail.status_code >= 400, f"expected error for failed registration, got {r_fail.status_code}: {r_fail.text}"
+    assert r_fail.status_code in (400, 500), r_fail.text
     # Upload dir must still exist and contain the original files
     assert uploads_dir.is_dir(), "uploads dir must persist after failure"
     after = {p.name for p in uploads_dir.iterdir() if p.is_file()}

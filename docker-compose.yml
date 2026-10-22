@@ -1,0 +1,113 @@
+services:
+  yt2wiki:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # For Portainer: use prebuilt image if you prefer: image: ghcr.io/mitchins/yt2wiki:0.1.0
+    image: yt2wiki:0.1.0
+    container_name: yt2wiki
+    # Default: bind to host loopback only. For LAN behind an authenticated proxy, change to "0.0.0.0:8080:8000" and put a proxy in front.
+    ports:
+      - "127.0.0.1:8080:8000"
+    volumes:
+      - yt2wiki-data:/data                 # SQLite, uploads, frames, articles, assets, revisions, config
+      # For migration-free reuse of an existing library, replace the named volume with a bind mount:
+      # - /home/mitch/.local/share/yt2wiki:/data
+    environment:
+      # All settings are env-driven; secrets via YT2WIKI_ env names, not hardcoded.
+      - YT2WIKI_HOME=/data
+      # Optional: choose profile (compact fits 8 GB, standard 12–16 GB). Default is standard.
+      - YT2WIKI_PROFILE=compact
+      # Example external providers (set via host env or an env_file, not in compose):
+      # - YT2WIKI_OPENAI_API_KEY=...  # name of env var that holds the key, kept out of compose/logs
+      # Logging / cache inside container
+      - HF_HOME=/data/models
+    restart: unless-stopped
+    # Health and bounded logs
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # No GPU reservation — the web service never needs NVIDIA to start or serve the library.
+    # It serves the library and fails jobs explicitly when inference is offline.
+
+  # Optional visual sidecar: Qwen3.5-4B Q4_K_M + F16 projector, V9-Z4 qualified.
+  # Enable with: docker compose --profile llama up -d
+  # Or Portainer: select the "llama" profile when deploying the stack.
+  llama:
+    # Pinned upstream llama.cpp server where practical. Pin a digest after `docker pull`:
+    #   docker pull ghcr.io/ggerganov/llama.cpp:server
+    #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/ggerganov/llama.cpp:server
+    # Then replace `image:` with the digest form, e.g.:
+    #   image: ghcr.io/ggerganov/llama.cpp@sha256:...
+    image: ghcr.io/ggerganov/llama.cpp:server
+    container_name: yt2wiki-llama
+    profiles: ["llama"]
+    volumes:
+      - yt2wiki-models:/models    # persistent GGUF directory, also usable via YT2WIKI_HOME/models
+      - yt2wiki-data:/data:ro     # sidecar does not need write to library
+    # Models must be staged beforehand under /models; the base service never auto-downloads large weights.
+    # Expected files (Qwen3.5-4B qualified):
+    #   /models/Qwen3.5-4B-Q4_K_M.gguf
+    #   /models/mmproj-F16.gguf   (or gguf/mmproj-F16.gguf per HF layout)
+    command:
+      - --model
+      - /models/Qwen3.5-4B-Q4_K_M.gguf
+      - --mmproj
+      - /models/mmproj-F16.gguf
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8081"
+      - --ctx-size
+      - "16384"
+      - --n-gpu-layers
+      - "99"
+      - --reasoning
+      - "off"
+      - --reasoning-budget
+      - "0"
+      # Production image-token budget (V9-Z4 384); 8-image ranking must fit in 16384.
+      # Adjust via env if needed.
+      - --temp
+      - "0.05"
+    ports:
+      - "127.0.0.1:8081:8081"
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8081/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  yt2wiki-data:
+    name: yt2wiki-data
+  yt2wiki-models:
+    name: yt2wiki-models
+
+networks:
+  default:
+    name: yt2wiki
