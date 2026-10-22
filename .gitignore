@@ -54,3 +54,11 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# CI reports / scanner state
+.coverage
+.coverage.*
+coverage.xml
+junit.xml
+htmlcov/
+.scannerwork/
