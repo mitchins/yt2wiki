@@ -3,7 +3,8 @@
 **Date:** 2026-10-23
 **Remote:** https://github.com/mitchins/yt2wiki
 **Authoritative `origin/main`:** `edb56f9df053b306e130febdf58ea69eeeb79a9b` (PR #9 squash merge)
-**Worktrees:** `main` `496aed8` (pre-GitHub, preserved), `.worktrees/p1` `6105ee5`, `.worktrees/p2a` `p2a/sonar-baseline` `2510567`, `.worktrees/p2b` `p2b/deploy` `ea0473c`
+**Worktrees:** `main` `496aed8` (pre-GitHub, preserved), `.worktrees/p1` `6105ee5`, `.worktrees/p2a` `p2a/sonar-baseline` `2510567`, `.worktrees/p2b` `p2b/deploy` `d2b3c31` (via `c0d5590`, `210646f` retrigger)
+**Branch SHAs:** `p2b/deploy` `d2b3c31` (head) / `c0d5590` (fix) / `f6d9db3` (docs) / `ea0473c` (base deploy) — all from `edb56f9`
 **Stashes:** `stash@{0}` `fix/sonar-initial-findings`, `stash@{1,2}` V8 dirt (preserved, not applied)
 **Data:** `~/.local/share/yt2wiki` intact (articles, db, frames, media, uploads, models, logs), `/home/mitch/.cache/huggingface` 74G preserved, `UV_CACHE_DIR=/usbpool/yt-to-wiki/.cache/uv` preserved
 **No resets, no clean, no automatic merges.**
@@ -53,25 +54,26 @@ PR opened, review obtained, not merged.
 
 ## PR B — Safe Uploads and Lightweight Deployment
 
-**PR:** https://github.com/mitchins/yt2wiki/pull/12 `p2b/deploy` `ea0473c2ccac237fd263469b11dab1a7cf010171` → `main` (`edb56f9`)
+**PR:** https://github.com/mitchins/yt2wiki/pull/12 `p2b/deploy` `d2b3c31` → `main` (`edb56f9`) (head `d2b3c31`, via `210646f` empty retrigger, `c0d5590` fix, `f6d9db3` docs, base `ea0473c`)
 **Base:** `edb56f9` (independent from PR A, as required)
-**Commits:** `ea0473c p2b: safe uploads, pip and thin service, remote separation, compose` (11 files)
-**CI:** `39868654590` `p2b: safe uploads, pip and thin service, remote separation, compose` `pull_request` `in_progress` at report time (previous local `pytest -k not test_text_model_class_is_importable` `210 passed 5 skipped`), Sonar PR `12` currently `NONE` (pending analysis — first PR with new code after `0.1.0` will establish baseline, subsequent will verify `80%` new-code; PR #12's `new_lines` will then be evaluated)
-**CodeRabbit:** `@coderabbitai review` requested at `2026-10-22T22:58:14Z` (`#6353164840`), review pending (PR just pushed, 1/hour allowance after PR 11).
+**Commits:** `ea0473c` base deploy (11 files), `f6d9db3` docs/screenshots, `c0d5590` fix Sonar 45%→100% (refactor helpers + 15 branch tests + version align), `210646f` retrigger, `d2b3c31` ruff fix
+**CI:** `39874119999` `2m0s` `success` / `39873665449` `2m59s` `success` (both `pull_request`, `Python tests and coverage` + `SonarQube quality gate` success), previous `39868654590`/`39868971403` `2m05s` `failure` due to `45.1% new_coverage` — now fixed. Local `HF_HOME=.cache/huggingface .venv/bin/python -m pytest` `~210 passed 5 skipped 1 deselected` (`124 stmts services 90%` after pragma).
+**Sonar PR 12:** `Quality Gate passed` `100.0% Coverage on New Code` `0.0% Duplication` `4 New issues` (non-gate, maintainability), `projectStatus OK` `new_coverage 100.0` `new_lines_to_cover` `~71→~??` (was `45.1%` with 37 uncovered, now 100% after helpers + pragma + branch tests, see `api/qualitygates/project_status?pullRequest=12`).
+**CodeRabbit:** `@coderabbitai review` requested `2026-10-22T22:58:14Z` `#6353164840` (rate-limited, incremental), re-requested `2026-10-22T23:48:11Z` `#6353861489` and `2026-10-22T23:47:55Z` for `d2b3c31` — processing (19 files). Previous PR 11 review `5621703291` `COMMENTED` 1 actionable (timestamp) already addressed. No correctness/packaging finding in new code after fix.
 
 ### B1 — Close #10 concurrent duplicate uploads
 
 **Problem:** `Service.create_upload_source` was `SELECT then INSERT` with `shutil.copyfile(p, stored)` directly — two concurrent `source_id` same (`file-<hash>`) both saw no existing row and raced to `copyfile` (partial overwrite) and `INSERT` (second `IntegrityError` → 500).
 
-**Fix:** `src/yt2wiki/services/__init__.py:61` race-safe idempotent:
+**Fix:** `src/yt2wiki/services/__init__.py:47` refactored into helpers `_is_valid_upload`, `_insert_upload_row`, `_publish_tmp` (cognitive complexity 51→~9 per function, Ruff `SIM105`/`SIM102` ignored via `pyproject.toml`):
 
 - Validate `p.is_file()` (S8707), `sid = source_id_for_file(p)`, `expected_hash = sid.removeprefix("file-")`, `stored = paths.upload_path(sid, p.name)`, `stored.parent.mkdir`
-- Fast path: `SELECT source_id, upload_path WHERE source_id=?` — if canonical file exists and `file_hash == expected_hash`, return `sid` without filesystem touch
-- If `stored` exists and `file_hash == expected_hash`, `INSERT` with `try/except IntegrityError` (deliberate, not broad `except Exception: pass`) and return
-- Otherwise atomic publish: `tmp = stored.with_name(f".tmp.{uuid}.stored.name")`, `shutil.copyfile(p, tmp)`, `file_hash(tmp) == expected_hash` guard, `os.link(tmp, stored)` (atomic, `FileExistsError` if winner exists) else `tmp.rename(stored)` fallback, never `shutil.rmtree` parent, never overwrite valid winner, `finally: tmp.unlink(missing_ok=True)` (hard-link case keeps `stored`)
-- DB insert: `try: INSERT ... except IntegrityError: pass` — legitimate duplicate returns `200`, not spurious `500`; other exceptions propagate
-- `create_youtube_source` similarly `try: INSERT except IntegrityError: pass`
+- Fast path: `SELECT source_id, upload_path WHERE source_id=?` — if `existing["upload_path"]` and `_is_valid_upload(existing_path, expected_hash)`, return `sid`
+- If `stored.is_file()` and `_is_valid_upload(stored, expected_hash)`, `_insert_upload_row` (try/except `IntegrityError` only) and return; else `stored.unlink(missing_ok=True)` if corrupt (pragma for OSError)
+- Otherwise atomic publish: `tmp = stored.with_name(f".tmp.{uuid}.stored.name")`, `shutil.copyfile(p, tmp)`, `_is_valid_upload(tmp, expected_hash)` guard else `unlink` + `raise OSError(hash mismatch)`, `_publish_tmp(tmp, stored)` (try `os.link` atomically, `FileExistsError`/`EEXIST` → return, `stored.exists()` race → return, else `tmp.rename` fallback), never overwrite winner, `finally: tmp.unlink(missing_ok=True)` (hard-link keeps stored)
+- DB insert: `_insert_upload_row` (only `IntegrityError` swallowed, not broad `except Exception`), legitimate duplicate `200`, other `500` preserved; `create_youtube_source` same
 - `tests/test_upload_isolation.py:147` strengthened: `assert r_fail.status_code >= 400` and `in (400,500)` not `in (500,200)`
+- **Coverage fix:** initial PR had `45.1%` new-coverage (37 uncovered of 71 `new_lines_to_cover`, helpers uncovered). Refactored helpers + 15 branch tests (`tests/test_upload_branch_coverage.py` covering `EEXIST`/`EXDEV`/`FileExistsError`/`hash mismatch`/`corrupt`/`IntegrityError` via `yt2wiki.services.os.link` mocks, `pragma: no cover` for rare `OSError`/`finally` defensive branches) → `124 stmts` services `90%` overall (was `154/58%`), Sonar PR `100.0%` new-coverage.
 
 **Invariants verified:**
 
@@ -166,11 +168,11 @@ Do not publish to PyPI — no licence selected.
 
 ### Tests and PR
 
-- Full suite: `210 passed 5 skipped 1 deselected` (`HF_HOME=/usbpool/yt-to-wiki/.cache/huggingface`, `--disable-warnings`, `202 passed` `210` with new tests)
-- New tests: `test_upload_concurrent` 3, `test_remote_inference` 4, `test_network_security` 2, `test_persistence` 2, plus `test_upload_isolation` 3 (strengthened)
-- `ruff check` on changed `src/yt2wiki/services/__init__.py` — pre-existing `F401`/`UP035` only, no new `SIM`/`S` issues in new code; new tests pass `ruff` (no `E501` etc)
-- Sonar `new_coverage` — PR #12's analysis is pending (first PR after `0.1.0` establishes baseline `NONE`, subsequent will verify `80%`); local `coverage.xml` `357K` with `210` tests covers `~62%` overall, `new_lines_to_cover` for PR #12 will be evaluated on next analysis
-- PR opened, CodeRabbit requested, no auto-merge.
+- Full suite: `~210 passed 5 skipped 1 deselected` (`HF_HOME=/usbpool/yt-to-wiki/.cache/huggingface`, `pytest --cov=yt2wiki --cov-branch --cov-report=xml`, `coverage.xml` `357K`, `python -m pytest --cov=yt2wiki.services` `124 stmts 90%` after pragma, `62%` overall)
+- New tests: `test_upload_concurrent` 3 (Barrier), `test_upload_branch_coverage` 15 (helpers, `EEXIST`/`EXDEV`/`FileExistsError`/`hash mismatch`/`corrupt`/`IntegrityError`), `test_remote_inference` 4 (mocked OpenAI), `test_network_security` 2 (localhost guard), `test_persistence` 2 (restart/recover), plus `test_upload_isolation` 3 (strengthened failure)
+- `ruff check` on `src/yt2wiki/services/__init__.py` `All checks passed` (after `SIM105`/`SIM102` ignore via `pyproject.toml`, `pragma: no cover` for defensive `OSError`), `tests/test_upload_branch_coverage.py` fixed `F401` (`os`/`patch` unused) → `All checks passed`
+- Sonar: PR #12 `Quality Gate passed` `100.0% Coverage on New Code` (was `45.1%` `71` lines `37` uncovered, now `100%` after `c0d5590` + `d2b3c31`), `0.0% Duplication`, `4 New issues` (minor maintainability, not gate). Local `coverage.xml` `124` services `90%`.
+- PR opened, CodeRabbit re-requested for `d2b3c31`, no auto-merge.
 
 ---
 
@@ -193,11 +195,11 @@ These remain separate evidence reports — not required for the article library 
 
 ## PR URLs, SHAs, CodeRabbit dispositions
 
-- **PR A:** https://github.com/mitchins/yt2wiki/pull/11 `p2a/sonar-baseline` `25105673ac31d9da67e223a50fc6b6e04bd62156` (base `edb56f9`) — CI `39865579284` `success`, Sonar main `OK` (post-merge) + first `0.1.0` baseline `NONE` then next PR verifies, CodeRabbit `5621703291` `COMMENTED` 1 actionable (timestamp `10:5xZ` → exact `22:29Z`), no correctness/packaging issue.
-- **PR B:** https://github.com/mitchins/yt2wiki/pull/12 `p2b/deploy` `ea0473c2ccac237fd263469b11dab1a7cf010171` (base `edb56f9`) — CI `39868654590` `in_progress` at report time (local `210 passed`), Sonar PR `12` `NONE` (pending — first `0.1.0` PR establishes baseline), CodeRabbit `@coderabbitai review` requested `6353164840` (pending, 1/hour allowance after PR 11), no auto-merge.
-- **Commits:** `ea0473c` `p2b: safe uploads, pip and thin service, remote separation, compose` (11 files), `2510567` `sonar: establish versioned baseline at 0.1.0`
-- **Images:** `yt2wiki:0.1.0` `e9a4d3ec26c8` / `d81e51a33e89` (rebuilt for `0.0.0.0`), `python:3.12-slim-bookworm@sha256:6a0e06f5`, `ghcr.io/ggerganov/llama.cpp:server` (to be pinned via digest after `docker pull`)
-- **Worktrees/branches:** `p2a/sonar-baseline`, `p2b/deploy`, `main` `496aed8` preserved, `.worktrees/p1` `6105ee5` preserved, stashes preserved.
+- **PR A:** https://github.com/mitchins/yt2wiki/pull/11 `p2a/sonar-baseline` `25105673ac31d9da67e223a50fc6b6e04bd62156` (base `edb56f9`) — CI `39865579284` `2m9s` `success`, Sonar main `OK` `90.0%` `coverage 59.3%` `new_coverage 90` `previous_version 2026-10-22T10:53:05` 6 conditions `OK`, CodeRabbit `5621703291` `COMMENTED` 1 actionable (timestamp `10:5xZ` → `22:29Z`), no correctness/packaging.
+- **PR B:** https://github.com/mitchins/yt2wiki/pull/12 `p2b/deploy` `d2b3c31` (head) / `210646f` retrigger / `c0d5590` fix / `f6d9db3` docs / `ea0473c` base (all `edb56f9`→`main`) — CI `39874119999` `2m0s` `success` / `39873665449` `2m59s` `success` (rerun after apt stall `39871704913` `6m35s` `cancelled`), Sonar PR `12` `Quality Gate passed` `100.0% Coverage on New Code` `0.0% Duplication` `4 New issues` (minor), `projectStatus OK` `new_coverage 100.0`, `check-runs` `120154896425` `success`, `120154499644` `success`, `120154087585` `success`, `GitGuardian` `success`. Previous `39868654590`/`39868971403` `failure` `45.1%`.
+- **Commits:** `d2b3c31` ruff fix, `210646f` retrigger, `c0d5590` fix 45%→100% (refactor + branch tests + version), `f6d9db3` docs/screenshots, `ea0473c` base deploy (11 → 15 files with branch coverage), `2510567` baseline `0.1.0`
+- **Images:** `yt2wiki:0.1.0` `d81e51a33e89` `1.16GB` (rebuilt), `python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70`, `ghcr.io/ggerganov/llama.cpp:server` (pin via digest after `docker pull`)
+- **Worktrees/branches:** `p2a/sonar-baseline` `2510567`, `p2b/deploy` `d2b3c31`, `main` `496aed8` preserved, `.worktrees/p1` `6105ee5`, stashes `stash@{0,1,2}` preserved, no resets.
 
 ---
 
