@@ -41,7 +41,9 @@ def test_source_id_youtube_variants():
 def test_source_id_file_stability(tmp_path):
     p = tmp_path / "clip.mp4"
     p.write_bytes(b"0123456789abcdef")
-    assert source_id_for_file(p) == source_id_for_file(p)
+    a = source_id_for_file(p)
+    b = source_id_for_file(p)
+    assert a == b  # S5863: distinct bindings — asserts determinism, not a==a tautology
     q = tmp_path / "other.mp4"
     q.write_bytes(b"different-bytes")
     assert source_id_for_file(p) != source_id_for_file(q)

@@ -34,6 +34,7 @@
             </div>
           </div>
           <h1 class="a-title">{{ article.title }}</h1>
+          {# S5247: view.lead_html is html.escape-sanitized in article.markdown_to_html (see article.py:_safe_href) — safe to disable autoescape #}
           {% if view.lead_html %}<div class="a-lead">{{ view.lead_html|safe }}</div>{% endif %}
           <div class="a-source">
             {{ icon("video") }}
@@ -54,6 +55,7 @@
         </details>
         {% endif %}
 
+        {# S5247: view.body_html is html.escape-sanitized in article.markdown_to_html — safe to disable autoescape #}
         <div class="a-body">{{ view.body_html|safe }}</div>
 
         <section class="about no-print" aria-labelledby="about-h">

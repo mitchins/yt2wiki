@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import anyio
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -344,16 +345,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dest = settings.paths.upload_path(upload_id, Path(file.filename).name)
         dest.parent.mkdir(parents=True, exist_ok=True)
         size = 0
-        with open(dest, "wb") as fh:
+        async with await anyio.open_file(dest, "wb") as fh:  # S7493: async file API
             while chunk := await file.read(1 << 20):
                 size += len(chunk)
-                fh.write(chunk)
+                await fh.write(chunk)
         if size == 0:
             dest.unlink(missing_ok=True)
             raise HTTPException(400, "That file is empty.")
-        sid = service.create_upload_source(dest)
-        if service.get_source(sid).get("upload_path") != str(dest):
-            shutil.rmtree(dest.parent, ignore_errors=True)  # stored under its source id
+        # Hashing and copying can block the event loop for large videos; offload.
+        # Clean up only the temporary upload file, never the shared uploads/ directory.
+        try:
+            sid = await anyio.to_thread.run_sync(lambda: service.create_upload_source(dest))
+        except Exception:
+            dest.unlink(missing_ok=True)
+            raise
+        else:
+            # Deduplication or successful copy: dest is a temp file with an upload_id name,
+            # stored is the canonical content-addressed file. Remove only the temp file.
+            try:
+                stored = service.get_source(sid).get("upload_path") if sid else None
+            except Exception:
+                stored = None
+            if stored != str(dest):
+                dest.unlink(missing_ok=True)
         return enqueue(sid, profile)
 
     def retry_job(job_id: str) -> str:
@@ -753,7 +767,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/gpu")
     def api_gpu() -> Any:
-        from ..gpu import nvidia_smi_gpus, cuda_available
+        from ..gpu import cuda_available, nvidia_smi_gpus
 
         return {
             "cuda": cuda_available(),
@@ -832,15 +846,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 # ----------------------------------------------------------------------
 class _RunnerHolder:
-    instance: "JobRunner | None" = None
+    instance: JobRunner | None = None
 
 
 def _save_article_markdown(settings, db, article_id: str, markdown: str, note: str) -> int:
-    from ..article import markdown_to_html, render_html
-    from ..article import Article
-    from ..services import new_id
-
+    from ..article import Article, markdown_to_html, render_html
     from ..reader import split_markdown
+    from ..services import new_id
 
     row = db.query_one("SELECT * FROM articles WHERE article_id=?", (article_id,))
     title = split_markdown(markdown).title or row["title"]
@@ -1096,7 +1108,7 @@ def _move_image(markdown: str, frame_id: str, heading: str) -> str:
 
 
 def _frame_out(row: Any) -> dict[str, Any]:
-    payload = json.loads(row["payload_json"] or "{}") if row["payload_json"] else {}
+    payload = json.loads(row["payload_json"]) if row["payload_json"] else {}  # S2583: remove redundant fallback
     return {
         "frame_id": row["frame_id"],
         "t": row["t"],
@@ -1174,7 +1186,7 @@ class JobRunner:
     def __init__(self, service: Service):
         self.service = service
         self.settings = service.settings
-        self._queue: "queue.Queue[tuple[str, bool]]" = queue.Queue()
+        self._queue: queue.Queue[tuple[str, bool]] = queue.Queue()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.current: str | None = None

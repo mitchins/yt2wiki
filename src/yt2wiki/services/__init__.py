@@ -41,21 +41,25 @@ class Service:
         return sid
 
     def create_upload_source(self, path: Path) -> str:
-        sid = source_id_for_file(path)
+        # S8707: validate CLI-supplied path before hashing / copying (sink is file_hash -> open)
+        p = Path(path)
+        if not p.is_file():
+            raise FileNotFoundError(f"upload source not found or not a file: {p}")
+        sid = source_id_for_file(p)
         existing = self.db.query_one("SELECT source_id FROM sources WHERE source_id=?", (sid,))
         if existing:
             return sid
-        stored = self.paths.upload_path(sid, path.name)
+        stored = self.paths.upload_path(sid, p.name)
         stored.parent.mkdir(parents=True, exist_ok=True)
-        if path != stored:
+        if p.resolve() != stored.resolve():
             import shutil
 
             # Stream the copy: never hold a whole video in memory.
-            shutil.copyfile(path, stored)
+            shutil.copyfile(p, stored)
         self.db.execute(
             """INSERT INTO sources(source_id, kind, upload_path, created_at, title, meta_json)
                VALUES(?,?,?,?,?,?)""",
-            (sid, "upload", str(stored), time.time(), path.name, json_dumps({})),
+            (sid, "upload", str(stored), time.time(), p.name, json_dumps({})),
         )
         return sid
 
