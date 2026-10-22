@@ -167,8 +167,12 @@ class Service:
     def run_job(self, job_id: str, **kwargs) -> dict[str, Any]:
         from ..pipeline import run_job
 
+        row = self.db.query_one("SELECT profile, config_json FROM jobs WHERE job_id=?", (job_id,))
+        cfg = json_loads(row["config_json"] if row else None, {}) or {}
         settings = Settings.load(
-            data_dir=self.paths.root, profile=self.settings.profile,
+            data_dir=self.paths.root,
+            profile=(row["profile"] if row else None) or self.settings.profile,
             device_index=self.settings.device_index, registry=self.settings.registry_path,
+            model_overrides=cfg.get("model_overrides") or None,
         )
         return run_job(job_id, self.db, settings, cancel_check=lambda: self.cancel_check(job_id), **kwargs)

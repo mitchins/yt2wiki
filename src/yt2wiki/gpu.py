@@ -80,6 +80,9 @@ def pick_device(preferred: int | None = None) -> tuple[str, int | None]:
 
     Honours an explicit choice; otherwise picks the GPU with the most free
     memory so that development work does not collide with unrelated jobs.
+
+    When CUDA_VISIBLE_DEVICES is set, nvidia-smi indices are mapped to the
+    visible ordinal so the chosen device is valid inside the container.
     """
     if not cuda_available():
         return "cpu", None
@@ -91,6 +94,21 @@ def pick_device(preferred: int | None = None) -> tuple[str, int | None]:
         return "cuda", preferred
     gpus = nvidia_smi_gpus()
     if gpus:
+        import os as _os
+        visible = _os.environ.get("CUDA_VISIBLE_DEVICES")
+        if visible:
+            try:
+                order = [int(x.strip()) for x in visible.split(",") if x.strip() != ""]
+                # Map PCI index -> visible ordinal
+                def _visible_rank(g):
+                    return order.index(g.index) if g.index in order else 999
+                # Prefer visible GPUs first, by free memory
+                visible_gpus = [g for g in gpus if g.index in order]
+                if visible_gpus:
+                    best = max(visible_gpus, key=lambda g: g.free_gb)
+                    return "cuda", order.index(best.index)
+            except (ValueError, IndexError):
+                pass
         best = max(gpus, key=lambda g: g.free_gb)
         return "cuda", best.index
     return "cuda", None

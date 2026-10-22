@@ -103,7 +103,11 @@ class ModelManager:
                         f"provider '{entry.get('provider')}' was not qualified for writing "
                         f"at submission time.")
                 provider = {"url": entry.get("url"), "model": entry.get("model") or "",
-                            "api_key_env": entry.get("api_key_env") or ""}
+                            "api_key_env": entry.get("api_key_env") or "",
+                            "timeout": entry.get("timeout", 90.0) if isinstance(entry.get("timeout"), (int, float)) else 90.0}
+                variant = {"model": provider.get("model") or "", "url": provider["url"],
+                           "api_key_env": provider.get("api_key_env") or "",
+                           "timeout": float(provider.get("timeout", 90.0))}
                 spec = ModelSpec(
                     key=f"remote-{entry.get('provider')}",
                     role=role,
@@ -112,9 +116,8 @@ class ModelManager:
                     revision="remote",
                     provider=entry.get("provider") or "",
                     notes=f"Remote {provider['url']} via {entry.get('provider')}",
+                    variants={self.settings.profile: dict(variant)},
                 )
-                variant = {"model": provider.get("model") or "", "url": provider["url"],
-                           "api_key_env": provider.get("api_key_env") or ""}
                 return spec, provider
             from ..web import inference as _inf
             cfg = _inf.load(self.settings.paths)
@@ -137,17 +140,21 @@ class ModelManager:
                 raise RuntimeError(
                     f"provider '{provider_name}' is not qualified for writing "
                     f"(needs real JSON generation). Qualify it in Settings.")
+            # Explicit model takes precedence over discovered models, then URL.
+            repo = provider.get("model") or (status.get("models") or [provider.get("url", "")])[0]
+            variant = {"model": provider.get("model") or "", "url": provider["url"],
+                       "api_key_env": provider.get("api_key_env") or "",
+                       "timeout": float(provider.get("timeout", 90.0) if isinstance(provider.get("timeout"), (int, float)) else 90.0)}
             spec = ModelSpec(
                 key=f"remote-{provider_name}",
                 role=role,
                 engine="remote-openai",
-                repo=provider.get("model") or status.get("models", [""])[0] if status.get("models") else provider.get("url", ""),
+                repo=repo,
                 revision="remote",
                 provider=provider_name,
                 notes=f"Remote {provider['url']} via {provider_name}",
+                variants={self.settings.profile: dict(variant)},
             )
-            variant = {"model": provider.get("model") or "", "url": provider["url"],
-                       "api_key_env": provider.get("api_key_env") or ""}
             return spec, provider
         except RuntimeError:
             raise
@@ -232,6 +239,19 @@ class ModelManager:
                 except Exception as exc:  # noqa: BLE001
                     if not _is_cuda_oom(exc) or attempt == 1:
                         last_error = exc
+                        self._record(
+                            role=role, model_key=spec.key, repo=spec.repo, ok=False,
+                            device=f"cuda:{info.device_index}", error=str(exc)[:600],
+                            fallback_of=fallback_of,
+                        )
+                        try:
+                            candidate.unload()
+                        except Exception:
+                            pass
+                        free_cuda_memory()
+                        # Non-OOM failure: stop retrying this spec, try its fallback.
+                        if not _is_cuda_oom(exc):
+                            break
                         raise
                     excluded.append(info.device_index)
                     self._record(
@@ -242,7 +262,10 @@ class ModelManager:
                     log.warning("cuda OOM loading %s on device %s; re-planning",
                                 spec.key, info.device_index)
                     free_cuda_memory()
-                    candidate.unload()
+                    try:
+                        candidate.unload()
+                    except Exception:
+                        pass
                     continue
             else:  # pragma: no cover - defensive
                 raise RuntimeError(f"could not allocate {spec.key}")

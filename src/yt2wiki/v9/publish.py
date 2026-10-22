@@ -42,32 +42,53 @@ def drop_far_links(body: str, url: str | None, t_start: float, t_end: float,
         if url and "youtu" in url and "youtu" in target:
             secs = _target_seconds(target)
             if secs is not None and (secs < t_start - tol or secs > t_end + tol):
-                return label
+                return ""  # drop false provenance entirely (no plain label)
         return m.group(0)
 
     return _re.sub(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)", fix, body)
 
 
-def _strip_bare_float_ranges(text: str) -> str:
+def _strip_bare_float_ranges(text: str, t_start: float | None = None,
+                             t_end: float | None = None, *, tol: float = 60.0) -> str:
     """Remove bare floating-point ranges like '340.0-349.4' that leak from the writer.
 
-    These are transcript-second ranges the model sometimes emits as plain
-    numbers. They are not commands, measurements, versions or quantities and
-    would appear as floating noise in prose. Only the bare pattern
-    <float>-<float> outside code/brackets is stripped; other numbers are
-    preserved.
+    Provenance-aware: a range is only removed when its numeric values lie
+    within the section's [t_start, t_end] window (with tolerance). This
+    preserves measurements (e.g. 3.3-5.0 V), versions and quantities that
+    happen to look like float ranges.
+
+    Code fences and inline code are left untouched.
     """
     import re as _re
-    # Outside inline code (`code`) and links/images
-    parts = _re.split(r"(`[^`]*`)", text)
+    # Split while preserving fenced blocks and inline code.
+    parts = _re.split(r"(```.*?```|`[^`]*`)", text, flags=_re.DOTALL)
     out = []
     for i, part in enumerate(parts):
-        if i % 2 == 1:  # code span — leave untouched
+        if i % 2 == 1:  # code — leave untouched
             out.append(part)
             continue
-        # Remove bare float ranges like 340.0-349.4 or 340.0 – 349.4
-        part = _re.sub(r"(?<![\w.])(?<!\d\.)\d+\.\d+\s*[-–]\s*\d+\.\d+\b", "", part)
-        # Collapse the double spaces that removal can leave, but keep paragraph breaks
+        def _maybe_drop(m: "re.Match[str]") -> str:
+            raw = m.group(0)
+            # Extract the two floats
+            nums = _re.findall(r"\d+\.\d+", raw)
+            if len(nums) < 2:
+                return raw
+            try:
+                lo = float(nums[0]); hi = float(nums[1])
+            except ValueError:
+                return raw
+            if t_start is not None and t_end is not None:
+                win_lo = t_start - tol
+                win_hi = t_end + tol
+                # Only strip if at least one endpoint is inside the section window
+                if not (win_lo <= lo <= win_hi or win_lo <= hi <= win_hi):
+                    return raw
+            else:
+                # No provenance: preserve to avoid deleting measurements
+                return raw
+            return ""
+        # Do not match ranges followed by a short unit (measurements like 3.3-5.0 V)
+        part = _re.sub(r"(?<![\w.])(?<!\d\.)\d+\.\d+\s*[-–]\s*\d+\.\d+\b(?![ \t]*[A-Za-z%]{1,4}\b)", _maybe_drop, part)
         part = _re.sub(r"[ \t]{2,}", " ", part)
         out.append(part)
     return "".join(out)
@@ -101,23 +122,31 @@ def _strip_inline_timestamp_links(body: str) -> str:
     The writer's per-sentence citations are consolidated into the single
     section reference emitted by _section_source_ref, so leaving them inline
     would duplicate the provenance and clutter prose. Non-timestamp links
-    (e.g. documentation URLs) are preserved. Plain timestamp labels that
-    were de-linked by drop_far_links are also removed.
+    (e.g. documentation URLs) are preserved. Code blocks are left untouched.
     """
     import re as _re
-    def drop(m: "re.Match[str]") -> str:
-        label, target = m.group(1), m.group(2)
-        if target.startswith("assets/"):
+    # Preserve fenced and inline code
+    parts = _re.split(r"(```.*?```|`[^`]*`)", body, flags=_re.DOTALL)
+    out_parts: list[str] = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1:
+            out_parts.append(part)
+            continue
+        def drop(m: "re.Match[str]") -> str:
+            label, target = m.group(1), m.group(2)
+            if target.startswith("assets/"):
+                return m.group(0)
+            if _re.match(r"^\d{1,2}:\d{2}(?::\d{2})?(?:\s*[-–]\s*\d{1,2}:\d{2}(?::\d{2})?)?$", label.strip()):
+                return ""  # consolidated into the section reference
             return m.group(0)
-        if _re.match(r"^\d{1,2}:\d{2}(?::\d{2})?(?:\s*[-–]\s*\d{1,2}:\d{2}(?::\d{2})?)?$", label.strip()):
-            return ""  # consolidated into the section reference
-        return m.group(0)
-    body = _re.sub(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)", drop, body)
-    # Also strip plain m:ss that were left behind by drop_far_links
-    body = _re.sub(r"(?<![\w/])\d{1,2}:\d{2}(?::\d{2})?(?:\s*[-–]\s*\d{1,2}:\d{2}(?::\d{2})?)?(?![\w/])", "", body)
-    # Clean up stray double spaces and spaces before punctuation
-    body = _re.sub(r" +", " ", body)
-    body = _re.sub(r" +([.,;:!?])", r"\1", body)
+        part = _re.sub(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)", drop, part)
+        # Do NOT strip plain m:ss — that would delete clock times (10:30) and
+        # commands (ffmpeg -ss 00:01:30). Far citations are already de-linked to ""
+        # by drop_far_links or removed above.
+        part = _re.sub(r" +", " ", part)
+        part = _re.sub(r" +([.,;:!?])", r"\1", part)
+        out_parts.append(part)
+    body = "".join(out_parts)
     body = _re.sub(r"\n{2,}", "\n\n", body)
     body = _re.sub(r" +\n", "\n", body)
     return body.strip()
@@ -157,12 +186,12 @@ def assemble_markdown(article_title: str, summary: str, sections: list[dict[str,
         body = (sec.get("body") or "").strip()
         if body:
             hint = (float(sec.get("t_start", 0) or 0) + float(sec.get("t_end", 0) or 0)) / 2
+            t0 = float(sec.get("t_start", 0) or 0)
+            t1 = float(sec.get("t_end", 0) or 0)
             body = normalize_timestamps(body, provenance.get("url"),
                                         duration_s=duration, hint_s=hint)
-            body = drop_far_links(body, provenance.get("url"),
-                                  float(sec.get("t_start", 0) or 0),
-                                  float(sec.get("t_end", 0) or 0))
-            body = _strip_bare_float_ranges(body)
+            body = drop_far_links(body, provenance.get("url"), t0, t1)
+            body = _strip_bare_float_ranges(body, t0, t1)
             # Separate data from prose: pull per-sentence citations into one section ref
             body = _strip_inline_timestamp_links(body)
             # Collapse any blank lines that stripping left behind

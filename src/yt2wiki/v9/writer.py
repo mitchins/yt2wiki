@@ -175,7 +175,8 @@ def section_transcript(transcript: Sequence[dict[str, Any]],
 
 
 def write_article(settings, db, source_id: str, *, backend=None,
-                  inference_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+                  inference_snapshot: dict[str, Any] | None = None,
+                  recorder=None) -> dict[str, Any]:
     """Generate the V9 ASR article. Returns {article fields, coverage, timings}."""
     from ..backends.loader import ModelManager
     from ..config import Settings as _S  # noqa: F401 (type only)
@@ -196,7 +197,15 @@ def write_article(settings, db, source_id: str, *, backend=None,
 
     video_title = srow["title"] or source_id
     url = srow["origin_url"]
-    manager = ModelManager(settings, recorder=lambda e: None,
+    if recorder is None:
+        def _default_rec(entry: dict) -> None:
+            entry.setdefault("source_id", source_id)
+            try:
+                db.record_model_load(entry)
+            except Exception:
+                pass
+        recorder = _default_rec
+    manager = ModelManager(settings, recorder=recorder,
                            inference_snapshot=inference_snapshot)
 
     def _chat(payload_msgs, **kw):

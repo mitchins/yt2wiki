@@ -20,6 +20,21 @@ from ..paths import Paths
 
 log = logging.getLogger("yt2wiki.pipeline")
 
+# Which models actually influence each stage — a VLM swap must not
+# retranscribe the library.
+STAGE_MODEL_ROLES: dict[str, tuple[str, ...]] = {
+    "acquisition": (),
+    "inspect": (),
+    "transcribe": ("asr",),
+    "frame_candidates": (),
+    "visual_interpret": ("vision",),
+    "evidence": ("text",),
+    "procedures": ("text",),
+    "compose": ("text",),
+    "verify": ("verify",),
+    "publish": (),
+}
+
 # Which tuning knobs actually influence each stage.  Anything outside a stage's
 # set must not invalidate its cached output, otherwise a change to the
 # contradiction prompt would retranscribe every video in the library.
@@ -118,13 +133,14 @@ class StageContext:
         keys = [k for k in STAGE_TUNING_KEYS.get(stage, ()) if k != "artifact_hashes"]
         relevant = {k: tuning[k] for k in keys if k in tuning}
         artifact_dependent = "artifact_hashes" in STAGE_TUNING_KEYS.get(stage, ())
+        roles = STAGE_MODEL_ROLES.get(stage, ("asr", "vision", "text", "verify"))
         payload = {
             "stage": stage,
             "profile": self.settings.profile,
             "models": {r: self.settings.model(r).repo + "@" + self.settings.model(r).revision
                        + ":" + json.dumps(self.settings.model(r).variant(self.settings.profile),
                                           sort_keys=True, default=str)
-                       for r in ("asr", "vision", "text", "verify")},
+                       for r in roles},
             "tuning": relevant,
             "extra": extra or {},
             "inputs": self.artifacts.get("_input_hashes", {}),

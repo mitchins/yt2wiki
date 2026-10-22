@@ -203,7 +203,7 @@ def test_drop_far_links_keeps_window_and_assets():
             "and earlier [6:51](https://youtube.com/watch?v=XvaXemGDSpk&t=411).")
     out = drop_far_links(body, url, 410.0, 438.0)
     assert "[4:11](https://youtube.com/watch?v=XvaXemGDSpk&t=251)" not in out
-    assert "4:11" in out  # label text survives, href gone
+    assert "4:11" not in out  # false provenance dropped entirely
     assert "[6:51](https://youtube.com/watch?v=XvaXemGDSpk&t=411)" in out
     img = "![alt](assets/f-abc.jpg)"
     assert drop_far_links(img, url, 0.0, 10.0) == img

@@ -343,10 +343,15 @@ def test_inference_settings_validate_and_never_store_keys(env):
     assert client.get("/settings").status_code == 200
     bad = client.post("/api/settings/inference", json={
         "providers": [{"name": "lan", "url": "http://10.0.0.2:8000/v1", "api_key_env": "sk-secret-123"}]})
-    assert bad.status_code == 400 and "environment variable" in bad.json()["detail"]
-    ok = client.post("/api/settings/inference", json={
+    assert bad.status_code == 400 and "YT2WIKI_" in bad.json()["detail"]
+    bad2 = client.post("/api/settings/inference", json={
         "providers": [{"name": "lan", "url": "http://10.0.0.2:8000/v1/", "model": "m",
                        "api_key_env": "LAN_KEY"}],
+        "roles": {"writer": "lan", "vision": "lan"}})
+    assert bad2.status_code == 400 and "YT2WIKI_" in bad2.json()["detail"]
+    ok = client.post("/api/settings/inference", json={
+        "providers": [{"name": "lan", "url": "http://10.0.0.2:8000/v1/", "model": "m",
+                       "api_key_env": "YT2WIKI_LAN_KEY"}],
         "roles": {"writer": "lan", "vision": "lan"}})
     assert ok.status_code == 200
     saved = json.loads((settings.paths.root / "config" / "inference.json").read_text())
@@ -355,19 +360,24 @@ def test_inference_settings_validate_and_never_store_keys(env):
     unknown = client.post("/api/settings/inference", json={"providers": [], "roles": {"writer": "x"}})
     assert unknown.status_code == 400
     page = client.get("/settings").text
-    assert "http://10.0.0.2:8000/v1" in page and "LAN_KEY" in page
+    assert "http://10.0.0.2:8000/v1" in page and "YT2WIKI_LAN_KEY" in page
 
 
 def test_inference_test_reports_unreachable(env, monkeypatch):
     settings, _, _ = env
+    monkeypatch.delenv("YT2WIKI_NO_SUCH_KEY_VAR", raising=False)
     monkeypatch.delenv("NO_SUCH_KEY_VAR", raising=False)
     client = TestClient(create_app(settings))
     r = client.post("/api/settings/inference/test",
                     json={"url": "http://127.0.0.1:9/v1"}).json()
     assert r["ok"] is False and r["error"]
+    # Non-prefixed env var is rejected before probing (400)
+    r2 = client.post("/api/settings/inference/test",
+                     json={"url": "http://127.0.0.1:9/v1", "api_key_env": "NO_SUCH_KEY_VAR"})
+    assert r2.status_code == 400 and "YT2WIKI_" in r2.json()["detail"]
     r = client.post("/api/settings/inference/test",
-                    json={"url": "http://127.0.0.1:9/v1", "api_key_env": "NO_SUCH_KEY_VAR"}).json()
-    assert r["ok"] is False and "NO_SUCH_KEY_VAR" in r["error"]
+                    json={"url": "http://127.0.0.1:9/v1", "api_key_env": "YT2WIKI_NO_SUCH_KEY_VAR"}).json()
+    assert r["ok"] is False and "YT2WIKI_NO_SUCH_KEY_VAR" in r["error"]
 
 
 def test_schema_stamp_is_never_lowered(tmp_path):

@@ -123,9 +123,19 @@ class RemoteOpenAIBackend(BaseBackend):
             payload["model"] = self.model_name
         data = self._post(payload)
         try:
-            return (data["choices"][0]["message"]["content"] or "").strip()
-        except Exception:
-            return ""
+            content = data["choices"][0]["message"]["content"]
+            if content is None:
+                raise RuntimeError(f"remote vision returned no content: {data}")
+            if isinstance(content, list):
+                content = "\n".join(p.get("text", "") for p in content if isinstance(p, dict))
+            text = (content or "").strip()
+            if not text:
+                raise RuntimeError(f"remote vision returned empty content: {data}")
+            return text
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"remote vision parse failed: {exc} payload={data}") from exc
 
     def describe_batch(self, images: Sequence[Any], prompt: str, *, max_new_tokens: int = 120, temperature: float = 0.0, system: str | None = None, batch_size: int = 4) -> list[str]:
         # One call per image (simple, handles any batch_size)

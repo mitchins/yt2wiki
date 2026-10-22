@@ -408,18 +408,39 @@ def _persist(
     items: Sequence[Evidence],
     contradictions: Sequence[dict[str, Any]] = (),
 ) -> None:
-    ctx.db.execute("DELETE FROM evidence_fts")
+    # Apply contradiction adjudication: mark superseded and persist corrections
     superseded = {
-        str(p.get("supersedes")): str(p.get("text") or "")[:200]
+        str(p.get("supersedes")): p
         for p in contradictions
         if p.get("supersedes")
     }
+    # Update in-memory items before DB write so status/superseded_by are stored
+    for e in items:
+        if e.evidence_id in superseded:
+            e.superseded_by = str(superseded[e.evidence_id].get("evidence_id") or superseded[e.evidence_id].get("text") or "")[:64]
+            e.status = "superseded"
     with ctx.db.transaction() as conn:
+        conn.execute(
+            "DELETE FROM evidence_fts WHERE evidence_id IN "
+            "(SELECT evidence_id FROM evidence WHERE source_id=?)", (ctx.source_id,))
         conn.execute("DELETE FROM evidence WHERE source_id=?", (ctx.source_id,))
         for e in items:
             conn.execute(
                 "INSERT OR REPLACE INTO evidence VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 e.to_row(ctx.source_id),
+            )
+        # Persist correction observations
+        for corr in contradictions:
+            ce = new_evidence(
+                ctx.source_id, "correction", str(corr.get("text") or "")[:500],
+                t_start=float(corr.get("t_start") or 0.0),
+                t_end=float(corr.get("t_end") or 0.0),
+                confidence=float(corr.get("confidence") or 0.9),
+            )
+            ce.status = "active"
+            conn.execute(
+                "INSERT OR REPLACE INTO evidence VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ce.to_row(ctx.source_id),
             )
         rows = conn.execute(
             "SELECT rowid, evidence_id, text, normalized, kind FROM evidence WHERE source_id=?",

@@ -128,7 +128,7 @@ def run(ctx: StageContext) -> dict[str, Any]:
                     if retry:
                         payload = _safe_json(retry[0])
                 text_lines = list(payload.get("visible_text") or [])
-                if _looks_text_dense(payload, text_lines):
+                if t.vision_dense_text_pass and _looks_text_dense(payload, text_lines):
                     dense_candidates.append((frame, payload))
                 else:
                     _store(ctx, frame, payload)

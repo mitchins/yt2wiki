@@ -227,9 +227,21 @@ def run_source(settings, db, service, source_id: str, *,
 
         # --- write ---
         t = time.time()
+        def _v9_rec(stage_name: str):
+            def _rec(entry: dict) -> None:
+                entry.setdefault("job_id", v9job)
+                entry.setdefault("source_id", source_id)
+                entry.setdefault("stage", stage_name)
+                try:
+                    db.record_model_load(entry)
+                except Exception:
+                    pass
+            return _rec
+
         stage("v9_write")
         article = v9writer.write_article(settings, db, source_id,
-                                         inference_snapshot=inference_snapshot)
+                                         inference_snapshot=inference_snapshot,
+                                         recorder=_v9_rec("v9_write"))
         _record(db, v9job, "v9_write", "done",
                 {"sections": len(article["sections"]), "kind": article["kind"],
                  "coverage": article["coverage"]}, started=t)
@@ -261,7 +273,7 @@ def run_source(settings, db, service, source_id: str, *,
                 inference_snapshot = None
         t = time.time()
         stage("v9_select")
-        manager = ModelManager(settings, recorder=lambda e: None,
+        manager = ModelManager(settings, recorder=_v9_rec("v9_select"),
                                inference_snapshot=inference_snapshot)
         picks: dict[str, list[dict[str, Any]]] = {}
         decisions = []

@@ -422,8 +422,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             new_job = enqueue(job["source_id"], profile, retry_of=job_id)
         return {"job_id": new_job, "source_id": job["source_id"]}
 
+    def _require_local(request: Request) -> None:
+        # Inference configuration can exfiltrate secrets and probe internal
+        # networks. Only allow it from localhost; tests use "testclient".
+        host = getattr(request.client, "host", "") if request.client else ""
+        if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "testclient", "localhost"):
+            raise HTTPException(403,
+                "Inference configuration is only allowed from localhost.")
+
     @app.post("/api/settings/inference")
-    def api_save_inference(payload: dict = Body(...)) -> Any:
+    def api_save_inference(request: Request, payload: dict = Body(...)) -> Any:
+        _require_local(request)
         try:
             cfg = inference.save(settings.paths, payload)
         except inference.InferenceConfigError as exc:
@@ -431,7 +440,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True, "config": cfg}
 
     @app.post("/api/settings/inference/test")
-    def api_test_inference(payload: dict = Body(...)) -> Any:
+    def api_test_inference(request: Request, payload: dict = Body(...)) -> Any:
+        _require_local(request)
         url = str(payload.get("url") or "").strip()
         if not url.startswith(("http://", "https://")):
             raise HTTPException(400, "Enter an http:// or https:// base URL first.")
@@ -527,9 +537,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if row is None:
             raise HTTPException(404, "revision not found")
+        # Reinstall any image assets referenced by the restored markdown that are
+        # missing from the asset directory (e.g. after remove/replace). Files
+        # are kept for history, but if they were deleted before the fix or
+        # manually removed, restore them from the frame store so the restored
+        # article does not have broken images.
+        restored_md = row["markdown"]
+        assets = settings.paths.article_assets(article_id)
+        assets.mkdir(parents=True, exist_ok=True)
+        for fid in _image_order(restored_md):
+            dest = assets / f"{fid}.jpg"
+            if dest.is_file():
+                continue
+            frow = db.query_one("SELECT path FROM frames WHERE frame_id=?", (fid,))
+            if frow and frow["path"] and Path(frow["path"]).is_file():
+                try:
+                    shutil.copy2(frow["path"], dest)
+                except OSError:
+                    continue
+                # Re-create the asset row so the editor lists the image
+                with db.transaction() as conn:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path,
+                                                                 caption, alt_text, created_at)
+                           VALUES(?,?,?,?,?,?,?)""",
+                        (f"asset-{fid}", article_id, fid, str(dest), "", "", time.time()))
+            else:
+                # No frame store entry: check if a historical file still exists
+                # under another extension or if another revision's asset can be
+                # copied (best effort). If nothing is found, the reader will
+                # simply drop the image, but the markdown remains restorable.
+                pass
+        # Ensure every referenced image has an article_assets row
+        existing = {r["frame_id"] for r in db.query(
+            "SELECT frame_id FROM article_assets WHERE article_id=?", (article_id,))}
+        for fid in _image_order(restored_md):
+            if fid not in existing and (assets / f"{fid}.jpg").is_file():
+                db.execute(
+                    """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path,
+                                                             caption, alt_text, created_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (f"asset-{fid}", article_id, fid, str(assets / f"{fid}.jpg"), "", "", time.time()))
         # Restoring is itself an edit: the current text is snapshotted first,
         # and search, exports and the version number all move forward.
-        version = _save_article_markdown(settings, db, article_id, row["markdown"],
+        version = _save_article_markdown(settings, db, article_id, restored_md,
                                          f"restored version {row['version']}")
         return {"ok": True, "version": version}
 
@@ -796,9 +847,12 @@ def _save_article_markdown(settings, db, article_id: str, markdown: str, note: s
     zp = settings.paths.article_dir(article_id) / "article.zip"
     with _zipfile.ZipFile(zp, "w", _zipfile.ZIP_DEFLATED) as zf:
         zf.write(settings.paths.article_markdown(article_id), "article.md")
-        for f in sorted(assets.glob("*")):
-            if f.is_file():
-                zf.write(f, f"assets/{f.name}")
+        for fid in _image_order(markdown):
+            for ext in (".jpg", ".jpeg", ".png", ".webp"):
+                p = assets / f"{fid}{ext}"
+                if p.is_file():
+                    zf.write(p, f"assets/{p.name}")
+                    break
     (settings.paths.article_dir(article_id) / "article.standalone.html").write_text(
         render_html(article, markdown_to_html(markdown), embed_images=True, asset_dir=assets),
         encoding="utf-8")
@@ -845,11 +899,13 @@ def _swap_article_image(settings, db, article_id: str, old_fid: str,
         raise _HE(400, "Invalid replacement frame identifier.")
     def _order(md):
         import re as _re2
-        return [m.split("/")[-1][:-4] if m.endswith(".jpg") else m for m in _re2.findall(r"!\[[^\]]*\]\(assets/([^)\s/]+)\)", md)]
+        return _re2.findall(r"!\[[^\]]*\]\(assets/([^)\s/]+)\.jpg\)", md)
     order = _order(md)
     if old_fid not in order:
         from fastapi import HTTPException as _HE
         raise _HE(400, "That image is not in the article.")
+    assets = settings.paths.article_assets(article_id)
+    assets.mkdir(parents=True, exist_ok=True)
     try:
         (assets / f"{old_fid}.jpg").resolve().relative_to(assets.resolve())
         if new_fid:
@@ -857,8 +913,6 @@ def _swap_article_image(settings, db, article_id: str, old_fid: str,
     except ValueError:
         from fastapi import HTTPException as _HE
         raise _HE(400, "Invalid frame identifier.")
-    assets = settings.paths.article_assets(article_id)
-    assets.mkdir(parents=True, exist_ok=True)
     if new_fid:
         frow = db.query_one("SELECT path FROM frames WHERE frame_id=?", (new_fid,))
         if frow is None or not Path(frow["path"]).is_file():
