@@ -324,11 +324,13 @@ def run_source(settings, db, service, source_id: str, *,
                 if pick["frame_id"] in prev_captions:
                     pick["caption"] = prev_captions[pick["frame_id"]]["caption"]
                     pick["alt_text"] = prev_captions[pick["frame_id"]].get("alt_text") or ""
+                    pick["caption_source"] = "edited"
                     continue
                 if enable_captions and pick.get("caption"):
-                    # Already captioned via vision; keep but ensure alt
+                    # Already captioned via vision in a prior run; keep but ensure alt
                     if not pick.get("alt_text"):
                         pick["alt_text"] = (pick["caption"].split(".")[0] or pick["caption"])[:120]
+                    pick["caption_source"] = pick.get("caption_source") or "vision"
                     continue
                 # Auto caption from judge + section heading (no new inference)
                 heading = sec.get("heading") or "Illustration"
@@ -341,6 +343,7 @@ def run_source(settings, db, service, source_id: str, *,
                 if len(cap) > 180:
                     cap = cap[:177].rsplit(" ", 1)[0] + "…"
                 pick["caption"] = cap
+                pick["caption_source"] = "auto"
                 # Alt: concise visible description, no timestamps, no generic duplicate
                 alt = why_sent or heading
                 alt = alt.split(".")[0][:120]
@@ -363,11 +366,14 @@ def run_source(settings, db, service, source_id: str, *,
             with manager.acquire("vision") as vb:
                 for plist in picks.values():
                     for pick in plist:
-                        if pick.get("caption"):
+                        # Preserve edited captions, but allow auto captions to be
+                        # replaced by the vision model when opt-in is enabled.
+                        if pick.get("caption") and pick.get("caption_source") != "auto":
                             continue
                         cap = v9select.caption_frame(vb, pick["path"])
                         if cap:
                             pick["caption"] = cap
+                            pick["caption_source"] = "vision"
                         else:
                             caption_failures += 1
         _record(db, v9job, "v9_caption", "done",

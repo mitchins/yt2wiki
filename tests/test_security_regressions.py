@@ -55,8 +55,8 @@ def test_traversal_frame_id_rejected(app_env):
     client = TestClient(create_app(settings))
     sentinel = settings.paths.root / "outside.jpg"
     sentinel.write_bytes(b"sentinel")
-    # Attempt traversal via old_frame_id
-    r = client.post("/api/articles/a1/images/replace", json={"old_frame_id": "../../../../etc/passwd", "new_frame_id": "f-2"})
+    # Attempt traversal via old_frame_id (non-sensitive path, still traversal)
+    r = client.post("/api/articles/a1/images/replace", json={"old_frame_id": "../../../outside", "new_frame_id": "f-2"})
     assert r.status_code == 400
     # also via remove with traversal that could resolve to sentinel
     r = client.post("/api/articles/a1/images/remove", json={"frame_id": "../../../outside"})
@@ -93,6 +93,7 @@ def test_missing_restored_image_after_remove(app_env):
     assert r.status_code == 200
     md2 = db.query_one("SELECT markdown FROM articles WHERE article_id='a1'")["markdown"]
     assert "f-1.jpg" in md2
+    assert "*cap*" in md2
     assert (settings.paths.article_assets("a1") / "f-1.jpg").is_file()
     # ZIP should contain the restored image
     import zipfile
@@ -100,9 +101,29 @@ def test_missing_restored_image_after_remove(app_env):
     assert zpath.is_file()
     names = zipfile.ZipFile(zpath).namelist()
     assert "assets/f-1.jpg" in names
-    # Editor lists restored image
-    rows = db.query("SELECT frame_id FROM article_assets WHERE article_id='a1'")
-    assert any(r["frame_id"] == "f-1" for r in rows)
+    # Editor lists restored image with caption
+    row = db.query_one("SELECT caption FROM article_assets WHERE article_id='a1' AND frame_id='f-1'")
+    assert row is not None and row["caption"] == "cap"
+
+
+def test_caption_restored_when_row_exists(app_env):
+    settings, db = app_env
+    _seed_article(settings, db, markdown="# T\n\n![a](assets/f-1.jpg)\n\n*cap*\n")
+    client = TestClient(create_app(settings))
+    # Edit caption via dedicated endpoint (updates markdown + asset row)
+    r = client.post("/api/articles/a1/images/caption", json={"frame_id": "f-1", "caption": "new cap"})
+    assert r.status_code == 200
+    assert db.query_one("SELECT caption FROM article_assets WHERE article_id='a1' AND frame_id='f-1'")["caption"] == "new cap"
+    # Get first revision (original)
+    revs = db.query("SELECT revision_id, version FROM article_revisions WHERE article_id='a1' ORDER BY version")
+    first_rev = revs[0]["revision_id"]
+    r = client.post("/api/articles/a1/revert", json={"revision_id": first_rev})
+    assert r.status_code == 200
+    # Caption should be restored to original, alt_text preserved
+    row = db.query_one("SELECT caption FROM article_assets WHERE article_id='a1' AND frame_id='f-1'")
+    assert row["caption"] == "cap"
+    md = db.query_one("SELECT markdown FROM articles WHERE article_id='a1'")["markdown"]
+    assert "*cap*" in md
 
 
 def test_ffmpeg_timestamp_preserved():

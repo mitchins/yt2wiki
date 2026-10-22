@@ -344,21 +344,17 @@ def test_loader_reports_headroom_for_role(tmp_path, monkeypatch):
     from yt2wiki.backends.loader import ModelManager
     from yt2wiki.config import Settings
     from yt2wiki.gpu import GpuSample
-    from types import SimpleNamespace
     import yt2wiki.backends.headroom as hr
 
-    settings = Settings.load(data_dir=tmp_path, profile="compact")
     gpus = [GpuSample(index=0, name="a", total_gb=8.0, used_gb=0.0, free_gb=8.0)]
+    monkeypatch.setattr("yt2wiki.backends.loader.pick_device", lambda *a, **kw: ("cuda", 0))
     monkeypatch.setattr(hr, "cuda_available", lambda: True)
     monkeypatch.setattr(hr, "nvidia_smi_gpus", lambda: gpus)
-    monkeypatch.setattr("yt2wiki.gpu.cuda_available", lambda: True)
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
     manager = ModelManager(settings)
-    # Also mock pick_device to avoid real CUDA
-    monkeypatch.setattr("yt2wiki.backends.loader.pick_device", lambda *a, **kw: ("cuda", 0))
     info = manager.headroom_for("vision")
     assert info.capped_gb > 0
     assert manager.headroom_log == []
-    assert SimpleNamespace(ok=True) is not None
 
 
 # ----------------------------------------------------------------------

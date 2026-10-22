@@ -583,12 +583,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # copied (best effort). If nothing is found, the reader will
                 # simply drop the image, but the markdown remains restorable.
                 pass
-        # Ensure every referenced image has an article_assets row
+        # Ensure every referenced image has an article_assets row and
+        # that restored captions overwrite newer ones (preserve alt_text).
         existing = {r["frame_id"] for r in db.query(
             "SELECT frame_id FROM article_assets WHERE article_id=?", (article_id,))}
         for fid in _image_order(restored_md):
-            if fid not in existing and (assets / f"{fid}.jpg").is_file():
-                cap = _caption_for(fid)
+            cap = _caption_for(fid)
+            if fid in existing:
+                db.execute(
+                    "UPDATE article_assets SET caption=? WHERE article_id=? AND frame_id=?",
+                    (cap, article_id, fid))
+            elif (assets / f"{fid}.jpg").is_file():
                 db.execute(
                     """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path,
                                                              caption, alt_text, created_at)

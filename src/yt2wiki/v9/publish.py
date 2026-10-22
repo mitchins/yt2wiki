@@ -362,6 +362,9 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
     adir.mkdir(parents=True, exist_ok=True)
     assets = settings.paths.article_assets(article_id)
     assets.mkdir(parents=True, exist_ok=True)
+    # Validate and install selected assets before committing article outputs;
+    # a missing or failed copy must fail visibly, not publish a broken article.
+    asset_rows = _asset_rows(settings, assets, picks, article_id)
     # Drop files from previous publishes: the zip below is built from this
     # directory, and anything not in the current picks would otherwise ship
     # as an unreferenced stale asset.
@@ -413,7 +416,7 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
         conn.execute("INSERT INTO articles_fts(article_id, title, markdown) VALUES(?,?,?)",
                      (article_id, title, markdown))
         conn.execute("DELETE FROM article_assets WHERE article_id=?", (article_id,))
-        for a in [r for r in _asset_rows(settings, assets, picks, article_id)]:
+        for a in asset_rows:
             conn.execute(
                 """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path,
                                                           caption, alt_text, created_at)
@@ -437,14 +440,19 @@ def _asset_rows(settings, assets: Path, picks: dict[str, list[dict[str, Any]]],
     rows = []
     for plist in picks.values():
         for pick in plist[:2]:
+            fid = pick["frame_id"]
             src = Path(pick.get("path", ""))
-            fname = f"{pick['frame_id']}.jpg"
-            if src.is_file():
-                try:
-                    shutil.copy2(src, assets / fname)
-                except OSError:
-                    continue
-            rows.append({"asset_id": f"{article_id}-asset-{pick['frame_id']}",
-                         "frame_id": pick["frame_id"], "path": str(assets / fname),
+            fname = f"{fid}.jpg"
+            dest = assets / fname
+            if not src.is_file():
+                raise FileNotFoundError(f"selected frame {fid} missing at {src}")
+            try:
+                shutil.copy2(src, dest)
+            except OSError as exc:
+                raise RuntimeError(f"failed to install asset {fname}: {exc}") from exc
+            if not dest.is_file():
+                raise RuntimeError(f"asset {fname} not installed at {dest}")
+            rows.append({"asset_id": f"{article_id}-asset-{fid}",
+                         "frame_id": fid, "path": str(dest),
                          "caption": pick.get("caption", ""), "alt_text": pick.get("alt_text", "")})
     return rows
