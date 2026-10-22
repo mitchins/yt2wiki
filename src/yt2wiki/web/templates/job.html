@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_partials.html" import job_steps %}
+{% block title %}{{ job.source_title or 'Job' }} — yt2wiki{% endblock %}
+{% block main %}
+<main class="wrap page" style="max-width:820px">
+  <nav class="crumbs"><a href="/jobs">Jobs</a><span aria-hidden="true">/</span><span>{{ job.job_id }}</span></nav>
+  <section class="panel job-card" {% if job.state in ('running', 'queued') %}data-job-live="{{ job.job_id }}" data-reload-on-done{% endif %} aria-live="polite">
+    <div class="job-top">
+      <div style="min-width:0">
+        <span class="chip {{ job.tone }}" data-chip>{{ job.state_label }}</span>
+        <h3 style="margin-top:10px">{{ job.source_title if job.source_title and job.source_title != 'pending acquisition' else 'New video' }}</h3>
+        <div class="meta">
+          {{ job.profile|capitalize }} profile
+          {% if source and source.origin_url %} · <a href="{{ source.origin_url }}" target="_blank" rel="noopener noreferrer">Source video</a>{% elif source %} · Local video{% endif %}
+          {% if job.started_at %} · started {{ job.started_at|ago }}{% else %} · added {{ job.created_at|ago }}{% endif %}
+          {% if job.elapsed_s and job.state != 'running' %} · took {{ job.elapsed_s|duration }}{% endif %}
+        </div>
+      </div>
+    </div>
+    {% if job.state == 'queued' %}<p class="muted" style="margin:16px 0 0">Waiting for the current job to finish. Only one video is processed at a time.</p>{% endif %}
+    {% if job.state == 'stale' %}<p class="job-error warn">This job was created outside the web worker and is not scheduled here. Retry to run it now.</p>{% endif %}
+    {% if job.steps %}<div class="bar" style="margin-top:18px"><i style="width:{{ job.progress }}%" data-bar></i></div>{% endif %}
+    {{ job_steps(job) }}
+    {% if job.error and job.state in ('failed', 'interrupted') %}
+    <div class="job-error{% if job.state == 'interrupted' %} warn{% endif %}">{{ job.error }}{% if job.state == 'interrupted' %} Retrying reuses every stage that already finished.{% endif %}</div>
+    {% endif %}
+    <div class="job-done">
+      {% if article %}<a class="btn" href="/articles/{{ article.article_id }}">{{ icon("book") }}Read the guide</a>{% endif %}
+      {% if job.can_retry %}<form method="post" action="/jobs/{{ job.job_id }}/retry"><button class="btn btn-quiet" type="submit">{{ icon("refresh") }}Retry</button></form>{% endif %}
+      {% if job.can_cancel %}<form method="post" action="/jobs/{{ job.job_id }}/cancel"><button class="btn btn-ghost" type="submit">Cancel</button></form>{% endif %}
+    </div>
+    {% if logs %}
+    <details class="log"><summary>Log ({{ logs|length }})</summary>
+<pre>{% for l in logs|reverse %}{{ l.level }}  {{ l.message }}
+{% endfor %}</pre></details>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}<script src="/static/app.js" defer></script>{% endblock %}

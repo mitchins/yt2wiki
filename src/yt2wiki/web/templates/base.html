@@ -1,0 +1,32 @@
+{% from "_icons.html" import icon %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}yt2wiki{% endblock %}</title>
+<link rel="icon" href="/static/mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/article.css">
+<link rel="stylesheet" href="/static/app.css">
+{% block head %}{% endblock %}
+</head>
+<body class="{% block body_class %}{% endblock %}">
+<a class="sr-only" href="#main">Skip to content</a>
+<header class="topbar no-print">
+  <div class="wrap">
+    <a class="brand" href="/" aria-label="yt2wiki library">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="var(--green)"/><path d="M10 9.5v13l6.5-4" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/><path d="M15 12.5h8M15 16.5h8M15 20.5h5" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg>
+      <span class="brand-word">yt2wiki</span>
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a href="/" {% if nav == 'library' %}aria-current="page"{% endif %}>{{ icon("book") }}<span>Library</span></a>
+      <a href="/add" {% if nav == 'add' %}aria-current="page"{% endif %}>{{ icon("plus") }}<span>Add<span class="long"> video</span></span></a>
+      <a href="/jobs" {% if nav == 'jobs' %}aria-current="page"{% endif %}>{{ icon("queue") }}<span>Jobs</span>{% if nav_active_jobs %}<span class="count" aria-label="{{ nav_active_jobs }} in progress">{{ nav_active_jobs }}</span>{% endif %}</a>
+      <a class="icon-only" href="/settings" {% if nav == 'settings' %}aria-current="page"{% endif %} aria-label="Settings" title="Settings">{{ icon("gear") }}</a>
+    </nav>
+  </div>
+</header>
+<div id="main">{% block main %}{% endblock %}</div>
+{% block scripts %}{% endblock %}
+</body>
+</html>
