@@ -48,11 +48,15 @@ assert file_hash(Path("/etc/hosts"))  # reads outside data_dir
 
 **Risk:** filesystem access / data exposure (confidential file read + copy into data dir), not code execution.
 
+**Authorisation vs OS permissions:** The OS permission that the local CLI user can `cat /etc/passwd` does **not** imply the application is authorised to treat `../../../etc/passwd` as a video source when the path originates from an LLM or other tainted producer (`cli.py:21` taint source is the argument vector, which in an agent context may be LLM-supplied). Application-level path authorisation must be enforced separately from OS `is_file`/`can-read` checks. `is_file` confirms the path is a regular file and fail-fast is correct, but it does not authorise an arbitrary traversal — the service must treat the CLI-supplied `Path` as explicit user intent and still validate it is a regular file before `file_hash`/`copy`; the web path is already authorisation-bound because `dest` is created by `Paths.upload_path` inside `data_dir/uploads` (authorised location) and never uses the raw client filename as a filesystem path.
+
 **Proposed action:** Small hardening, no rewrite:
-- In `Service.create_upload_source`, validate `path` is a regular file (`Path.is_file()`) and fail fast with a clear error; keep the existing `is_file` check in `cli._cmd_add`/`_cmd_run` but make the service the enforcement point.
-- In `cli.py`, keep the `if not path.is_file():` guard and ensure the `Path(target)` is resolved (`Path(target).expanduser()`) before hashing — no change to the happy path.
-- In `paths.file_hash`, keep `open` but document it is a trusted-caller sink; add `if not path.is_file(): raise FileNotFoundError` to make taint-safe reading explicit and to give the service a deterministic error.
-- No change to `upload_path` (already `safe_slug`).
+- In `Service.create_upload_source`, enforce **path authorisation**: `p = Path(path); if not p.is_file(): raise FileNotFoundError` — fail fast with a clear error; keep the existing `is_file` check in `cli._cmd_add`/`_cmd_run` but make the service the enforcement point so both CLI and web share the same gate. Consider `Path(path).expanduser().resolve()` for canonicalisation before the check when the caller may supply `../` segments.
+- In `cli.py`, keep the `if not path.is_file():` guard and ensure the `Path(target).expanduser()` is resolved before hashing — no change to the happy path, but the check is authorisation, not just an OS-permission test.
+- In `paths.file_hash`, keep `open` but document it is a **trusted-caller sink** (only called after `Service` authorisation); add `if not p.is_file(): raise FileNotFoundError` to make taint-safe reading explicit and to give the service a deterministic error. This satisfies the `S8707` sink but does not by itself constitute authorisation — the caller must have authorised the path.
+- No change to `upload_path` (already `safe_slug` and confines the web `dest` to `data_dir/uploads`).
+
+Distinguishing OS readability from application authorisation is the key correction to the prior disposition.
 
 Exploit details omitted from public issue; fix can be public.
 

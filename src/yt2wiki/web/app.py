@@ -353,9 +353,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             dest.unlink(missing_ok=True)
             raise HTTPException(400, "That file is empty.")
         # Hashing and copying can block the event loop for large videos; offload.
-        sid = await anyio.to_thread.run_sync(lambda: service.create_upload_source(dest))
-        if service.get_source(sid).get("upload_path") != str(dest):
-            shutil.rmtree(dest.parent, ignore_errors=True)  # stored under its source id
+        # Clean up only the temporary upload file, never the shared uploads/ directory.
+        try:
+            sid = await anyio.to_thread.run_sync(lambda: service.create_upload_source(dest))
+        except Exception:
+            dest.unlink(missing_ok=True)
+            raise
+        else:
+            # Deduplication or successful copy: dest is a temp file with an upload_id name,
+            # stored is the canonical content-addressed file. Remove only the temp file.
+            try:
+                stored = service.get_source(sid).get("upload_path") if sid else None
+            except Exception:
+                stored = None
+            if stored != str(dest):
+                dest.unlink(missing_ok=True)
         return enqueue(sid, profile)
 
     def retry_job(job_id: str) -> str:
