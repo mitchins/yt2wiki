@@ -200,10 +200,8 @@ def write_article(settings, db, source_id: str, *, backend=None,
     if recorder is None:
         def _default_rec(entry: dict) -> None:
             entry.setdefault("source_id", source_id)
-            try:
-                db.record_model_load(entry)
-            except Exception:
-                pass
+            db.record_model_load(entry)
+
         recorder = _default_rec
     manager = ModelManager(settings, recorder=recorder,
                            inference_snapshot=inference_snapshot)

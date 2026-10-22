@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Local, evidence-grounded compiler that turns a YouTube video into an illustrated wiki-style technical article."
 requires-python = ">=3.11"
 readme = "README.md"
-license = { text = "TBD - not yet licensed, all rights reserved until LICENCE file is added (see README)" }
 
 dependencies = [
     "faster-whisper>=1.1",

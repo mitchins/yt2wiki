@@ -408,16 +408,26 @@ def _persist(
     items: Sequence[Evidence],
     contradictions: Sequence[dict[str, Any]] = (),
 ) -> None:
-    # Apply contradiction adjudication: mark superseded and persist corrections
-    superseded = {
-        str(p.get("supersedes")): p
-        for p in contradictions
-        if p.get("supersedes")
-    }
-    # Update in-memory items before DB write so status/superseded_by are stored
+    # Create correction evidence first so superseded_by can reference real IDs.
+    corrections: list[Evidence] = []
+    superseded_to_corr: dict[str, Evidence] = {}
+    for corr in contradictions:
+        ce = new_evidence(
+            ctx.source_id, "correction", str(corr.get("text") or "")[:500],
+            t_start=float(corr.get("t_start") or 0.0),
+            t_end=float(corr.get("t_end") or 0.0),
+            confidence=float(corr.get("confidence") or 0.9),
+        )
+        ce.status = "active"
+        corrections.append(ce)
+        sid = str(corr.get("supersedes") or "")
+        if sid:
+            superseded_to_corr[sid] = ce
+    # Mark superseded records with the correction's evidence_id.
     for e in items:
-        if e.evidence_id in superseded:
-            e.superseded_by = str(superseded[e.evidence_id].get("evidence_id") or superseded[e.evidence_id].get("text") or "")[:64]
+        ce = superseded_to_corr.get(e.evidence_id)
+        if ce is not None:
+            e.superseded_by = ce.evidence_id
             e.status = "superseded"
     with ctx.db.transaction() as conn:
         conn.execute(
@@ -429,15 +439,7 @@ def _persist(
                 "INSERT OR REPLACE INTO evidence VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 e.to_row(ctx.source_id),
             )
-        # Persist correction observations
-        for corr in contradictions:
-            ce = new_evidence(
-                ctx.source_id, "correction", str(corr.get("text") or "")[:500],
-                t_start=float(corr.get("t_start") or 0.0),
-                t_end=float(corr.get("t_end") or 0.0),
-                confidence=float(corr.get("confidence") or 0.9),
-            )
-            ce.status = "active"
+        for ce in corrections:
             conn.execute(
                 "INSERT OR REPLACE INTO evidence VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 ce.to_row(ctx.source_id),

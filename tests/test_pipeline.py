@@ -301,34 +301,30 @@ def test_run_job_honours_stage_subset(env):
 # GPU headroom planning
 
 
-def test_headroom_prefers_a_card_that_fits(tmp_path):
+def test_headroom_prefers_a_card_that_fits(tmp_path, monkeypatch):
     from yt2wiki.backends.headroom import plan
     from yt2wiki.config import Settings
     from yt2wiki.gpu import GpuSample
+    import yt2wiki.backends.headroom as hr
 
     settings = Settings.load(data_dir=tmp_path, profile="standard")
     gpus = [
         GpuSample(index=0, name="small-8GB", total_gb=8.0, used_gb=1.0, free_gb=7.0),
         GpuSample(index=1, name="big-16GB", total_gb=16.0, used_gb=1.0, free_gb=15.0),
     ]
-    import yt2wiki.backends.headroom as hr
+    monkeypatch.setattr(hr, "cuda_available", lambda: True)
+    monkeypatch.setattr(hr, "nvidia_smi_gpus", lambda: gpus)
+    info = plan(settings, "vision")
+    assert info.device_index == 1
+    assert info.ok
+    assert info.reason == "ok"
 
-    original = hr.nvidia_smi_gpus
-    hr.nvidia_smi_gpus = lambda: gpus
-    try:
-        info = plan(settings, "vision")
-        assert info.device_index == 1
-        assert info.ok
-        assert info.reason == "ok"
-
-        settings_compact = Settings.load(data_dir=tmp_path, profile="compact")
-        tiny = plan(settings_compact, "asr")
-        assert tiny.device_index == 0
-    finally:
-        hr.nvidia_smi_gpus = original
+    settings_compact = Settings.load(data_dir=tmp_path, profile="compact")
+    tiny = plan(settings_compact, "asr")
+    assert tiny.device_index == 0
 
 
-def test_headroom_caps_when_nothing_fits(tmp_path):
+def test_headroom_caps_when_nothing_fits(tmp_path, monkeypatch):
     from yt2wiki.backends.headroom import plan, vram_budget_bytes
     from yt2wiki.config import Settings
     from yt2wiki.gpu import GpuSample
@@ -336,18 +332,15 @@ def test_headroom_caps_when_nothing_fits(tmp_path):
 
     settings = Settings.load(data_dir=tmp_path, profile="enhanced")
     gpus = [GpuSample(index=0, name="busy-16GB", total_gb=16.0, used_gb=12.0, free_gb=4.0)]
-    original = hr.nvidia_smi_gpus
-    hr.nvidia_smi_gpus = lambda: gpus
-    try:
-        info = plan(settings, "text")
-        assert info.capped_gb <= 4.0
-        assert "offload" in info.reason or "capping" in info.reason
-    finally:
-        hr.nvidia_smi_gpus = original
+    monkeypatch.setattr(hr, "cuda_available", lambda: True)
+    monkeypatch.setattr(hr, "nvidia_smi_gpus", lambda: gpus)
+    info = plan(settings, "text")
+    assert info.capped_gb <= 4.0
+    assert "offload" in info.reason or "capping" in info.reason
     assert vram_budget_bytes(3.5) > 0
 
 
-def test_loader_reports_headroom_for_role(tmp_path):
+def test_loader_reports_headroom_for_role(tmp_path, monkeypatch):
     from yt2wiki.backends.loader import ModelManager
     from yt2wiki.config import Settings
     from yt2wiki.gpu import GpuSample
@@ -355,16 +348,16 @@ def test_loader_reports_headroom_for_role(tmp_path):
     import yt2wiki.backends.headroom as hr
 
     settings = Settings.load(data_dir=tmp_path, profile="compact")
-    manager = ModelManager(settings)
     gpus = [GpuSample(index=0, name="a", total_gb=8.0, used_gb=0.0, free_gb=8.0)]
-    original = hr.nvidia_smi_gpus
-    hr.nvidia_smi_gpus = lambda: gpus
-    try:
-        info = manager.headroom_for("vision")
-        assert info.capped_gb > 0
-        assert manager.headroom_log == []
-    finally:
-        hr.nvidia_smi_gpus = original
+    monkeypatch.setattr(hr, "cuda_available", lambda: True)
+    monkeypatch.setattr(hr, "nvidia_smi_gpus", lambda: gpus)
+    monkeypatch.setattr("yt2wiki.gpu.cuda_available", lambda: True)
+    manager = ModelManager(settings)
+    # Also mock pick_device to avoid real CUDA
+    monkeypatch.setattr("yt2wiki.backends.loader.pick_device", lambda *a, **kw: ("cuda", 0))
+    info = manager.headroom_for("vision")
+    assert info.capped_gb > 0
+    assert manager.headroom_log == []
     assert SimpleNamespace(ok=True) is not None
 
 
@@ -485,7 +478,7 @@ def test_loader_retries_on_cuda_oom(monkeypatch, tmp_path):
     assert any(e.get("error", "").startswith("OOM on this card") for e in manager.load_log)
 
 
-def test_headroom_plan_can_exclude_a_device(tmp_path):
+def test_headroom_plan_can_exclude_a_device(tmp_path, monkeypatch):
     from yt2wiki.backends.headroom import Headroom, plan
     from yt2wiki.config import Settings
     from yt2wiki.gpu import GpuSample
@@ -496,12 +489,9 @@ def test_headroom_plan_can_exclude_a_device(tmp_path):
         GpuSample(index=0, name="a", total_gb=8.0, used_gb=0.0, free_gb=8.0),
         GpuSample(index=1, name="b", total_gb=16.0, used_gb=0.0, free_gb=16.0),
     ]
-    original = hr.nvidia_smi_gpus
-    hr.nvidia_smi_gpus = lambda: gpus
-    try:
-        info = plan(settings, "vision", exclude=[0])
-        assert info.device_index == 1
-        info = plan(settings, "vision", exclude=[0, 1])
-        assert info.ok
-    finally:
-        hr.nvidia_smi_gpus = original
+    monkeypatch.setattr(hr, "cuda_available", lambda: True)
+    monkeypatch.setattr(hr, "nvidia_smi_gpus", lambda: gpus)
+    info = plan(settings, "vision", exclude=[0])
+    assert info.device_index == 1
+    info = plan(settings, "vision", exclude=[0, 1])
+    assert info.ok

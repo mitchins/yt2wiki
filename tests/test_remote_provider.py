@@ -170,3 +170,55 @@ def test_model_loads_recorded(tmp_path, monkeypatch):
         assert b is not None
     rows = db.query("SELECT * FROM model_loads WHERE job_id=?", (job_id,))
     assert len(rows) >= 1 and rows[0]["ok"] == 1
+
+
+def test_loader_second_oom_uses_fallback(tmp_path, monkeypatch):
+    """Second CUDA OOM on the same spec must try the configured fallback."""
+    from yt2wiki.backends.loader import ModelManager
+    from yt2wiki.backends.base import BaseBackend
+    from yt2wiki.config import ModelSpec, Settings
+    from yt2wiki.gpu import BackendReport
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+
+    # Two specs: primary fails with OOM twice, fallback succeeds
+    spec_primary = ModelSpec(key="text-9b", role="text", engine="transformers", repo="repo-9b", fallbacks=["text-4b"])
+    spec_fallback = ModelSpec(key="text-4b", role="text", engine="transformers", repo="repo-4b")
+
+    class FailingBackend(BaseBackend):
+        def __init__(self, spec, *a, **kw):
+            super().__init__(spec, {}, "cuda", 0)
+            self._calls = 0
+
+        def load(self):
+            self._calls += 1
+            raise RuntimeError("CUDA out of memory. Tried to allocate")
+
+    class SuccessBackend(BaseBackend):
+        def load(self):
+            self.model = object()
+            self.report = BackendReport(model_key=self.spec.key, repo=self.spec.repo, revision="main", engine="transformers", variant={}, device="cuda", load_seconds=0.1, peak_vram_gb=1.0)
+            return self.report
+
+        def unload(self):
+            self.model = None
+
+    manager = ModelManager(settings, recorder=lambda e: None)
+
+    # Mock chain and build
+    monkeypatch.setattr(settings, "model_with_fallbacks", lambda role: [spec_primary, spec_fallback])
+    def fake_build(role, spec):
+        if spec.key == "text-9b":
+            return FailingBackend(spec)
+        return SuccessBackend(spec, {}, "cuda", 0)
+
+    monkeypatch.setattr(manager, "build", fake_build)
+    monkeypatch.setattr(manager, "headroom_for", lambda role, exclude=(): type("I", (), {"device_index": 0, "capped_gb": 4.0, "reason": "ok"})())
+    monkeypatch.setattr("yt2wiki.backends.loader.free_cuda_memory", lambda: None)
+
+    with manager.acquire("text") as b:
+        assert b.spec.key == "text-4b"
+    # Both the two OOM attempts should be recorded as failures, then success
+    assert any(r["model_key"] == "text-9b" and r["ok"] == 0 for r in manager.load_log)
+    assert any(r["model_key"] == "text-4b" and r["ok"] == 1 for r in manager.load_log)
+    assert any(r.get("fallback_of") == "text-9b" for r in manager.load_log if r.get("model_key") == "text-4b")

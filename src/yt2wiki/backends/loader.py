@@ -249,10 +249,10 @@ class ModelManager:
                         except Exception:
                             pass
                         free_cuda_memory()
-                        # Non-OOM failure: stop retrying this spec, try its fallback.
-                        if not _is_cuda_oom(exc):
-                            break
-                        raise
+                        # Try the next fallback model (smaller) instead of
+                        # retrying the same spec — this is where fallbacks
+                        # like text-9b → text-4b are exercised.
+                        break
                     excluded.append(info.device_index)
                     self._record(
                         role=role, model_key=spec.key, repo=spec.repo, ok=False,

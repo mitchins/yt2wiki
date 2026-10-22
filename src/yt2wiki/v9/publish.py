@@ -37,7 +37,7 @@ def drop_far_links(body: str, url: str | None, t_start: float, t_end: float,
     """
     import re as _re
 
-    def fix(m: "re.Match[str]") -> str:
+    def fix(m: _re.Match[str]) -> str:
         label, target = m.group(1), m.group(2)
         if url and "youtu" in url and "youtu" in target:
             secs = _target_seconds(target)
@@ -50,48 +50,19 @@ def drop_far_links(body: str, url: str | None, t_start: float, t_end: float,
 
 def _strip_bare_float_ranges(text: str, t_start: float | None = None,
                              t_end: float | None = None, *, tol: float = 60.0) -> str:
-    """Remove bare floating-point ranges like '340.0-349.4' that leak from the writer.
+    """Preserve bare floating-point ranges verbatim.
 
-    Provenance-aware: a range is only removed when its numeric values lie
-    within the section's [t_start, t_end] window (with tolerance). This
-    preserves measurements (e.g. 3.3-5.0 V), versions and quantities that
-    happen to look like float ranges.
-
-    Code fences and inline code are left untouched.
+    Earlier heuristics removed ranges like '340.0-349.4' that leaked from the
+    writer, but the pattern also matches exact measurements (3.3-5.0 V,
+    0.5–1.5 mm, 1.2-1.4 volts) and versions. The safe default is to preserve
+    all such ranges; transcript-second noise is handled by the writer's
+    timestamp normalisation instead.
     """
-    import re as _re
-    # Split while preserving fenced blocks and inline code.
-    parts = _re.split(r"(```.*?```|`[^`]*`)", text, flags=_re.DOTALL)
-    out = []
-    for i, part in enumerate(parts):
-        if i % 2 == 1:  # code — leave untouched
-            out.append(part)
-            continue
-        def _maybe_drop(m: "re.Match[str]") -> str:
-            raw = m.group(0)
-            # Extract the two floats
-            nums = _re.findall(r"\d+\.\d+", raw)
-            if len(nums) < 2:
-                return raw
-            try:
-                lo = float(nums[0]); hi = float(nums[1])
-            except ValueError:
-                return raw
-            if t_start is not None and t_end is not None:
-                win_lo = t_start - tol
-                win_hi = t_end + tol
-                # Only strip if at least one endpoint is inside the section window
-                if not (win_lo <= lo <= win_hi or win_lo <= hi <= win_hi):
-                    return raw
-            else:
-                # No provenance: preserve to avoid deleting measurements
-                return raw
-            return ""
-        # Do not match ranges followed by a short unit (measurements like 3.3-5.0 V)
-        part = _re.sub(r"(?<![\w.])(?<!\d\.)\d+\.\d+\s*[-–]\s*\d+\.\d+\b(?![ \t]*[A-Za-z%]{1,4}\b)", _maybe_drop, part)
-        part = _re.sub(r"[ \t]{2,}", " ", part)
-        out.append(part)
-    return "".join(out)
+    # No stripping — preserve measurements, versions and quantities verbatim.
+    # Signature retained for backwards compatibility with callers that pass
+    # t_start/t_end.
+    _ = (t_start, t_end, tol)
+    return text
 
 
 def _section_source_ref(t_start: float, t_end: float, url: str | None,
@@ -125,6 +96,19 @@ def _strip_inline_timestamp_links(body: str) -> str:
     (e.g. documentation URLs) are preserved. Code blocks are left untouched.
     """
     import re as _re
+
+    def _collapse_preserve_indent(s: str) -> str:
+        lines = s.split("\n")
+        out = []
+        for line in lines:
+            m = _re.match(r"^(\s*)", line)
+            leading = m.group(1) if m else ""
+            rest = line[len(leading):]
+            rest = _re.sub(r" {2,}", " ", rest)
+            rest = _re.sub(r" ([.,;:!?])", r"\1", rest)
+            out.append(leading + rest)
+        return "\n".join(out)
+
     # Preserve fenced and inline code
     parts = _re.split(r"(```.*?```|`[^`]*`)", body, flags=_re.DOTALL)
     out_parts: list[str] = []
@@ -132,19 +116,20 @@ def _strip_inline_timestamp_links(body: str) -> str:
         if i % 2 == 1:
             out_parts.append(part)
             continue
-        def drop(m: "re.Match[str]") -> str:
+
+        def drop(m: _re.Match[str]) -> str:
             label, target = m.group(1), m.group(2)
             if target.startswith("assets/"):
                 return m.group(0)
             if _re.match(r"^\d{1,2}:\d{2}(?::\d{2})?(?:\s*[-–]\s*\d{1,2}:\d{2}(?::\d{2})?)?$", label.strip()):
                 return ""  # consolidated into the section reference
             return m.group(0)
+
         part = _re.sub(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)", drop, part)
         # Do NOT strip plain m:ss — that would delete clock times (10:30) and
         # commands (ffmpeg -ss 00:01:30). Far citations are already de-linked to ""
         # by drop_far_links or removed above.
-        part = _re.sub(r" +", " ", part)
-        part = _re.sub(r" +([.,;:!?])", r"\1", part)
+        part = _collapse_preserve_indent(part)
         out_parts.append(part)
     body = "".join(out_parts)
     body = _re.sub(r"\n{2,}", "\n\n", body)
@@ -428,7 +413,7 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
         conn.execute("INSERT INTO articles_fts(article_id, title, markdown) VALUES(?,?,?)",
                      (article_id, title, markdown))
         conn.execute("DELETE FROM article_assets WHERE article_id=?", (article_id,))
-        for a in [r for r in _asset_rows(settings, assets, picks)]:
+        for a in [r for r in _asset_rows(settings, assets, picks, article_id)]:
             conn.execute(
                 """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path,
                                                           caption, alt_text, created_at)
@@ -447,7 +432,8 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
             "assets": len(list(assets.glob('*'))), "zip_bytes": zp.stat().st_size}
 
 
-def _asset_rows(settings, assets: Path, picks: dict[str, list[dict[str, Any]]]):
+def _asset_rows(settings, assets: Path, picks: dict[str, list[dict[str, Any]]],
+                article_id: str):
     rows = []
     for plist in picks.values():
         for pick in plist[:2]:
@@ -458,7 +444,7 @@ def _asset_rows(settings, assets: Path, picks: dict[str, list[dict[str, Any]]]):
                     shutil.copy2(src, assets / fname)
                 except OSError:
                     continue
-            rows.append({"asset_id": f"asset-{pick['frame_id']}",
+            rows.append({"asset_id": f"{article_id}-asset-{pick['frame_id']}",
                          "frame_id": pick["frame_id"], "path": str(assets / fname),
                          "caption": pick.get("caption", ""), "alt_text": pick.get("alt_text", "")})
     return rows

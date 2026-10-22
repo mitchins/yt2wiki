@@ -227,15 +227,14 @@ def run_source(settings, db, service, source_id: str, *,
 
         # --- write ---
         t = time.time()
+
         def _v9_rec(stage_name: str):
             def _rec(entry: dict) -> None:
                 entry.setdefault("job_id", v9job)
                 entry.setdefault("source_id", source_id)
                 entry.setdefault("stage", stage_name)
-                try:
-                    db.record_model_load(entry)
-                except Exception:
-                    pass
+                db.record_model_load(entry)
+
             return _rec
 
         stage("v9_write")
@@ -360,6 +359,7 @@ def run_source(settings, db, service, source_id: str, *,
         stage("v9_caption")
         caption_failures = 0
         if enable_captions:
+            manager.recorder = _v9_rec("v9_caption")
             with manager.acquire("vision") as vb:
                 for plist in picks.values():
                     for pick in plist:

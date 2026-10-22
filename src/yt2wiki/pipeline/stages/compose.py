@@ -774,5 +774,5 @@ def _copy_assets(ctx: StageContext, article_id: str, article: Article, md: str) 
             ctx.db.execute(
                 """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path, caption, alt_text, created_at)
                    VALUES(?,?,?,?,?,?,?)""",
-                (f"asset-{fid}", article_id, fid, str(assets / name), "", "", time.time()),
+                (f"{article_id}-asset-{fid}", article_id, fid, str(assets / name), "", "", time.time()),
             )

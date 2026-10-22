@@ -545,6 +545,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         restored_md = row["markdown"]
         assets = settings.paths.article_assets(article_id)
         assets.mkdir(parents=True, exist_ok=True)
+
+        def _caption_for(fid: str) -> str:
+            import re as _re2
+            lines = restored_md.split("\n")
+            for i, ln in enumerate(lines):
+                if f"assets/{fid}.jpg" in ln:
+                    j = i + 1
+                    while j < len(lines) and not lines[j].strip():
+                        j += 1
+                    if j < len(lines) and lines[j].strip().startswith("*"):
+                        cap = lines[j].strip().strip("*").strip()
+                        cap = _re2.sub(r"\s+—\s+source at \[.*$", "", cap).strip()
+                        return cap
+            return ""
+
         for fid in _image_order(restored_md):
             dest = assets / f"{fid}.jpg"
             if dest.is_file():
@@ -555,13 +570,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     shutil.copy2(frow["path"], dest)
                 except OSError:
                     continue
-                # Re-create the asset row so the editor lists the image
+                cap = _caption_for(fid)
                 with db.transaction() as conn:
                     conn.execute(
                         """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path,
                                                                  caption, alt_text, created_at)
                            VALUES(?,?,?,?,?,?,?)""",
-                        (f"asset-{fid}", article_id, fid, str(dest), "", "", time.time()))
+                        (f"{article_id}-asset-{fid}", article_id, fid, str(dest), cap, "", time.time()))
             else:
                 # No frame store entry: check if a historical file still exists
                 # under another extension or if another revision's asset can be
@@ -573,11 +588,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "SELECT frame_id FROM article_assets WHERE article_id=?", (article_id,))}
         for fid in _image_order(restored_md):
             if fid not in existing and (assets / f"{fid}.jpg").is_file():
+                cap = _caption_for(fid)
                 db.execute(
                     """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path,
                                                              caption, alt_text, created_at)
                        VALUES(?,?,?,?,?,?,?)""",
-                    (f"asset-{fid}", article_id, fid, str(assets / f"{fid}.jpg"), "", "", time.time()))
+                    (f"{article_id}-asset-{fid}", article_id, fid, str(assets / f"{fid}.jpg"), cap, "", time.time()))
         # Restoring is itself an edit: the current text is snapshotted first,
         # and search, exports and the version number all move forward.
         version = _save_article_markdown(settings, db, article_id, restored_md,
@@ -910,9 +926,9 @@ def _swap_article_image(settings, db, article_id: str, old_fid: str,
         (assets / f"{old_fid}.jpg").resolve().relative_to(assets.resolve())
         if new_fid:
             (assets / f"{new_fid}.jpg").resolve().relative_to(assets.resolve())
-    except ValueError:
+    except ValueError as exc:
         from fastapi import HTTPException as _HE
-        raise _HE(400, "Invalid frame identifier.")
+        raise _HE(400, "Invalid frame identifier.") from exc
     if new_fid:
         frow = db.query_one("SELECT path FROM frames WHERE frame_id=?", (new_fid,))
         if frow is None or not Path(frow["path"]).is_file():
@@ -927,7 +943,7 @@ def _swap_article_image(settings, db, article_id: str, old_fid: str,
                 """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path,
                                                           caption, alt_text, created_at)
                    VALUES(?,?,?,?,?,?,?)""",
-                (f"asset-{new_fid}", article_id, new_fid, str(assets / f"{new_fid}.jpg"),
+                (f"{article_id}-asset-{new_fid}", article_id, new_fid, str(assets / f"{new_fid}.jpg"),
                  caption or "", "", time.time()))
         # keep historical asset for revision restore
     else:

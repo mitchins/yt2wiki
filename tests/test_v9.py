@@ -153,7 +153,9 @@ def test_text_model_class_is_importable():
     local shim in .venv shadows it. This fails fast instead of mid-pipeline.
     """
     import pytest
-    m = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+
+    pytest.importorskip("transformers")
+    import transformers.models.qwen3_5.modeling_qwen3_5 as m
 
     assert m.Qwen3_5ForCausalLM is not None
 
