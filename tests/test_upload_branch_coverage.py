@@ -7,9 +7,7 @@ create_upload_source to reach 80% new-code coverage.
 from __future__ import annotations
 
 import errno
-import os
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
