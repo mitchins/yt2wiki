@@ -435,7 +435,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         url = str(payload.get("url") or "").strip()
         if not url.startswith(("http://", "https://")):
             raise HTTPException(400, "Enter an http:// or https:// base URL first.")
-        result = inference.test_endpoint(url, str(payload.get("api_key_env") or "").strip(),
+        try:
+            api_key_env = inference.validate_api_key_env(payload.get("api_key_env"))
+        except inference.InferenceConfigError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        result = inference.test_endpoint(url, api_key_env,
                                          model=str(payload.get("model") or "").strip())
         name = str(payload.get("name") or "").strip().lower()
         if name and name in inference.load(settings.paths)["providers"]:
@@ -832,6 +836,27 @@ def _swap_article_image(settings, db, article_id: str, old_fid: str,
         from fastapi import HTTPException as _HE
         raise _HE(404, "article not found")
     md = row["markdown"]
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z0-9_-]{1,64}", old_fid or ""):
+        from fastapi import HTTPException as _HE
+        raise _HE(400, "Invalid frame identifier.")
+    if new_fid and not _re.fullmatch(r"[A-Za-z0-9_-]{1,64}", new_fid):
+        from fastapi import HTTPException as _HE
+        raise _HE(400, "Invalid replacement frame identifier.")
+    def _order(md):
+        import re as _re2
+        return [m.split("/")[-1][:-4] if m.endswith(".jpg") else m for m in _re2.findall(r"!\[[^\]]*\]\(assets/([^)\s/]+)\)", md)]
+    order = _order(md)
+    if old_fid not in order:
+        from fastapi import HTTPException as _HE
+        raise _HE(400, "That image is not in the article.")
+    try:
+        (assets / f"{old_fid}.jpg").resolve().relative_to(assets.resolve())
+        if new_fid:
+            (assets / f"{new_fid}.jpg").resolve().relative_to(assets.resolve())
+    except ValueError:
+        from fastapi import HTTPException as _HE
+        raise _HE(400, "Invalid frame identifier.")
     assets = settings.paths.article_assets(article_id)
     assets.mkdir(parents=True, exist_ok=True)
     if new_fid:
@@ -850,7 +875,7 @@ def _swap_article_image(settings, db, article_id: str, old_fid: str,
                    VALUES(?,?,?,?,?,?,?)""",
                 (f"asset-{new_fid}", article_id, new_fid, str(assets / f"{new_fid}.jpg"),
                  caption or "", "", time.time()))
-        (assets / f"{old_fid}.jpg").unlink(missing_ok=True)
+        # keep historical asset for revision restore
     else:
         import re as _re
         raw = md.split("\n")
@@ -872,7 +897,7 @@ def _swap_article_image(settings, db, article_id: str, old_fid: str,
         with db.transaction() as conn:
             conn.execute("DELETE FROM article_assets WHERE article_id=? AND frame_id=?",
                          (article_id, old_fid))
-        (assets / f"{old_fid}.jpg").unlink(missing_ok=True)
+        # keep historical asset for revision restore
     if new_fid:
         md = _set_caption(md, new_fid, caption if caption is not None else "")
         import re as _re2

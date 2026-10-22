@@ -5,8 +5,8 @@
 # bundle model weights: those live in the persistent `models` volume and are
 # downloaded on first use (the container has network access for that).
 ARG CUDA_VERSION=12.6.3
-ARG PYTHON_VERSION=3.12
-FROM nvidia/cuda:${CUDA_VERSION}-runtime-${CUDA_VERSION:0:4}${PYTHON_VERSION}0 AS base
+ARG UBUNTU_VERSION=24.04
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS base
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \

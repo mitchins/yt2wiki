@@ -17,11 +17,18 @@ from typing import Any
 
 ROLES = (("writer", "Writing"), ("vision", "Image judging"))
 _NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
-_ENV = re.compile(r"^[A-Z_][A-Z0-9_]{0,63}$")
+_ENV = re.compile(r"^YT2WIKI_[A-Z0-9_]{1,56}$")
 
 
 class InferenceConfigError(ValueError):
     pass
+
+
+def validate_api_key_env(value: str) -> str:
+    key_env = str(value or "").strip()
+    if key_env and not _ENV.match(key_env):
+        raise InferenceConfigError("The API key setting must use a YT2WIKI_ environment-variable prefix.")
+    return key_env
 
 
 def _config_dir(paths) -> Path:
@@ -71,7 +78,7 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
         name = str(p.get("name") or "").strip().lower()
         url = str(p.get("url") or "").strip().rstrip("/")
         model = str(p.get("model") or "").strip()
-        key_env = str(p.get("api_key_env") or "").strip()
+        key_env = validate_api_key_env(p.get("api_key_env"))
         if not _NAME.match(name):
             raise InferenceConfigError(
                 "Endpoint names use lowercase letters, digits, dots, dashes or underscores.")
@@ -79,10 +86,6 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
             raise InferenceConfigError(f"Two endpoints are both called “{name}”.")
         if not re.match(r"^https?://[^\s/]+", url):
             raise InferenceConfigError(f"“{name}” needs an http:// or https:// base URL.")
-        if key_env and not _ENV.match(key_env):
-            raise InferenceConfigError(
-                f"“{name}”: the API key setting is the name of an environment variable "
-                "(e.g. GEMMA_API_KEY), not the key itself.")
         providers[name] = {"url": url, "model": model[:200], "api_key_env": key_env}
     roles = {}
     for role, _label in ROLES:
