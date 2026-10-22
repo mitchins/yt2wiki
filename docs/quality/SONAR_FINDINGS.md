@@ -235,7 +235,7 @@ def test_source_id_file_stability(tmp_path):
 
 **Message:** *Replace this assertion to not have the same actual and expected expression.*
 
-**Rationale:** Sonar's S5863 flags `assert a == a` where `a` is the same syntactic expression — it will be `true` for a deterministic pure function, making the test tautological, and will not catch nondeterminism if the two calls are evaluated separately they could still differ. The test intends to assert determinism / stability (same input → same id).
+**Rationale:** Sonar's S5863 flags `assert f(p) == f(p)` where both sides are the same syntactic expression. For a pure deterministic function the assertion is tautologically true, but the test's intent is to assert repeated-call stability (same input → same id) — which both `assert f(p) == f(p)` and `a = f(p); b = f(p); assert a == b` check identically; the latter simply avoids the same-expression pattern that triggers the rule. The second assertion `!=` for different content catches a constant ID.
 
 **Reachable:** Test only.
 

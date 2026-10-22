@@ -115,7 +115,8 @@ def test_judge_shuffle_comment_present():
 
 
 def test_templates_safe_comments_present():
-    article = Path("src/yt2wiki/web/templates/article.html").read_text(encoding="utf-8")
-    library = Path("src/yt2wiki/web/templates/library.html").read_text(encoding="utf-8")
+    base = Path(__file__).resolve().parents[1]
+    article = (base / "src/yt2wiki/web/templates/article.html").read_text(encoding="utf-8")
+    library = (base / "src/yt2wiki/web/templates/library.html").read_text(encoding="utf-8")
     assert "S5247" in article, "article.html should document S5247 justification"
     assert "S5247" in library, "library.html should document S5247 justification"

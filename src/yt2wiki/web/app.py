@@ -352,7 +352,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if size == 0:
             dest.unlink(missing_ok=True)
             raise HTTPException(400, "That file is empty.")
-        sid = service.create_upload_source(dest)
+        # Hashing and copying can block the event loop for large videos; offload.
+        sid = await anyio.to_thread.run_sync(lambda: service.create_upload_source(dest))
         if service.get_source(sid).get("upload_path") != str(dest):
             shutil.rmtree(dest.parent, ignore_errors=True)  # stored under its source id
         return enqueue(sid, profile)
