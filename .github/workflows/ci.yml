@@ -1,0 +1,111 @@
+# All third-party actions are pinned to immutable 40-character SHAs.
+# Each pinned release uses the Node.js 24 action runtime.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python tests and coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      HF_HOME: /tmp/yt2wiki-hf
+      HF_HUB_OFFLINE: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, node24
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0, node24
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg tesseract-ocr
+
+      - name: Install project and test dependencies (no GPU extras)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" pytesseract
+
+      - name: Run tests with branch coverage
+        run: |
+          python -m pytest tests -q \
+            --cov=yt2wiki --cov-branch \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --junitxml=junit.xml
+          test -s coverage.xml
+          test -s junit.xml
+
+      - name: Upload test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, node24
+        with:
+          name: python-test-reports
+          path: |
+            coverage.xml
+            junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  sonar:
+    name: SonarQube quality gate
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Secrets are unavailable on forks and Dependabot PRs. Run pytest there; do not expose SONAR_TOKEN.
+    if: github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    steps:
+      - name: Checkout full history for Sonar
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, node24
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Download reports from test job
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1, node24
+        with:
+          name: python-test-reports
+          path: .
+
+      - name: Verify tracked Sonar configuration and report
+        run: |
+          test -s sonar-project.properties || {
+            echo "::error::Commit your existing sonar-project.properties (project key and org/host) to this PR."
+            exit 1
+          }
+          test -s coverage.xml || {
+            echo "::error::Test job did not supply coverage.xml."
+            exit 1
+          }
+
+      - name: Analyze with SonarQube and enforce quality gate
+        uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1, node24
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.python.coverage.reportPaths=coverage.xml
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
