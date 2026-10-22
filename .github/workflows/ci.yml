@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      HF_HOME: ${{ runner.temp }}/yt2wiki-hf
+      HF_HOME: /tmp/yt2wiki-hf
       HF_HUB_OFFLINE: "1"
       PYTHONUNBUFFERED: "1"
     steps:
