@@ -34,8 +34,12 @@ def content_hash(data: bytes, *, prefix: int = 16) -> str:
 
 
 def file_hash(path: Path, *, prefix: int = 16, chunk: int = 1 << 20) -> str:
+    # S8707: validate before opening — tainted CLI/web path must be a regular file
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"not a regular file: {p}")
     h = hashlib.sha256()
-    with open(path, "rb") as fh:
+    with open(p, "rb") as fh:
         while True:
             block = fh.read(chunk)
             if not block:

@@ -729,7 +729,7 @@ def adjudicate_section_z1(backend, section: dict[str, Any], initial: dict[str, A
     def score_round(shown_cands, rnd, rng_seed):
         nonlocal vlm_calls
         order = list(range(len(shown_cands)))
-        random.Random(rng_seed).shuffle(order)
+        random.Random(rng_seed).shuffle(order)  # S2245: non-cryptographic deterministic shuffle for presentation order
         ordered = [shown_cands[i] for i in order]
         if initial is not None and any(s["frame_id"] == initial["frame_id"]
                                       for s in shown_cands):

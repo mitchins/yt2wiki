@@ -56,6 +56,7 @@
         <div class="card-body">
           {% if c.kind %}<span class="card-kind">{{ c.kind }}</span>{% endif %}
           <h3><a href="/articles/{{ c.article_id }}">{{ c.title }}</a></h3>
+          {# S5247: c.snippet is html.escape'd in views._snippet_html with <mark> highlights — safe #}
           {% if c.snippet %}<p class="sum">{{ c.snippet|safe }}</p>
           {% elif c.summary %}<p class="sum">{{ c.summary }}</p>{% endif %}
           <div class="card-meta">
