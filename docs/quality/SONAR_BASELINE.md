@@ -135,4 +135,4 @@ To make the baseline reproducible and align with package versioning:
 Acceptance per P2 PR A: sonar config tracked (`sonar-project.properties`), baseline identifiable (`edb56f9`/`d42c4ef8` + `0.1.0`), subsequent changed-code gate verifies conditions, `80%` new-code intact, overall visible.
 
 ---
-*Generated from live SonarCloud APIs 2026-10-22T10:5xZ and 2026-10-22T22:29Z; dashboard remains at https://sonarcloud.io/dashboard?id=mitchins_yt2wiki&branch=main .*
+*Generated from live SonarCloud APIs 2026-10-22T10:53:05Z and 2026-10-22T22:29Z; dashboard remains at https://sonarcloud.io/dashboard?id=mitchins_yt2wiki&branch=main .*
