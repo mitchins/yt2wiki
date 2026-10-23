@@ -316,7 +316,10 @@ def restore_generation(db, paths, generation_id: str) -> dict[str, Any]:
     manifest_file = gdir / "manifest.json"
     if not manifest_file.is_file():
         raise FileNotFoundError(f"generation snapshot missing: {manifest_file}")
-    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"generation manifest unreadable: {exc}") from exc
     try:
         gen_artifacts = manifest.get("artifacts") or {}
         for rel, digest in gen_artifacts.items():

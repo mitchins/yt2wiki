@@ -390,20 +390,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
     )
 
 
-def _stamp_schema_version(conn: sqlite3.Connection) -> None:
-    """Record SCHEMA_VERSION, never lowering a newer stamp.
-
-    Kept for backward compatibility; new code paths go through _migrate(),
-    which refuses databases stamped by a newer unsupported build.
-    """
-    if _schema_version_of(conn) > SCHEMA_VERSION:
-        return
-    conn.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
-        (str(SCHEMA_VERSION),),
-    )
-
-
 class Database:
     """Thin synchronous wrapper around SQLite.
 

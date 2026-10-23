@@ -145,6 +145,8 @@ def test_two_generations_lineage_assets_and_no_secrets(tmp_path):
 
     _article_files(paths, "art9-yt-abc", body="# Two",
                    assets={"f-1.jpg": b"\xff\xd8one", "f-2.jpg": b"\xff\xd8two"})
+    # A non-file entry in assets/ must be skipped, not snapshotted.
+    (paths.article_assets("art9-yt-abc") / "thumb").mkdir()
     g2 = record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
                            job_id="job-1", recipe="v9", recipe_version=RECIPE_VERSION,
                            settings_fingerprint="fp", profile="compact",
@@ -308,3 +310,285 @@ def test_classic_store_records_generation(tmp_path):
     assert row["operation"] == "initial"
     assert (paths.article_dir("art-yt-abc") / "generations" /
             row["generation_id"] / "article.md").read_text() == "see ![](assets/f-9.jpg)"
+
+
+def test_build_info_fallbacks_and_digest_env(tmp_path, monkeypatch):
+    import importlib.metadata as _md
+
+    from yt2wiki import generations as _g
+
+    monkeypatch.setattr(_md, "version", lambda *a: (_ for _ in ()).throw(Exception("no dist")))
+    info = _g.build_info()
+    assert info["app_version"] == "0.1.0"  # falls back to package __version__
+    monkeypatch.delattr("yt2wiki.__version__", raising=False)
+    monkeypatch.setattr(_md, "version", lambda *a: (_ for _ in ()).throw(Exception("no dist")))
+    assert _g.build_info()["app_version"] == "unknown"
+    import subprocess as _sp
+    monkeypatch.setattr(_sp, "check_output",
+                        lambda *a, **k: (_ for _ in ()).throw(Exception("no git")))
+    assert _g.build_info()["git_commit"] == "unknown"
+    monkeypatch.setenv("YT2WIKI_IMAGE_DIGEST", "sha256:abc")
+    assert _g.build_info()["image_digest"] == "sha256:abc"
+
+
+def test_job_snapshot_tolerates_bad_config_and_db_errors(tmp_path):
+    from yt2wiki import generations as _g
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db)
+    db.execute("UPDATE jobs SET config_json='{broken' WHERE job_id='job-1'")
+    assert _g._job_snapshot(db, "job-1") is None
+    assert _g._job_snapshot(db, None) is None
+    assert _g._job_snapshot(db, "no-such-job") is None
+    broken = SimpleNamespace(query=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db")))
+    assert _g._recorded_asr_identity(broken, "yt-abc") is None
+
+
+def test_recorded_asr_identity_modes(tmp_path):
+    from yt2wiki import generations as _g
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db)
+    t = 1700000000.0
+    db.execute("INSERT INTO stages(job_id, stage, state, metrics_json, finished_at)"
+               " VALUES('job-1', 'transcribe', 'done', 'not-json', ?)", (t,))
+    assert _g._recorded_asr_identity(db, "yt-abc") is None
+    db.execute("UPDATE stages SET metrics_json=? WHERE job_id='job-1'",
+               (json.dumps({"mode": "captions"}),))
+    assert _g._recorded_asr_identity(db, "yt-abc") == {"mode": "captions"}
+    db.execute("UPDATE stages SET metrics_json=? WHERE job_id='job-1'",
+               (json.dumps({"mode": "asr",
+                            "asr_identity": {"url": "http://asr:9000", "model": "large-v3"}}),))
+    ident = _g._recorded_asr_identity(db, "yt-abc")
+    assert ident["url"] == "http://asr:9000" and ident["revision"] == "unknown"
+
+
+def test_asr_server_identity_wins_over_empty_snapshot_entry(tmp_path):
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db, inference={"asr": {"provider": "x"}})
+    _seed_article(db)
+    _article_files(paths, "art9-yt-abc", body="# One", assets={})
+    t = 1700000000.0
+    db.execute("INSERT INTO stages(job_id, stage, state, metrics_json, finished_at)"
+               " VALUES('job-1', 'transcribe', 'done', ?, ?)",
+               (json.dumps({"mode": "asr",
+                            "asr_identity": {"url": "http://asr:9000", "model": "large-v3"}}), t))
+    g = record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
+                          job_id="job-1", recipe="v9", recipe_version=RECIPE_VERSION)
+    row = db.query_one("SELECT asr_json FROM generations WHERE generation_id=?",
+                       (g["generation_id"],))
+    assert json.loads(row["asr_json"])["url"] == "http://asr:9000"
+
+
+def test_record_generation_without_job_uses_snapshot_and_hash_failure(tmp_path, monkeypatch):
+    from yt2wiki import generations as _g
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db)
+    _seed_article(db)
+    _article_files(paths, "art9-yt-abc", body="# One", assets={})
+    g = record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
+                          job_id=None, recipe="v9", recipe_version=RECIPE_VERSION,
+                          snapshot=_JOB_SNAPSHOT)
+    assert g["operation"] == "initial"
+    assert json.loads(db.query_one(
+        "SELECT writer_json FROM generations WHERE generation_id=?",
+        (g["generation_id"],))["writer_json"])["provider"] == "hal"
+    # A sources-table failure degrades to unknown instead of failing publish.
+    orig = Database.query_one
+    def _boom(self, sql, params=()):
+        if "FROM sources" in sql:
+            raise RuntimeError("db")
+        return orig(self, sql, params)
+    monkeypatch.setattr(Database, "query_one", _boom)
+    g2 = record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
+                           job_id=None, recipe="classic",
+                           recipe_version=RECIPE_VERSION, snapshot=_JOB_SNAPSHOT)
+    assert db.query_one(
+        "SELECT source_content_hash FROM generations WHERE generation_id=?",
+        (g2["generation_id"],))["source_content_hash"] == "unknown"
+
+
+def test_snapshot_write_failure_aborts_generation(tmp_path):
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db)
+    _seed_article(db)
+    _article_files(paths, "art9-yt-abc", body="# One", assets={})
+    md = paths.article_markdown("art9-yt-abc")
+    md.chmod(0o000)
+    try:
+        with pytest.raises(Exception):
+            record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
+                              job_id="job-1", recipe="v9",
+                              recipe_version=RECIPE_VERSION)
+    finally:
+        md.chmod(0o644)
+    assert db.query_one("SELECT COUNT(*) c FROM generations")["c"] == 0
+
+
+def test_prompt_hash_failure_degrades_manifest(tmp_path, monkeypatch):
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db)
+    _seed_article(db)
+    _article_files(paths, "art9-yt-abc", body="# One", assets={})
+    monkeypatch.setattr("yt2wiki.v9.writer.TITLE_PROMPT", None)
+    g = record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
+                          job_id="job-1", recipe="v9", recipe_version=RECIPE_VERSION)
+    assert json.loads(db.query_one(
+        "SELECT prompts_json FROM generations WHERE generation_id=?",
+        (g["generation_id"],))["prompts_json"])["error"] == "prompt hash unavailable"
+
+
+def test_restore_missing_and_unreadable_manifest(tmp_path):
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db)
+    _seed_article(db)
+    _article_files(paths, "art9-yt-abc", body="# One", assets={})
+    g = record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
+                          job_id="job-1", recipe="v9", recipe_version=RECIPE_VERSION,
+                          source_content_hash="pinned-hash")
+    row = db.query_one("SELECT source_content_hash FROM generations WHERE generation_id=?",
+                       (g["generation_id"],))
+    assert row["source_content_hash"] == "pinned-hash"
+    gdir = paths.article_dir("art9-yt-abc") / "generations" / g["generation_id"]
+    (gdir / "manifest.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        restore_generation(db, paths, g["generation_id"])
+    (gdir / "manifest.json").write_text("{broken", encoding="utf-8")
+    with pytest.raises(ValueError, match="unreadable"):
+        restore_generation(db, paths, g["generation_id"])
+
+
+def test_sanitize_drops_non_dict_roles():
+    assert sanitize_snapshot({"writer": "notadict", "vision": None}) == {}
+
+
+def test_schema_version_garbage_and_remigrate(tmp_path):
+    import sqlite3 as _s3
+
+    from yt2wiki.db import schema as _s
+
+    db = Database(tmp_path / "g.sqlite3")
+    db.execute("UPDATE meta SET value='abc' WHERE key='schema_version'")
+    reopened = Database(tmp_path / "g.sqlite3")
+    assert reopened.query_one(
+        "SELECT value FROM meta WHERE key='schema_version'")["value"] == str(_s.SCHEMA_VERSION)
+    # Direct white-box: already-current and already-migrated paths.
+    conn = reopened.connection()
+    _s._migrate(conn)
+    conn.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
+    _s._migrate(conn)  # column exists: ALTER skipped, version restamped
+    assert reopened.query_one(
+        "SELECT value FROM meta WHERE key='schema_version'")["value"] == str(_s.SCHEMA_VERSION)
+    closed = _s3.connect(":memory:")
+    closed.close()
+    assert _s._table_columns(closed, "articles") == set()
+
+
+def test_build_info_reads_baked_build_file(tmp_path, monkeypatch):
+    from pathlib import Path as _P
+
+    from yt2wiki import generations as _g
+
+    orig_isfile = _P.is_file
+    orig_read = _P.read_text
+    monkeypatch.setattr(_P, "is_file",
+                        lambda self: True if self.name == "BUILD" else orig_isfile(self))
+    monkeypatch.setattr(_P, "read_text",
+                        lambda self, *a, **k: "deadbee\n" if self.name == "BUILD"
+                        else orig_read(self, *a, **k))
+    assert _g.build_info()["git_commit"] == "deadbee"
+
+
+def test_build_info_survives_unreadable_build_file(tmp_path, monkeypatch):
+    import subprocess as _sp
+    from pathlib import Path as _P
+
+    from yt2wiki import generations as _g
+
+    orig_isfile = _P.is_file
+    monkeypatch.setattr(_P, "is_file",
+                        lambda self: True if self.name == "BUILD" else orig_isfile(self))
+    monkeypatch.setattr(_P, "read_text",
+                        lambda self, *a, **k: (_ for _ in ()).throw(PermissionError("denied")))
+    monkeypatch.setattr(_sp, "check_output",
+                        lambda *a, **k: (_ for _ in ()).throw(Exception("no git")))
+    assert _g.build_info()["git_commit"] == "unknown"
+
+
+def test_recorded_asr_identity_multi_row_modes(tmp_path):
+    from yt2wiki import generations as _g
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db)
+    t = 1700000000.0
+    db.execute("INSERT INTO jobs(job_id, source_id, profile, fingerprint, state,"
+               " config_json, created_at, updated_at)"
+               " VALUES('job-2', 'yt-abc', 'compact', 'fp', 'done', '{}', ?, ?)", (t, t))
+    # Newest row is unusable (asr mode without an identity dict): it must be
+    # skipped, and the older captions row decides.
+    db.execute("INSERT INTO stages(job_id, stage, state, metrics_json, finished_at)"
+               " VALUES('job-2', 'transcribe', 'done', ?, ?)",
+               (json.dumps({"mode": "asr"}), t + 1))
+    db.execute("INSERT INTO stages(job_id, stage, state, metrics_json, finished_at)"
+               " VALUES('job-1', 'transcribe', 'done', ?, ?)",
+               (json.dumps({"mode": "captions"}), t))
+    assert _g._recorded_asr_identity(db, "yt-abc") == {"mode": "captions"}
+
+
+def test_snapshot_asr_url_kept_when_recorded_matches_nothing(tmp_path):
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    snap = {"asr": {"provider": "other", "url": "http://other:9000", "model": "m"}}
+    _seed_source_job(db, inference=snap)
+    _seed_article(db)
+    _article_files(paths, "art9-yt-abc", body="# One", assets={})
+    t = 1700000000.0
+    db.execute("INSERT INTO stages(job_id, stage, state, metrics_json, finished_at)"
+               " VALUES('job-1', 'transcribe', 'done', ?, ?)",
+               (json.dumps({"mode": "asr",
+                            "asr_identity": {"url": "http://asr:9000", "model": "large-v3"}}), t))
+    g = record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
+                          job_id="job-1", recipe="v9", recipe_version=RECIPE_VERSION)
+    # The job-captured URL differs from the recorded one: keep the snapshot.
+    assert json.loads(db.query_one(
+        "SELECT asr_json FROM generations WHERE generation_id=?",
+        (g["generation_id"],))["asr_json"])["url"] == "http://other:9000"
+
+
+def test_record_generation_without_assets_dir(tmp_path):
+    import shutil as _sh
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db, inference=_JOB_SNAPSHOT)
+    _seed_article(db)
+    _article_files(paths, "art9-yt-abc", body="# One", assets={})
+    _sh.rmtree(paths.article_assets("art9-yt-abc"))
+    g = record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
+                          job_id="job-1", recipe="v9", recipe_version=RECIPE_VERSION)
+    assert g["artifacts"] == 2  # md + html only
+    out = restore_generation(db, paths, g["generation_id"])
+    assert out["artifacts"] == ["article.html", "article.md"]
+
+
+def test_restore_list_manifest_is_unreadable(tmp_path):
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db)
+    _seed_article(db)
+    _article_files(paths, "art9-yt-abc", body="# One", assets={})
+    g = record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
+                          job_id="job-1", recipe="v9", recipe_version=RECIPE_VERSION)
+    gdir = paths.article_dir("art9-yt-abc") / "generations" / g["generation_id"]
+    (gdir / "manifest.json").write_text("[1, 2]", encoding="utf-8")
+    with pytest.raises(ValueError, match="unreadable"):
+        restore_generation(db, paths, g["generation_id"])
