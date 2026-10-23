@@ -10,13 +10,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_CACHE_DIR=/tmp/uv-cache \
     TMPDIR=/tmp
 
-# System deps: ffmpeg for media, tesseract for OCR veto, curl for healthcheck.
+# System deps: ffmpeg for media, tesseract for OCR veto, curl for healthcheck,
+# sqlite3 CLI for the documented WAL-safe `.backup` procedure.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         tesseract-ocr \
         tesseract-ocr-eng \
         curl \
         ca-certificates \
+        sqlite3 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1000 yt2wiki
 

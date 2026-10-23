@@ -210,10 +210,13 @@ usable without it.
 # Start the base service only (the supported deployment):
 docker compose up -d yt2wiki
 
-# Only to attempt your own qualification (requires NVIDIA + staged weights):
-#   /models/Qwen3.5-4B-Q4_K_M.gguf + /models/mmproj-F16.gguf (NOT provided here;
-#   do not download another model merely to finish this PR — stage your own
-#   already-available weights and verify sha256 against your reference)
+# Only to attempt your own qualification (requires NVIDIA + staged weights).
+# Copy your already-available GGUFs into the named volume (NOT the host's
+# /data/models — that path is inside the yt2wiki container, not the sidecar):
+#   docker run --rm -v yt2wiki-models:/models -v /host/gguf:/src:ro alpine \
+#     cp /src/Qwen3.5-4B-Q4_K_M.gguf /src/mmproj-F16.gguf /models/
+# Do not download another model merely to finish this PR; verify sha256
+# against your own reference, then:
 docker compose --profile llama up -d
 ```
 
@@ -309,8 +312,10 @@ Migration-free installation for an already existing article library:
 
 After switching the mount, `GET /library` shows the existing guides, and `GET /articles/{id}` renders them without loading a model.
 
-WAL-safe backup while the service is running (SQLite WAL mode — never copy the
-bare `.sqlite3` file while `-wal`/`-shm` sidecars exist):
+WAL-safe backup. Never copy the bare live `.sqlite3` file while `-wal`/`-shm`
+sidecars exist — use SQLite's online backup, which checkpoints the WAL into a
+consistent snapshot. These commands need a **running** container
+(`docker exec`/`docker cp` do not operate on host paths directly):
 
 ```bash
 docker exec yt2wiki sqlite3 /data/db/yt2wiki.sqlite3 ".backup '/tmp/yt2wiki-backup.sqlite3'"
@@ -319,9 +324,29 @@ docker exec yt2wiki rm /tmp/yt2wiki-backup.sqlite3
 docker cp yt2wiki:/data/articles ./yt2wiki-articles-backup   # markdown/assets (read-only copy)
 ```
 
-(`.backup` checkpoints the WAL into a consistent snapshot; the articles copy is
-plain files. The same commands work on the host against `$YT2WIKI_HOME`, as the
-Settings → Library panel states.)
+Consistency note: the `.backup` itself is a crash-consistent DB snapshot, but it
+and the articles copy are two separate operations — an edit landing between them
+pairs a newer DB row with older article files (or vice versa). For an exact
+point-in-time snapshot, stop the service first so no writes can interleave:
+
+```bash
+docker stop yt2wiki   # JobRunner recovers cleanly on next start; queued jobs resume
+docker cp yt2wiki:/data/db/yt2wiki.sqlite3 ./yt2wiki-backup.sqlite3   # -wal/-shm are quiet now
+docker cp yt2wiki:/data/articles ./yt2wiki-articles-backup
+docker start yt2wiki
+```
+
+Host-native equivalent (pip install, no container — same WAL rule applies):
+
+```bash
+sqlite3 "$YT2WIKI_HOME/db/yt2wiki.sqlite3" ".backup 'yt2wiki-backup.sqlite3'"
+cp -a "$YT2WIKI_HOME/articles" yt2wiki-articles-backup
+```
+
+(The Settings → Library panel shows the data folder, DB path/size and revision
+count for the same purpose. Article bodies are also re-exportable from the DB,
+so a DB-only backup already preserves the text; the articles copy adds the
+rendered files and assets.)
 
 ---
 

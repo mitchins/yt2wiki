@@ -27,8 +27,9 @@ services:
       - YT2WIKI_PROFILE=${YT2WIKI_PROFILE:-compact}
       - HF_HOME=/data/models
       # External provider keys: define these names in the Portainer stack
-      # "Environment variables" / "Advanced mode" UI (or a Portainer secret
-      # mounted as env), NOT hardcoded here. Stack-variable mapping:
+      # "Environment variables" / "Advanced mode" UI, NOT hardcoded here.
+      # (Portainer/Docker secrets mount as files, which this service does not
+      # read — stack variables are the supported input.) Stack-variable mapping:
       #   YT2WIKI_OPENAI_API_KEY=${YT2WIKI_OPENAI_API_KEY:-}
       #   YT2WIKI_GEMMA_API_KEY=${YT2WIKI_GEMMA_API_KEY:-}
       # `${VAR}` is interpolated by Portainer/Compose at deploy time from the

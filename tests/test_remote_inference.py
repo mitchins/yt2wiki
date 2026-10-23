@@ -197,10 +197,31 @@ def test_writer_and_vision_routed_to_configured_providers(tmp_path, monkeypatch)
     # Check that vision payload had images
     assert any("image_url" in json.dumps(c["json"]) for c in vision_calls)
 
-    # Also test 8-image ranking fits in context (B5 requirement)
+    # Also test 8-image ranking fits in context (B5 requirement).
+    # NOTE: the mock proves routing of all eight images, not that any real
+    # server fits 8 images in its context window — that needs real hardware.
+    n_calls_before = len(calls)
     ims8 = [Image.new("RGB", (64, 64), (i * 30 % 255, 0, 0)) for i in range(8)]
     text8 = vision.rank_images(ims8, prompt, max_new_tokens=600)
     assert text8  # should succeed, proving 8 images fit
+    def _image_parts(payload):
+        n = 0
+        for m in payload.get("messages", []):
+            content = m.get("content")
+            if isinstance(content, list):
+                n += sum(1 for p in content
+                         if isinstance(p, dict) and p.get("type") == "image_url")
+        return n
+
+    eight_image_posts = [
+        c for c in calls[n_calls_before:]
+        if vision_url in c["url"] and "/chat/completions" in c["url"]
+    ]
+    assert eight_image_posts, "8-image ranking must issue a chat request"
+    for c in eight_image_posts:
+        assert _image_parts(c["json"]) == 8, (
+            "the recorded 8-image request must carry exactly eight image parts"
+        )
     # Ensure no auto-download of weights: the test never touched HF_HOME/models download
     assert not (settings.paths.root / "models" / "downloaded").exists()
 
