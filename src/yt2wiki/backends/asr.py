@@ -26,14 +26,15 @@ class Word:
     start: float
     end: float
     word: str
-    probability: float = 0.0
+    # None when the server reports no per-word confidence; SQL NULL, not zero.
+    probability: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "start": round(self.start, 3),
             "end": round(self.end, 3),
             "word": self.word,
-            "probability": round(self.probability, 4),
+            "probability": round(self.probability, 4) if self.probability is not None else None,
         }
 
 
@@ -43,18 +44,22 @@ class Segment:
     end: float
     text: str
     words: list[Word] = field(default_factory=list)
-    avg_logprob: float = 0.0
-    no_speech_prob: float = 0.0
-    compression_ratio: float = 0.0
+    # Server-reported confidence metadata; None when absent (SQL NULL).
+    avg_logprob: float | None = None
+    no_speech_prob: float | None = None
+    compression_ratio: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        def _r(v: float | None) -> float | None:
+            return round(v, 4) if v is not None else None
+
         return {
             "start": round(self.start, 3),
             "end": round(self.end, 3),
             "text": self.text,
-            "avg_logprob": round(self.avg_logprob, 4),
-            "no_speech_prob": round(self.no_speech_prob, 4),
-            "compression_ratio": round(self.compression_ratio, 4),
+            "avg_logprob": _r(self.avg_logprob),
+            "no_speech_prob": _r(self.no_speech_prob),
+            "compression_ratio": _r(self.compression_ratio),
             "words": [w.to_dict() for w in self.words],
         }
 
@@ -62,9 +67,14 @@ class Segment:
 @dataclass
 class Transcript:
     language: str
-    language_probability: float
+    # None when the server reports a language without confidence (e.g. the
+    # /asr contract); stored as SQL NULL, never a fabricated number.
+    language_probability: float | None
     duration_s: float
     segments: list[Segment] = field(default_factory=list)
+    # Non-fatal data notes from parsing (e.g. zero-duration words the
+    # server emitted at an audio boundary); surfaced in job metrics.
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def text(self) -> str:
@@ -73,7 +83,10 @@ class Transcript:
     def to_dict(self) -> dict[str, Any]:
         return {
             "language": self.language,
-            "language_probability": round(self.language_probability, 4),
+            "language_probability": (
+                round(self.language_probability, 4)
+                if self.language_probability is not None else None
+            ),
             "duration_s": round(self.duration_s, 3),
             "segments": [s.to_dict() for s in self.segments],
         }
@@ -130,7 +143,13 @@ class WhisperBackend(BaseBackend):
         self.hf_home = hf_home
 
     def load(self) -> BackendReport:
-        from faster_whisper import WhisperModel
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise RuntimeError(
+                "local ASR needs the optional 'asr-local' extra "
+                "(pip install yt2wiki[asr-local]); or assign the transcription "
+                "role to an HTTP provider instead") from exc
 
         started = time.time()
         os.environ.setdefault("HF_HOME", str(self.hf_home or Path.home() / ".cache" / "huggingface"))

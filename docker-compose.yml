@@ -29,6 +29,12 @@ services:
       - YT2WIKI_HOME=/data
       # Optional: choose profile (compact fits 8 GB, standard 12–16 GB). Default is standard.
       - YT2WIKI_PROFILE=compact
+      # Default transcription backend: the pinned Whisper service below
+      # (enable with: docker compose --profile asr up -d). Without it,
+      # transcription jobs fail loudly — assign the transcription role to a
+      # provider in Settings → Inference, or set YT2WIKI_ASR_MODEL to declare
+      # the server-side model for provenance (see docs/deploy.md).
+      - YT2WIKI_ASR_URL=http://asr:9000
       # Logging / cache inside container
       - HF_HOME=/data/models
     restart: unless-stopped
@@ -46,6 +52,50 @@ services:
         max-file: "3"
     # No GPU reservation — the web service never needs NVIDIA to start or serve the library.
     # It serves the library and fails jobs explicitly when inference is offline.
+
+  # Default transcription backend: maintained Whisper HTTP service.
+  # Qualified for P3 (digest-pinned, large-v3, word timestamps verified).
+  # Enable with: docker compose --profile asr up -d
+  # Private by design: no published ports — reachable only as http://asr:9000
+  # from the yt2wiki service on this network. Model weights live in the
+  # persistent asr-models volume; yt2wiki itself ships no ASR runtime.
+  asr:
+    # ahmetoner/whisper-asr-webservice 1.x GPU build (faster-whisper engine),
+    # verified 2026-10-23 via `docker inspect` on the qualification machine.
+    # NOTE: the :latest (CPU) tag is a different image; this digest is the
+    # -gpu build. Re-verify after any pull.
+    image: onerahmet/openai-whisper-asr-webservice@sha256:3deb30cfd3d5614fd3885e6dfbef7dfcf95fe897300ecc703f7f3b3682b717ae
+    container_name: yt2wiki-asr
+    profiles: ["asr"]
+    volumes:
+      - asr-models:/root/.cache   # persistent HF/model cache (no re-download)
+    environment:
+      - ASR_MODEL=large-v3        # server-side model (declare the same in YT2WIKI_ASR_MODEL)
+      - ASR_ENGINE=faster_whisper
+      - ASR_DEVICE=cuda           # set to cpu on machines without NVIDIA
+    # GPU selection: `count: 1` takes the first visible card. On multi-GPU
+    # hosts pin the card explicitly instead, e.g. `device_ids: ['2']`
+    # (a bare 8 GB card OOMs on large-v3; the qualification machine needed
+    # device 2, a 12 GB card, for the pinned weights).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/docs')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # EXPERIMENTAL visual sidecar: NOT qualified. The referenced weights
   # (Qwen3.5-4B Q4_K_M + F16 projector) are absent from this machine, no
@@ -127,6 +177,8 @@ volumes:
     name: yt2wiki-data
   yt2wiki-models:
     name: yt2wiki-models
+  asr-models:
+    name: yt2wiki-asr-models
 
 networks:
   default:

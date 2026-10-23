@@ -75,12 +75,13 @@ def test_normalize_timestamps_ranges_none_targets_and_past_eof():
 
 
 def test_image_remove_drops_caption_and_refreshes_exports(tmp_path):
-    import json as _json
+    import time as _time
+
     from fastapi.testclient import TestClient
+
     from yt2wiki.config import Settings
     from yt2wiki.db.schema import Database
     from yt2wiki.web.app import create_app
-    import time as _time
 
     settings = Settings.load(data_dir=tmp_path, profile="compact", device_index=None)
     db = Database(settings.paths.db_path)
@@ -118,11 +119,13 @@ def test_image_remove_drops_caption_and_refreshes_exports(tmp_path):
 
 def test_v9_sections_endpoint_lists_stable_ids(tmp_path):
     import json as _json
+    import time as _time
+
     from fastapi.testclient import TestClient
+
     from yt2wiki.config import Settings
     from yt2wiki.db.schema import Database
     from yt2wiki.web.app import create_app
-    import time as _time
 
     settings = Settings.load(data_dir=tmp_path, profile="compact", device_index=None)
     db = Database(settings.paths.db_path)
@@ -161,11 +164,13 @@ def test_text_model_class_is_importable():
 
 
 def test_edit_refreshes_html_zip_and_standalone(tmp_path):
+    import time as _time
+
     from fastapi.testclient import TestClient
+
     from yt2wiki.config import Settings
     from yt2wiki.db.schema import Database
     from yt2wiki.web.app import create_app
-    import time as _time
 
     settings = Settings.load(data_dir=tmp_path, profile="compact", device_index=None)
     db = Database(settings.paths.db_path)
@@ -195,11 +200,13 @@ def test_edit_refreshes_html_zip_and_standalone(tmp_path):
 
 
 def test_replace_without_caption_neutralises_alt_and_caption(tmp_path):
+    import time as _time
+
     from fastapi.testclient import TestClient
+
     from yt2wiki.config import Settings
     from yt2wiki.db.schema import Database
     from yt2wiki.web.app import create_app
-    import time as _time
 
     settings = Settings.load(data_dir=tmp_path, profile="compact", device_index=None)
     db = Database(settings.paths.db_path)
@@ -230,3 +237,71 @@ def test_replace_without_caption_neutralises_alt_and_caption(tmp_path):
     row = db.query_one("SELECT markdown FROM articles WHERE article_id='a9'")
     assert "old alt" not in row["markdown"] and "old cap" not in row["markdown"]
     assert "Source frame" in row["markdown"]
+
+
+def test_ensure_base_records_stage_metrics_and_artifacts(tmp_path):
+    """_ensure_base must persist base-stage provenance (e.g. asr_server)."""
+    import json as _json
+    import time as _time
+
+    from yt2wiki.config import Settings
+    from yt2wiki.db.schema import Database
+    from yt2wiki.v9 import run as v9run
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    db = Database(tmp_path / "db.sqlite3")
+    db.migrate()
+    sid = "yt-v9base001"
+    db.execute("INSERT INTO sources(source_id, kind, origin_url, title, uploader, duration_s, created_at)"
+               " VALUES(?,?,?,?,?,?,?)",
+               (sid, "youtube", "https://youtu.be/v9base001", "T", "u", 10.0, _time.time()))
+    job_id = "job-v9base"
+    db.execute("INSERT INTO jobs(job_id, source_id, profile, fingerprint, state, config_json, created_at, updated_at)"
+               " VALUES(?,?,?,?,?,?,?,?)",
+               (job_id, sid, "compact", settings.fingerprint(), "queued", "{}", _time.time(), _time.time()))
+
+    class FakeMod:
+        def __init__(self, out):
+            self._out = out
+
+        def run(self, ctx):
+            ctx.artifacts["asr_server"] = "http://asr:9000 (model large-v3)"
+            ctx.artifacts["asr_unsupported_options"] = ["initial_prompt"]
+            return dict(self._out)
+
+    import yt2wiki.pipeline.stages.acquisition as acq
+    import yt2wiki.pipeline.stages.frame_candidates as fc
+    import yt2wiki.pipeline.stages.inspect as insp
+    import yt2wiki.pipeline.stages.transcribe as tr
+    orig = (acq.run, insp.run, tr.run, fc.run) if hasattr(acq, "run") else None
+    acq.run = lambda ctx: {"mode": "upload"}
+    insp.run = lambda ctx: {"audio": "ok"}
+    tr.run = FakeMod({"mode": "asr", "reason": "x"}).run
+    fc.run = lambda ctx: {"frames": 3}
+    try:
+        from pathlib import Path as _P
+        _P(settings.paths.source_video(sid)).parent.mkdir(parents=True, exist_ok=True)
+        _P(settings.paths.source_video(sid)).write_bytes(b"fake")
+        out = v9run._ensure_base(settings, db, None, sid, job_id=job_id)
+    finally:
+        acq.run, insp.run, tr.run, fc.run = orig
+    assert out["reused"] is False
+    row = db.query_one("SELECT metrics_json, artifacts_json FROM stages WHERE job_id=? AND stage='transcribe'",
+                       (job_id,))
+    metrics = _json.loads(row["metrics_json"])
+    artifacts = _json.loads(row["artifacts_json"])
+    assert metrics["mode"] == "asr"
+    assert artifacts["asr_server"].startswith("http://asr:9000")
+    assert "initial_prompt" in artifacts["asr_unsupported_options"]
+
+
+def test_cite_rule_uses_real_url_or_plain_brackets():
+    from yt2wiki.v9.writer import SECTION_PROMPT, cite_rule
+    up = cite_rule(None)
+    assert "[0:04]" in up and "no source URL" in up and "http" not in up
+    yt = cite_rule("https://www.youtube.com/watch?v=abc&t=1")
+    assert "watch?v=abc" in yt and "[2:39]" in yt
+    # both render into the prompt without leftover placeholders
+    assert "{cite_rule}" not in SECTION_PROMPT.format(
+        video_title="T", heading="H", t_start=0.0, t_end=1.0,
+        transcript="[0.0-1.0] hi", cite_rule=up)

@@ -37,12 +37,39 @@ profiles:
 # Short aliases so CLI users can say `--llm 4b` instead of a repo id.
 aliases:
   whisper: whisper-large-v3
+  whisper-http: asr-http
   vl: vl-8b
   text: text-9b
   verify: verify-3b
 
 models:
   # ---------------------------------------------------------------- ASR ----
+  # Default: transcription over HTTP to a separately operated Whisper
+  # service (no local weights, no GPU use). The registry variant names the
+  # environment that resolves the server at build time; an assigned
+  # inference provider takes precedence (see loader._remote_spec).
+  asr-http:
+    role: asr
+    engine: asr-http
+    repo: whisper-asr-webservice/asr-http
+    revision: pinned-image
+    license: MIT
+    params_b: 0.0
+    provider: operator-hosted (ahmetoner image, faster-whisper large-v3)
+    notes: >
+      Default transcription path: HTTP POST to the operator's
+      whisper-asr-webservice (/asr contract, digest-pinned in
+      docker-compose.yml). URL from YT2WIKI_ASR_URL or the assigned
+      inference provider; /asr echoes no model id, so YT2WIKI_ASR_MODEL
+      declares the server-side model for provenance. A response without
+      word timestamps is a hard error, never a silent downgrade.
+    variants:
+      compact: {url_env: YT2WIKI_ASR_URL, model_env: YT2WIKI_ASR_MODEL, timeout: 300.0}
+      standard: {url_env: YT2WIKI_ASR_URL, model_env: YT2WIKI_ASR_MODEL, timeout: 300.0}
+      enhanced: {url_env: YT2WIKI_ASR_URL, model_env: YT2WIKI_ASR_MODEL, timeout: 300.0}
+    vram_gb: {compact: 0.0, standard: 0.0, enhanced: 0.0}
+    fallbacks: []
+
   whisper-large-v3:
     role: asr
     engine: faster-whisper
@@ -277,17 +304,17 @@ models:
 # Profile -> role -> model key.
 assignments:
   compact:
-    asr: whisper-large-v3
+    asr: asr-http
     vision: vl-qwen35-4b
     text: text-4b
     verify: verify-3b
   standard:
-    asr: whisper-large-v3
+    asr: asr-http
     vision: vl-gemma-12b
     text: text-4b
     verify: verify-3b
   enhanced:
-    asr: whisper-large-v3
+    asr: asr-http
     vision: vl-8b
     text: text-9b
     verify: verify-3b

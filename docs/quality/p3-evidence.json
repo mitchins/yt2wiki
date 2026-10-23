@@ -1,0 +1,1443 @@
+{
+ "asr_qual": {
+  "local": {
+   "load": 11.6,
+   "tx": 20.9,
+   "segs": 27,
+   "words": 461,
+   "lang": "en/1.000"
+  },
+  "http": {
+   "load": 0.0,
+   "tx": 23.0,
+   "segs": 28,
+   "words": 447,
+   "lang": "en/0.9998739957809448",
+   "unsupported": [
+    "initial_prompt",
+    "beam_size",
+    "condition_on_previous_text",
+    "temperature"
+   ]
+  },
+  "token_similarity": 0.9756
+ },
+ "halogen_writer": {
+  "title": {
+   "latency": 7.2,
+   "finish": "stop",
+   "usage": {
+    "prompt_tokens": 569,
+    "completion_tokens": 96,
+    "total_tokens": 665,
+    "completion_tokens_details": {
+     "reasoning_tokens": 26,
+     "reasoning_closed_at": 1,
+     "reasoning_closed_by": "answer_room"
+    }
+   },
+   "has_reasoning": true,
+   "raw": "{\n  \"title\": \"Building a Discord-Inspired Dashboard with Tailwind CSS\",\n  \"summary\": \"This tutorial teaches how to build a Discord-inspired dashboard using Tailwind CSS. It focuses on implementing the sidebar UI with utility classes to create a responsive and customizable layout.\",\n  \"kind\": \"procedure\"\n}",
+   "parsed": {
+    "title": "Building a Discord-Inspired Dashboard with Tailwind CSS",
+    "summary": "This tutorial teaches how to build a Discord-inspired dashboard using Tailwind CSS. It focuses on implementing the sidebar UI with utility classes to create a responsive and customizable layout.",
+    "kind": "procedure"
+   }
+  },
+  "section": {
+   "latency": 35.7,
+   "finish": "stop",
+   "usage": {
+    "prompt_tokens": 1795,
+    "completion_tokens": 1643,
+    "total_tokens": 3438,
+    "completion_tokens_details": {
+     "reasoning_tokens": 1001,
+     "reasoning_closed_at": 976,
+     "reasoning_closed_by": "answer_room"
+    }
+   },
+   "has_reasoning": true,
+   "body_chars": 1210,
+   "parsed_keys": [
+    "heading",
+    "body",
+    "key_points",
+    "warnings"
+   ],
+   "raw_tail": "45](URL).\",\n    \"The transcript refers to a package called `CCO`; verify the exact package name against the official Tailwind or Create React App setup instructions before using it [2:17](URL).\"\n  ]\n}",
+   "warnings": [
+    "The transcript describes the setup as involving a lot of work [2:45](URL).",
+    "The transcript refers to a package called `CCO`; verify the exact package name against the official Tailwind or Create React App setup instructions before using it [2:17](URL)."
+   ]
+  }
+ },
+ "vision_probe": [
+  {
+   "endpoint": "halogen",
+   "n": 2,
+   "valid": true,
+   "decision": "EXPAND",
+   "nscores": 2,
+   "latency_s": 17.5,
+   "raw_head": "{\"scores\": [{\"idx\": 1, \"relevance\": 1, \"clarity\": 1, \"instructional\": 0, \"payoff\": 0, \"veto\": false, \"veto_reason\": \"\", \"context_ok\": false, \"weakness\": \"Blank React app screen; no Tailwind install or config visible\"}, {\"idx\": 2, \"relevance\": 0, \"clarity\": 0, \"instructional\": 0, \"payoff\": 0, \"veto\": true, \"veto_reason\": \"Wrong-context foggy street scene unrelated to Tailwind setup\", \"context_ok\": "
+  },
+  {
+   "endpoint": "halogen",
+   "n": 4,
+   "valid": true,
+   "decision": "REPLACE",
+   "nscores": 4,
+   "latency_s": 20.0,
+   "raw_head": "{\"scores\": [{\"idx\": 1, \"relevance\": 0, \"clarity\": 2, \"instructional\": 0, \"payoff\": 0, \"veto\": true, \"veto_reason\": \"wrong-context\", \"context_ok\": false, \"weakness\": \"Shows blank localhost app, not dependency installation.\"}, {\"idx\": 2, \"relevance\": 0, \"clarity\": 1, \"instructional\": 0, \"payoff\": 0, \"veto\": true, \"veto_reason\": \"wrong-context\", \"context_ok\": false, \"weakness\": \"Foggy outdoor scene u"
+  },
+  {
+   "endpoint": "halogen",
+   "n": 8,
+   "valid": true,
+   "decision": "REPLACE",
+   "nscores": 8,
+   "latency_s": 26.1,
+   "raw_head": "{\"scores\": [{\"idx\": 1, \"relevance\": 0, \"clarity\": 1, \"instructional\": 0, \"payoff\": 0, \"veto\": false, \"veto_reason\": \"\", \"context_ok\": false, \"weakness\": \"Blank app screen, no install action\"}, {\"idx\": 2, \"relevance\": 0, \"clarity\": 1, \"instructional\": 0, \"payoff\": 0, \"veto\": true, \"veto_reason\": \"wrong-context\", \"context_ok\": false, \"weakness\": \"Unrelated foggy outdoor scene\"}, {\"idx\": 3, \"relevanc"
+  },
+  {
+   "endpoint": "gemma",
+   "n": 2,
+   "valid": false,
+   "decision": null,
+   "nscores": 0,
+   "latency_s": 4.3,
+   "raw_head": "{\"scores\": [{\"idx\": 1, \"relevance\": 0, \"clarity\": 1, \"instructional\": 0, \"payoff\": 0, \"veto\": true, \"veto_reason\": \"wrong-context\", \"context_ok\": false, \"weakness\": \"Shows a blank browser window with unrelated icons.\"},\n{\"idx\": 2, \"relevance\": 0, \"clarity\": 0, \"instructional\": 0, \"payoff\": 0, \"veto\": true, \"veto_reason\": \"wrong-context\", \"context_ok\": false, \"weakness\": \"Shows a person in a foggy "
+  },
+  {
+   "endpoint": "gemma",
+   "n": 4,
+   "valid": false,
+   "decision": null,
+   "nscores": 0,
+   "latency_s": 3.7,
+   "raw_head": "{\"scores\": [{\"idx\": 1, \"relevance\": 0, \"clarity\": 1, \"instructional\": 0, \"payoff\": 0, \"veto\": false, \"veto_reason\": \"\", \"context_ok\": false, \"weakness\": \"Empty browser window shows no content.\"}, {\"idx\": 2, \"relevance\": 0, \"clarity\": 1, \"instructional\": 0, \"payoff\": 0, \"veto\": true, \"veto_reason\": \"wrong-context\", \"context_ok\": false, \"weakness\": \"Irrelevant video of a car and person in fog.\"}, {\""
+  },
+  {
+   "endpoint": "gemma",
+   "n": 8,
+   "valid": false,
+   "decision": null,
+   "nscores": 0,
+   "latency_s": 0.1,
+   "raw_head": "ERROR HTTPStatusError: Client error '400 Bad Request' for url 'http://<gemma-host>:8000/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+  }
+ ],
+ "editorial": [
+  {
+   "source": "yt-pfaSUYaSgRo",
+   "section_id": "sec-01-1-2-one-of-the-most",
+   "heading": "1 2 one of the most",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 3,
+   "scores": [
+    [
+     1,
+     1
+    ],
+    [
+     2,
+     3
+    ],
+    [
+     3,
+     5
+    ],
+    [
+     4,
+     2
+    ],
+    [
+     5,
+     0
+    ],
+    [
+     6,
+     0
+    ],
+    [
+     7,
+     3
+    ],
+    [
+     8,
+     2
+    ]
+   ],
+   "latency_s": 27.2,
+   "truncated": 0
+  },
+  {
+   "source": "yt-pfaSUYaSgRo",
+   "section_id": "sec-01-1-2-one-of-the-most",
+   "heading": "1 2 one of the most",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": false,
+   "decision": null,
+   "winner": null,
+   "scores": [],
+   "latency_s": 4.6,
+   "truncated": 4
+  },
+  {
+   "source": "yt-pfaSUYaSgRo",
+   "section_id": "sec-02-154-plug-in-from-there-we-can",
+   "heading": "154 plug-in from there we can",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 3,
+   "scores": [
+    [
+     1,
+     5
+    ],
+    [
+     2,
+     5
+    ],
+    [
+     3,
+     8
+    ],
+    [
+     4,
+     2
+    ],
+    [
+     5,
+     2
+    ],
+    [
+     6,
+     2
+    ],
+    [
+     7,
+     2
+    ],
+    [
+     8,
+     1
+    ]
+   ],
+   "latency_s": 119.8,
+   "truncated": 0
+  },
+  {
+   "source": "yt-pfaSUYaSgRo",
+   "section_id": "sec-02-154-plug-in-from-there-we-can",
+   "heading": "154 plug-in from there we can",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 1,
+   "scores": [
+    [
+     1,
+     4
+    ],
+    [
+     2,
+     4
+    ],
+    [
+     3,
+     3
+    ],
+    [
+     4,
+     2
+    ]
+   ],
+   "latency_s": 4.3,
+   "truncated": 4
+  },
+  {
+   "source": "yt-pfaSUYaSgRo",
+   "section_id": "sec-03-308-and-declare-it-inside-of",
+   "heading": "308 and declare it inside of",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 3,
+   "scores": [
+    [
+     1,
+     5
+    ],
+    [
+     2,
+     8
+    ],
+    [
+     3,
+     8
+    ],
+    [
+     4,
+     4
+    ],
+    [
+     5,
+     4
+    ],
+    [
+     6,
+     7
+    ],
+    [
+     7,
+     1
+    ],
+    [
+     8,
+     2
+    ]
+   ],
+   "latency_s": 27.2,
+   "truncated": 0
+  },
+  {
+   "source": "yt-pfaSUYaSgRo",
+   "section_id": "sec-03-308-and-declare-it-inside-of",
+   "heading": "308 and declare it inside of",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": true,
+   "decision": "USE_PAIR",
+   "winner": 3,
+   "scores": [
+    [
+     1,
+     6
+    ],
+    [
+     2,
+     8
+    ],
+    [
+     3,
+     8
+    ],
+    [
+     4,
+     5
+    ]
+   ],
+   "latency_s": 4.3,
+   "truncated": 4
+  },
+  {
+   "source": "yt-pfaSUYaSgRo",
+   "section_id": "sec-04-453-however-it-s-worth-noting-that",
+   "heading": "453 however it's worth noting that",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "KEEP",
+   "winner": 1,
+   "scores": [
+    [
+     1,
+     8
+    ],
+    [
+     2,
+     5
+    ],
+    [
+     3,
+     7
+    ],
+    [
+     4,
+     5
+    ],
+    [
+     5,
+     2
+    ],
+    [
+     6,
+     1
+    ],
+    [
+     7,
+     2
+    ],
+    [
+     8,
+     2
+    ]
+   ],
+   "latency_s": 25.0,
+   "truncated": 0
+  },
+  {
+   "source": "yt-pfaSUYaSgRo",
+   "section_id": "sec-04-453-however-it-s-worth-noting-that",
+   "heading": "453 however it's worth noting that",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": false,
+   "decision": null,
+   "winner": null,
+   "scores": [],
+   "latency_s": 3.9,
+   "truncated": 4
+  },
+  {
+   "source": "yt-pfaSUYaSgRo",
+   "section_id": "sec-05-597-change-when-you-hover-over",
+   "heading": "597 change when you hover over",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 4,
+   "scores": [
+    [
+     1,
+     2
+    ],
+    [
+     2,
+     5
+    ],
+    [
+     3,
+     5
+    ],
+    [
+     4,
+     7
+    ],
+    [
+     5,
+     5
+    ],
+    [
+     6,
+     5
+    ],
+    [
+     7,
+     5
+    ],
+    [
+     8,
+     4
+    ]
+   ],
+   "latency_s": 25.8,
+   "truncated": 0
+  },
+  {
+   "source": "yt-pfaSUYaSgRo",
+   "section_id": "sec-05-597-change-when-you-hover-over",
+   "heading": "597 change when you hover over",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": false,
+   "decision": null,
+   "winner": null,
+   "scores": [],
+   "latency_s": 3.6,
+   "truncated": 4
+  },
+  {
+   "source": "yt-pfaSUYaSgRo",
+   "section_id": "sec-06-752-code-to-manage-the-user-s",
+   "heading": "752 code to manage the user's",
+   "n_candidates": 5,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 2,
+   "scores": [
+    [
+     1,
+     5
+    ],
+    [
+     2,
+     8
+    ],
+    [
+     3,
+     8
+    ],
+    [
+     4,
+     4
+    ],
+    [
+     5,
+     2
+    ]
+   ],
+   "latency_s": 21.8,
+   "truncated": 0
+  },
+  {
+   "source": "yt-pfaSUYaSgRo",
+   "section_id": "sec-06-752-code-to-manage-the-user-s",
+   "heading": "752 code to manage the user's",
+   "n_candidates": 5,
+   "model": "gemma26",
+   "valid": false,
+   "decision": null,
+   "winner": null,
+   "scores": [],
+   "latency_s": 4.8,
+   "truncated": 1
+  },
+  {
+   "source": "file-9c2317b8458649c0",
+   "section_id": "sec-01-hottest-new-device-right-now-is-h",
+   "heading": "Hottest new device right now is\\h",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 8,
+   "scores": [
+    [
+     1,
+     3
+    ],
+    [
+     2,
+     6
+    ],
+    [
+     3,
+     6
+    ],
+    [
+     4,
+     3
+    ],
+    [
+     5,
+     0
+    ],
+    [
+     6,
+     6
+    ],
+    [
+     7,
+     6
+    ],
+    [
+     8,
+     8
+    ]
+   ],
+   "latency_s": 28.4,
+   "truncated": 0
+  },
+  {
+   "source": "file-9c2317b8458649c0",
+   "section_id": "sec-01-hottest-new-device-right-now-is-h",
+   "heading": "Hottest new device right now is\\h",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 2,
+   "scores": [
+    [
+     1,
+     2
+    ],
+    [
+     2,
+     5
+    ],
+    [
+     3,
+     5
+    ],
+    [
+     4,
+     1
+    ]
+   ],
+   "latency_s": 3.5,
+   "truncated": 4
+  },
+  {
+   "source": "file-9c2317b8458649c0",
+   "section_id": "sec-02-actually-could-try-to-remove-the",
+   "heading": "Actually could try to remove the",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 5,
+   "scores": [
+    [
+     1,
+     4
+    ],
+    [
+     2,
+     4
+    ],
+    [
+     3,
+     4
+    ],
+    [
+     4,
+     2
+    ],
+    [
+     5,
+     8
+    ],
+    [
+     6,
+     5
+    ],
+    [
+     7,
+     4
+    ],
+    [
+     8,
+     2
+    ]
+   ],
+   "latency_s": 28.4,
+   "truncated": 0
+  },
+  {
+   "source": "file-9c2317b8458649c0",
+   "section_id": "sec-02-actually-could-try-to-remove-the",
+   "heading": "Actually could try to remove the",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": false,
+   "decision": null,
+   "winner": null,
+   "scores": [],
+   "latency_s": 4.0,
+   "truncated": 4
+  },
+  {
+   "source": "file-9c2317b8458649c0",
+   "section_id": "sec-03-if-you-look-closely-at-our",
+   "heading": "If you look closely at our",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 4,
+   "scores": [
+    [
+     1,
+     4
+    ],
+    [
+     2,
+     5
+    ],
+    [
+     3,
+     4
+    ],
+    [
+     4,
+     8
+    ],
+    [
+     5,
+     5
+    ],
+    [
+     6,
+     1
+    ],
+    [
+     7,
+     8
+    ],
+    [
+     8,
+     4
+    ]
+   ],
+   "latency_s": 31.8,
+   "truncated": 0
+  },
+  {
+   "source": "file-9c2317b8458649c0",
+   "section_id": "sec-03-if-you-look-closely-at-our",
+   "heading": "If you look closely at our",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 4,
+   "scores": [
+    [
+     1,
+     4
+    ],
+    [
+     2,
+     5
+    ],
+    [
+     3,
+     4
+    ],
+    [
+     4,
+     7
+    ]
+   ],
+   "latency_s": 3.6,
+   "truncated": 4
+  },
+  {
+   "source": "file-9c2317b8458649c0",
+   "section_id": "sec-04-could-be-down-to-the-special",
+   "heading": "Could be down to the special",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 3,
+   "scores": [
+    [
+     1,
+     6
+    ],
+    [
+     2,
+     5
+    ],
+    [
+     3,
+     6
+    ],
+    [
+     4,
+     5
+    ],
+    [
+     5,
+     3
+    ],
+    [
+     6,
+     3
+    ],
+    [
+     7,
+     5
+    ],
+    [
+     8,
+     4
+    ]
+   ],
+   "latency_s": 48.7,
+   "truncated": 0
+  },
+  {
+   "source": "file-9c2317b8458649c0",
+   "section_id": "sec-04-could-be-down-to-the-special",
+   "heading": "Could be down to the special",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 1,
+   "scores": [
+    [
+     1,
+     5
+    ],
+    [
+     2,
+     2
+    ],
+    [
+     3,
+     3
+    ],
+    [
+     4,
+     5
+    ]
+   ],
+   "latency_s": 3.6,
+   "truncated": 4
+  },
+  {
+   "source": "file-f55ec7d918c710e3",
+   "section_id": "sec-01-video-will-walk-you-through-the",
+   "heading": "Video will walk you through the",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 2,
+   "scores": [
+    [
+     1,
+     4
+    ],
+    [
+     2,
+     8
+    ],
+    [
+     3,
+     3
+    ],
+    [
+     4,
+     3
+    ],
+    [
+     5,
+     2
+    ],
+    [
+     6,
+     5
+    ],
+    [
+     7,
+     5
+    ],
+    [
+     8,
+     5
+    ]
+   ],
+   "latency_s": 72.5,
+   "truncated": 0
+  },
+  {
+   "source": "file-f55ec7d918c710e3",
+   "section_id": "sec-01-video-will-walk-you-through-the",
+   "heading": "Video will walk you through the",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 2,
+   "scores": [
+    [
+     1,
+     2
+    ],
+    [
+     2,
+     6
+    ],
+    [
+     3,
+     2
+    ],
+    [
+     4,
+     3
+    ]
+   ],
+   "latency_s": 4.7,
+   "truncated": 4
+  },
+  {
+   "source": "file-f55ec7d918c710e3",
+   "section_id": "sec-02-remove-your-pick-and-insert-it",
+   "heading": "Remove your pick and insert it",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 2,
+   "scores": [
+    [
+     1,
+     7
+    ],
+    [
+     2,
+     8
+    ],
+    [
+     3,
+     7
+    ],
+    [
+     4,
+     7
+    ],
+    [
+     5,
+     2
+    ],
+    [
+     6,
+     2
+    ],
+    [
+     7,
+     2
+    ],
+    [
+     8,
+     1
+    ]
+   ],
+   "latency_s": 270.3,
+   "truncated": 0
+  },
+  {
+   "source": "file-f55ec7d918c710e3",
+   "section_id": "sec-02-remove-your-pick-and-insert-it",
+   "heading": "Remove your pick and insert it",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 2,
+   "scores": [
+    [
+     1,
+     4
+    ],
+    [
+     2,
+     5
+    ],
+    [
+     3,
+     5
+    ],
+    [
+     4,
+     5
+    ]
+   ],
+   "latency_s": 3.8,
+   "truncated": 4
+  },
+  {
+   "source": "file-f55ec7d918c710e3",
+   "section_id": "sec-03-back-the-pull-tabs-on-all",
+   "heading": "Back the pull tabs on all",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 3,
+   "scores": [
+    [
+     1,
+     5
+    ],
+    [
+     2,
+     3
+    ],
+    [
+     3,
+     8
+    ],
+    [
+     4,
+     2
+    ],
+    [
+     5,
+     2
+    ],
+    [
+     6,
+     2
+    ],
+    [
+     7,
+     2
+    ],
+    [
+     8,
+     3
+    ]
+   ],
+   "latency_s": 268.4,
+   "truncated": 0
+  },
+  {
+   "source": "file-f55ec7d918c710e3",
+   "section_id": "sec-03-back-the-pull-tabs-on-all",
+   "heading": "Back the pull tabs on all",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": false,
+   "decision": null,
+   "winner": null,
+   "scores": [],
+   "latency_s": 3.5,
+   "truncated": 4
+  },
+  {
+   "source": "hermes-p3",
+   "section_id": "sec-01-there-are-two-types-of-people",
+   "heading": "There are two types of people",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 8,
+   "scores": [
+    [
+     1,
+     1
+    ],
+    [
+     2,
+     6
+    ],
+    [
+     3,
+     7
+    ],
+    [
+     4,
+     5
+    ],
+    [
+     5,
+     5
+    ],
+    [
+     6,
+     7
+    ],
+    [
+     7,
+     4
+    ],
+    [
+     8,
+     8
+    ]
+   ],
+   "latency_s": 27.1,
+   "truncated": 0
+  },
+  {
+   "source": "hermes-p3",
+   "section_id": "sec-01-there-are-two-types-of-people",
+   "heading": "There are two types of people",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 2,
+   "scores": [
+    [
+     1,
+     0
+    ],
+    [
+     2,
+     6
+    ],
+    [
+     3,
+     6
+    ],
+    [
+     4,
+     6
+    ]
+   ],
+   "latency_s": 7.5,
+   "truncated": 4
+  },
+  {
+   "source": "hermes-p3",
+   "section_id": "sec-02-moment-your-agent-starts-browsing-the",
+   "heading": "Moment your agent starts browsing the",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 4,
+   "scores": [
+    [
+     1,
+     2
+    ],
+    [
+     2,
+     2
+    ],
+    [
+     3,
+     5
+    ],
+    [
+     4,
+     8
+    ],
+    [
+     5,
+     5
+    ],
+    [
+     6,
+     8
+    ],
+    [
+     7,
+     1
+    ],
+    [
+     8,
+     2
+    ]
+   ],
+   "latency_s": 26.7,
+   "truncated": 0
+  },
+  {
+   "source": "hermes-p3",
+   "section_id": "sec-02-moment-your-agent-starts-browsing-the",
+   "heading": "Moment your agent starts browsing the",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 4,
+   "scores": [
+    [
+     1,
+     2
+    ],
+    [
+     2,
+     3
+    ],
+    [
+     3,
+     2
+    ],
+    [
+     4,
+     7
+    ]
+   ],
+   "latency_s": 3.7,
+   "truncated": 4
+  },
+  {
+   "source": "hermes-p3",
+   "section_id": "sec-03-here-s-the-setting-that-most-people",
+   "heading": "Here's the setting that most people",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 4,
+   "scores": [
+    [
+     1,
+     4
+    ],
+    [
+     2,
+     5
+    ],
+    [
+     3,
+     4
+    ],
+    [
+     4,
+     8
+    ],
+    [
+     5,
+     2
+    ],
+    [
+     6,
+     4
+    ],
+    [
+     7,
+     2
+    ],
+    [
+     8,
+     4
+    ]
+   ],
+   "latency_s": 24.8,
+   "truncated": 0
+  },
+  {
+   "source": "hermes-p3",
+   "section_id": "sec-03-here-s-the-setting-that-most-people",
+   "heading": "Here's the setting that most people",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 4,
+   "scores": [
+    [
+     1,
+     1
+    ],
+    [
+     2,
+     3
+    ],
+    [
+     3,
+     3
+    ],
+    [
+     4,
+     8
+    ]
+   ],
+   "latency_s": 4.9,
+   "truncated": 4
+  },
+  {
+   "source": "hermes-p3",
+   "section_id": "sec-04-dozens-already-built-in",
+   "heading": "Dozens already built in",
+   "n_candidates": 7,
+   "model": "halogen",
+   "valid": true,
+   "decision": "EXPAND",
+   "winner": 3,
+   "scores": [
+    [
+     1,
+     1
+    ],
+    [
+     2,
+     3
+    ],
+    [
+     3,
+     4
+    ],
+    [
+     4,
+     2
+    ],
+    [
+     5,
+     2
+    ],
+    [
+     6,
+     2
+    ],
+    [
+     7,
+     2
+    ]
+   ],
+   "latency_s": 24.4,
+   "truncated": 0
+  },
+  {
+   "source": "hermes-p3",
+   "section_id": "sec-04-dozens-already-built-in",
+   "heading": "Dozens already built in",
+   "n_candidates": 7,
+   "model": "gemma26",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 3,
+   "scores": [
+    [
+     1,
+     0
+    ],
+    [
+     2,
+     1
+    ],
+    [
+     3,
+     4
+    ],
+    [
+     4,
+     1
+    ]
+   ],
+   "latency_s": 4.7,
+   "truncated": 3
+  },
+  {
+   "source": "hermes-p3",
+   "section_id": "sec-05-whatsapp-set-up-and-then-just",
+   "heading": "WhatsApp set up and then just",
+   "n_candidates": 7,
+   "model": "halogen",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 2,
+   "scores": [
+    [
+     1,
+     3
+    ],
+    [
+     2,
+     6
+    ],
+    [
+     3,
+     3
+    ],
+    [
+     4,
+     3
+    ],
+    [
+     5,
+     3
+    ],
+    [
+     6,
+     3
+    ],
+    [
+     7,
+     1
+    ]
+   ],
+   "latency_s": 25.4,
+   "truncated": 0
+  },
+  {
+   "source": "hermes-p3",
+   "section_id": "sec-05-whatsapp-set-up-and-then-just",
+   "heading": "WhatsApp set up and then just",
+   "n_candidates": 7,
+   "model": "gemma26",
+   "valid": true,
+   "decision": "REPLACE",
+   "winner": 2,
+   "scores": [
+    [
+     1,
+     2
+    ],
+    [
+     2,
+     8
+    ],
+    [
+     3,
+     2
+    ],
+    [
+     4,
+     2
+    ]
+   ],
+   "latency_s": 3.4,
+   "truncated": 3
+  },
+  {
+   "source": "hermes-p3",
+   "section_id": "sec-06-schedule-without-you-ever-asking",
+   "heading": "Schedule without you ever asking",
+   "n_candidates": 8,
+   "model": "halogen",
+   "valid": true,
+   "decision": "EXPAND",
+   "winner": 3,
+   "scores": [
+    [
+     1,
+     1
+    ],
+    [
+     2,
+     1
+    ],
+    [
+     3,
+     4
+    ],
+    [
+     4,
+     4
+    ],
+    [
+     5,
+     2
+    ],
+    [
+     6,
+     2
+    ],
+    [
+     7,
+     4
+    ],
+    [
+     8,
+     4
+    ]
+   ],
+   "latency_s": 27.0,
+   "truncated": 0
+  },
+  {
+   "source": "hermes-p3",
+   "section_id": "sec-06-schedule-without-you-ever-asking",
+   "heading": "Schedule without you ever asking",
+   "n_candidates": 8,
+   "model": "gemma26",
+   "valid": false,
+   "decision": null,
+   "winner": null,
+   "scores": [],
+   "latency_s": 4.2,
+   "truncated": 4
+  }
+ ],
+ "job_final": {
+  "job_id": "job-3db79fd4047e",
+  "article_id": "art9-file-748583d573c627ee",
+  "title": "Building and Running a Hermes Agent"
+ }
+}

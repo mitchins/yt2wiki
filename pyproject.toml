@@ -6,7 +6,6 @@ requires-python = ">=3.11"
 readme = "README.md"
 
 dependencies = [
-    "faster-whisper>=1.1",
     "yt-dlp>=2025.1",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -18,9 +17,17 @@ dependencies = [
     "psutil>=5.9",
     "httpx>=0.27",
     "pyyaml>=6.0",
+    "pytesseract>=0.3",  # OCR-density veto in the V9 judge (needs the tesseract binary)
 ]
 
 [project.optional-dependencies]
+# Local transcription runtime (CTranslate2 Whisper). The default install
+# has NO local ASR: transcription goes over HTTP to a separately operated
+# Whisper service. Install this extra only to run bundled faster-whisper
+# explicitly (never an implicit fallback).
+asr-local = [
+    "faster-whisper>=1.1",
+]
 gpu = [
     "torch>=2.7",
     "transformers>=4.57",

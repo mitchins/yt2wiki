@@ -35,7 +35,7 @@ Transcript (timestamps in seconds):
 
 Return JSON only:
 {{"heading": {heading!r},
-  "body": "markdown: short paragraphs and bullets; keep exact commands, values, paths verbatim; cite timestamps ONLY as [m:ss](url), e.g. [2:39](URL). Never write seconds like [159] or [159:0]",
+  "body": "markdown: short paragraphs and bullets; keep exact commands, values, paths verbatim; {cite_rule}",
   "key_points": ["..."],
   "warnings": ["..."]}}
 Rules:
@@ -111,6 +111,22 @@ def _heading_from_transcript(transcript: Sequence[dict[str, Any]],
         return "Overview"
     # Capitalize first letter, keep rest as-is but ensure not all lower
     return heading[0].upper() + heading[1:60]
+
+
+def cite_rule(url: str | None) -> str:
+    """Timestamp citation rule for the section prompt.
+
+    The old template said "[m:ss](url)" without ever substituting it, so the
+    model hallucinated video URLs for YouTube sources and wrote bare "m:ss"
+    for uploads (which have no origin URL). Uploads cite plain [m:ss].
+    """
+    if url:
+        return (f"cite timestamps ONLY as [m:ss]({url}&t=SECONDS), e.g. "
+                f"[2:39]({url}&t=159). Never write bare seconds like [159] or "
+                "[159:0], never invent any other URL")
+    return ("cite timestamps ONLY as plain [m:ss] with no link, e.g. "
+            "[0:04] (this upload has no source URL). Never write seconds "
+            "like [159] or [159:0], never invent a URL")
 
 
 def plan_sections(transcript: Sequence[dict[str, Any]],
@@ -197,6 +213,7 @@ def write_article(settings, db, source_id: str, *, backend=None,
 
     video_title = srow["title"] or source_id
     url = srow["origin_url"]
+    rule = cite_rule(url)
     if recorder is None:
         def _default_rec(entry: dict) -> None:
             entry.setdefault("source_id", source_id)
@@ -234,9 +251,10 @@ def write_article(settings, db, source_id: str, *, backend=None,
             try:
                 out = _chat(
                     [{"role": "system", "content": "Return JSON only."},
-                     {"role": "user", "content": SECTION_PROMPT.format(
-                         video_title=video_title, heading=p["heading"],
-                         t_start=p["t_start"], t_end=p["t_end"], transcript=text, url=url)}],
+                      {"role": "user", "content": SECTION_PROMPT.format(
+                          video_title=video_title, heading=p["heading"],
+                          t_start=p["t_start"], t_end=p["t_end"], transcript=text,
+                          cite_rule=rule)}],
                     max_new_tokens=1600, temperature=0.15)
                 if not isinstance(out, dict) or not str(out.get("body", "")).strip():
                     raise ValueError("empty section body")

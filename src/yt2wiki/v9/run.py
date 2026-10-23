@@ -15,18 +15,21 @@ BASE_STAGES = ("acquisition", "inspect", "transcribe", "frame_candidates")
 
 
 def _record(db, job_id: str, stage: str, state: str, metrics: dict | None = None,
-            error: str | None = None, started: float | None = None) -> None:
+            error: str | None = None, started: float | None = None,
+            artifacts: dict | None = None) -> None:
     now = time.time()
     db.execute(
         """INSERT INTO stages(job_id, stage, state, started_at, finished_at, duration_s,
-                              metrics_json, error)
-           VALUES(?,?,?,?,?,?,?,?)
+                              metrics_json, error, artifacts_json)
+           VALUES(?,?,?,?,?,?,?,?,?)
            ON CONFLICT(job_id, stage) DO UPDATE SET state=excluded.state,
              finished_at=excluded.finished_at, duration_s=excluded.duration_s,
-             metrics_json=excluded.metrics_json, error=excluded.error""",
+             metrics_json=excluded.metrics_json, error=excluded.error,
+             artifacts_json=COALESCE(excluded.artifacts_json, stages.artifacts_json)""",
         (job_id, stage, state, started or now, now,
          (now - started) if started else 0.0,
-         json.dumps(metrics or {}), error))
+         json.dumps(metrics or {}), error,
+         json.dumps(artifacts) if artifacts is not None else None))
 
 
 def _set_stage(db, job_id: str, stage: str) -> None:
@@ -151,9 +154,14 @@ def _ensure_base(settings, db, service, source_id: str,
         if job_id:
             _set_stage(db, job_id, name)
             _record(db, job_id, name, "running")
-        mod.run(ctx)
+        # The returned metrics and stage artifacts carry per-job provenance
+        # (e.g. transcribe's asr_server / asr_unsupported_options / asr_warnings);
+        # record them instead of dropping them.
+        out = mod.run(ctx) or {}
         if job_id:
-            _record(db, job_id, name, "done", started=t)
+            _record(db, job_id, name, "done",
+                    out if isinstance(out, dict) else {},
+                    started=t, artifacts=dict(ctx.artifacts))
     return {"reused": False, "job": job,
             "transcript_segments": db.query_one(
                 "SELECT COUNT(*) c FROM transcript_segments WHERE source_id=?", (source_id,))["c"],
@@ -192,7 +200,7 @@ def run_source(settings, db, service, source_id: str, *,
             snap = {}
             cfg = _inf.load(settings.paths)
             st = _inf.load_status(settings.paths)
-            for role in ("writer", "vision"):
+            for role in ("writer", "vision", "asr"):
                 name = (cfg.get("roles") or {}).get(role)
                 if name:
                     prov = (cfg.get("providers") or {}).get(name, {})
@@ -203,6 +211,7 @@ def run_source(settings, db, service, source_id: str, *,
                         "reachable": bool(status.get("ok")),
                         "qualified_for_writer": bool(status.get("qualified_for_writer")),
                         "qualified_for_vision": bool(status.get("qualified_for_vision")),
+                        "qualified_for_asr": bool(status.get("qualified_for_asr")),
                     }
             inference_snapshot = snap or None
         except Exception:  # noqa: BLE001

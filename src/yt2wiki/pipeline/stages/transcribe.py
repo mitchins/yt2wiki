@@ -40,8 +40,8 @@ def run(ctx: StageContext) -> dict[str, Any]:
         transcript = _captions_to_transcript(captions["captions"], duration)
         metrics = {"mode": "captions", "reason": decision["reason"]}
     else:
-        transcript = _run_asr(ctx, audio, duration, decision, row)
-        metrics = {"mode": "asr", "reason": decision["reason"]}
+        transcript, asr_extra = _run_asr(ctx, audio, duration, decision, row)
+        metrics = {"mode": "asr", "reason": decision["reason"], **asr_extra}
 
     _persist(ctx, transcript)
     ctx.record_input_hash("transcript", audio)
@@ -132,7 +132,22 @@ def _run_asr(
             initial_prompt=hint,
             on_progress=on_progress,
         )
-    return transcript
+        server = getattr(backend, "server", "")
+        unsupported = list(getattr(backend, "last_unsupported", []) or [])
+        asr_warnings = list(getattr(backend, "last_warnings", []) or [])
+        metrics_extra = {}
+        if server:
+            metrics_extra["asr_server"] = server
+        if unsupported:
+            # Options outside the HTTP contract are server-side defaults or
+            # omitted — recorded here so the gap is explicit, never silent.
+            metrics_extra["asr_unsupported_options"] = unsupported
+        if asr_warnings:
+            metrics_extra["asr_warnings"] = asr_warnings
+        ctx.artifacts["asr_server"] = server
+        ctx.artifacts["asr_unsupported_options"] = unsupported
+        ctx.artifacts["asr_warnings"] = asr_warnings
+        return transcript, metrics_extra
 
 
 def _vocabulary_hint(ctx: StageContext, row: Any) -> str:

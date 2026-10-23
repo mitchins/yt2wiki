@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager
-from typing import Iterator, Sequence
+from typing import Any, Iterator, Sequence
 
 from ..config import ModelSpec, Settings
 from ..gpu import (
@@ -19,6 +19,7 @@ from ..gpu import (
     torch_device,
 )
 from .asr import WhisperBackend
+from .asr_http import HttpAsrBackend, resolve_env_variant
 from .base import BaseBackend
 from .llama_server import LlamaServerVLM
 from .llm import TransformersLLM
@@ -82,36 +83,48 @@ class ModelManager:
         and later live settings changes do not rewrite history. Otherwise the
         live inference config is consulted; CLI jobs without a config simply
         return None and fall through to the local registry.
+
+        Role mapping: the pipeline asks for ``text`` (the writing role) while
+        the operator console names that assignment ``writer`` — one provider
+        entry serves V9 writing (and, when also assigned, vision) without
+        duplicate configuration. ``asr`` maps to the ``asr`` (transcription)
+        assignment.
         """
+        lookup = {"text": "writer"}.get(role, role)
         try:
             if self.inference_snapshot is not None:
-                entry = self.inference_snapshot.get(role)
+                entry = self.inference_snapshot.get(lookup)
                 if not entry:
                     return None, None
                 # Snapshot is already the effective identity at submission time
                 if not entry.get("reachable"):
                     raise RuntimeError(
-                        f"inference provider '{entry.get('provider')}' for role '{role}' "
+                        f"inference provider '{entry.get('provider')}' for role '{lookup}' "
                         f"was not reachable at submission time.")
                 if role == "vision" and not entry.get("qualified_for_vision"):
                     raise RuntimeError(
                         f"provider '{entry.get('provider')}' was not qualified for vision "
                         f"at submission time.")
-                if role == "writer" and not entry.get("qualified_for_writer"):
+                if role == "text" and not entry.get("qualified_for_writer"):
                     # Writer may be reachable but not yet qualified — fail rather than fall back
                     raise RuntimeError(
                         f"provider '{entry.get('provider')}' was not qualified for writing "
                         f"at submission time.")
+                if role == "asr" and not entry.get("qualified_for_asr"):
+                    raise RuntimeError(
+                        f"provider '{entry.get('provider')}' was not qualified for "
+                        f"transcription at submission time.")
                 provider = {"url": entry.get("url"), "model": entry.get("model") or "",
                             "api_key_env": entry.get("api_key_env") or "",
-                            "timeout": entry.get("timeout", 90.0) if isinstance(entry.get("timeout"), (int, float)) else 90.0}
+                            "timeout": _role_timeout(role, entry.get("timeout"))}
                 variant = {"model": provider.get("model") or "", "url": provider["url"],
                            "api_key_env": provider.get("api_key_env") or "",
                            "timeout": float(provider.get("timeout", 90.0))}
+                engine = "asr-http" if role == "asr" else "remote-openai"
                 spec = ModelSpec(
                     key=f"remote-{entry.get('provider')}",
                     role=role,
-                    engine="remote-openai",
+                    engine=engine,
                     repo=provider.get("model") or entry.get("url", ""),
                     revision="remote",
                     provider=entry.get("provider") or "",
@@ -121,7 +134,7 @@ class ModelManager:
                 return spec, provider
             from ..web import inference as _inf
             cfg = _inf.load(self.settings.paths)
-            provider_name = (cfg.get("roles") or {}).get(role)
+            provider_name = (cfg.get("roles") or {}).get(lookup)
             if not provider_name:
                 return None, None
             provider = (cfg.get("providers") or {}).get(provider_name)
@@ -130,25 +143,30 @@ class ModelManager:
             status = _inf.load_status(self.settings.paths).get(provider_name, {})
             if not status.get("ok"):
                 raise RuntimeError(
-                    f"inference provider '{provider_name}' for role '{role}' is not reachable "
+                    f"inference provider '{provider_name}' for role '{lookup}' is not reachable "
                     f"(test it in Settings). Status: {status.get('error') or 'not tested'}")
             if role == "vision" and not status.get("qualified_for_vision"):
                 raise RuntimeError(
                     f"provider '{provider_name}' is not qualified for vision "
                     f"(needs genuine multi-image judging). Qualify it in Settings.")
-            if role == "writer" and not status.get("qualified_for_writer"):
+            if role == "text" and not status.get("qualified_for_writer"):
                 raise RuntimeError(
                     f"provider '{provider_name}' is not qualified for writing "
                     f"(needs real JSON generation). Qualify it in Settings.")
+            if role == "asr" and not status.get("qualified_for_asr"):
+                raise RuntimeError(
+                    f"provider '{provider_name}' is not qualified for transcription "
+                    f"(needs the transcription protocol probe). Qualify it in Settings.")
             # Explicit model takes precedence over discovered models, then URL.
             repo = provider.get("model") or (status.get("models") or [provider.get("url", "")])[0]
             variant = {"model": provider.get("model") or "", "url": provider["url"],
                        "api_key_env": provider.get("api_key_env") or "",
-                       "timeout": float(provider.get("timeout", 90.0) if isinstance(provider.get("timeout"), (int, float)) else 90.0)}
+                       "timeout": _role_timeout(role, provider.get("timeout"))}
+            engine = "asr-http" if role == "asr" else "remote-openai"
             spec = ModelSpec(
                 key=f"remote-{provider_name}",
                 role=role,
-                engine="remote-openai",
+                engine=engine,
                 repo=repo,
                 revision="remote",
                 provider=provider_name,
@@ -174,6 +192,21 @@ class ModelManager:
             )
         if spec.engine == "faster-whisper":
             return WhisperBackend(spec, variant, self.device, self.index, self.settings.hf_home)
+        if spec.engine == "asr-http":
+            # Registry default: variant carries url_env/model_env (resolved
+            # here); inference-assigned providers arrive with url already set.
+            resolved = resolve_env_variant(variant) if "url_env" in variant else dict(variant)
+            if not (resolved.get("url") or "").strip():
+                raise RuntimeError(
+                    "no ASR server configured: assign the transcription role to a "
+                    "provider (Settings → Inference) or set YT2WIKI_ASR_URL")
+            return HttpAsrBackend(
+                spec, variant, self.device, self.index,
+                base_url=resolved.get("url") or "",
+                model=resolved.get("model") or "",
+                api_key_env=resolved.get("api_key_env") or "",
+                timeout=float(resolved.get("timeout", 300.0)),
+            )
         if spec.engine == "llamacpp-server":
             return LlamaServerVLM(spec, variant, self.device, self.index,
                                   self.settings.hf_home,
@@ -223,6 +256,28 @@ class ModelManager:
                     free_cuda_memory()
             return
         chain = self.settings.model_with_fallbacks(role)
+        if chain and chain[0].engine == "asr-http":
+            # HTTP transcription: no local load, no GPU headroom, no OOM
+            # fallback (a failing server is a loud job error, not a retry).
+            backend = self.build(role, chain[0])
+            report = backend.load()
+            self._record(
+                role=role, model_key=chain[0].key, repo=chain[0].repo,
+                revision=chain[0].revision, engine=chain[0].engine,
+                variant=backend.report.variant, ok=True,
+                device="http", device_index=None,
+                vram_budget_gb=0, headroom_reason="http-asr",
+                load_seconds=report.load_seconds, peak_vram_gb=0,
+                fallback_of="", note=f"http {getattr(backend, 'server', '')}",
+            )
+            try:
+                yield backend
+            finally:
+                try:
+                    backend.unload()
+                finally:
+                    free_cuda_memory()
+            return
         backend: BaseBackend | None = None
         last_error: Exception | None = None
         for i, spec in enumerate(chain):
@@ -336,6 +391,18 @@ class ModelManager:
             "load_log": self.load_log,
             "headroom": self.headroom_log,
         }
+
+
+def _role_timeout(role: str, raw: Any) -> float:
+    """Per-role default timeout: transcription of long audio needs minutes."""
+    if isinstance(raw, (int, float)) and raw > 0:
+        return float(raw)
+    if role == "asr":
+        try:
+            return max(60.0, float(os.environ.get("YT2WIKI_ASR_TIMEOUT") or 300.0))
+        except ValueError:
+            return 300.0
+    return 90.0
 
 
 @contextmanager

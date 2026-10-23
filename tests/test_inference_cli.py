@@ -326,13 +326,15 @@ def _valid_rubric():
          "decision": "KEEP", "winner": 1, "explanation": "first frame is clearer"})
 
 
-def _mock_handler(*, models=200, writer="json", vision="rubric"):
+def _mock_handler(*, models=200, writer="json", vision="rubric", asr="missing"):
     """Configurable OpenAI-compatible mock: models status, writer/vision bodies.
 
     writer: "json" (valid {"ok": true}), "prose" (non-JSON generation failure),
         "error" (HTTP 500).
     vision: "rubric" (valid strict V9 rubric), "invalid" (wrong schema),
         "error" (HTTP 500).
+    asr: "missing" (404 on /asr — a pure LLM server), "unreachable"
+        (connection refused everywhere), "ok" (valid transcription shape).
     """
     import httpx
 
@@ -341,6 +343,17 @@ def _mock_handler(*, models=200, writer="json", vision="rubric"):
             if models == "unreachable":
                 raise httpx.ConnectError("refused")
             return httpx.Response(models, json={"data": [{"id": "m"}]})
+        if request.url.path.endswith("/asr"):
+            if asr == "unreachable":
+                raise httpx.ConnectError("refused")
+            if asr == "ok":
+                return httpx.Response(200, json={
+                    "language": "en",
+                    "text": "hello world",
+                    "segments": [{"start": 0.0, "end": 1.0, "text": "hello world",
+                                  "words": [{"start": 0.0, "end": 0.5, "word": "hello"},
+                                            {"start": 0.5, "end": 1.0, "word": "world"}]}]})
+            return httpx.Response(404, json={"detail": "Not Found"})
         body = json.loads(request.content.decode()) if request.content else {}
         if "image_url" in json.dumps(body):
             if vision == "rubric":
@@ -369,7 +382,7 @@ def _run_test(data, capsys, name):
 def test_cli_test_exit_unreachable(tmp_path, capsys, monkeypatch):
     data = tmp_path / "exit-unreachable"
     _save_provider(data, "mock", {"writer": "mock"}, capsys)
-    _patch_mock_provider(monkeypatch, _mock_handler(models="unreachable"))
+    _patch_mock_provider(monkeypatch, _mock_handler(models="unreachable", asr="unreachable"))
     rc, result = _run_test(data, capsys, "mock")
     assert rc == 1
     assert result["ok"] is False

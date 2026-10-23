@@ -222,3 +222,28 @@ def test_loader_second_oom_uses_fallback(tmp_path, monkeypatch):
     assert any(r["model_key"] == "text-9b" and r["ok"] == 0 for r in manager.load_log)
     assert any(r["model_key"] == "text-4b" and r["ok"] == 1 for r in manager.load_log)
     assert any(r.get("fallback_of") == "text-9b" for r in manager.load_log if r.get("model_key") == "text-4b")
+
+
+def test_text_role_uses_writer_assignment(tmp_path):
+    """The pipeline asks for role "text"; the operator assigns "writer".
+
+    One provider entry must serve V9 writing without duplicate configuration.
+    """
+    from yt2wiki.backends.loader import ModelManager
+    from yt2wiki.config import Settings
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    snap = {"writer": {"provider": "lan", "url": "http://10.0.0.1:8000/v1",
+                       "model": "m", "api_key_env": "", "reachable": True,
+                       "qualified_for_writer": True, "qualified_for_vision": False}}
+    mgr = ModelManager(settings, inference_snapshot=snap)
+    spec, provider = mgr._remote_spec("text")
+    assert spec is not None and spec.engine == "remote-openai"
+    assert provider["url"] == "http://10.0.0.1:8000/v1"
+    # unqualified writer must fail loudly, not fall back to local
+    bad = {"writer": {"provider": "lan", "url": "http://10.0.0.1:8000/v1",
+                      "model": "m", "api_key_env": "", "reachable": True,
+                      "qualified_for_writer": False}}
+    mgr2 = ModelManager(settings, inference_snapshot=bad)
+    with pytest.raises(RuntimeError, match="not qualified for writing"):
+        mgr2._remote_spec("text")

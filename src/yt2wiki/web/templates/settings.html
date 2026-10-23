@@ -74,7 +74,7 @@
             <option value="">Not assigned</option>
             {% for name in inference.providers %}<option value="{{ name }}" {% if inference.roles.get(role) == name %}selected{% endif %}>{{ name }}</option>{% endfor %}
           </select>
-          <small>{% if role == 'writer' %}Writes the guide from the transcript.{% else %}Compares frames and picks the images. Needs a model that accepts images.{% endif %}</small>
+          <small>{% if role == 'writer' %}Writes the guide from the transcript.{% elif role == 'vision' %}Compares frames and picks the images. Needs a model that accepts images.{% else %}Transcribes audio over HTTP. Needs a transcription server (test probes its /asr contract).{% endif %}</small>
         </label>
         {% endfor %}
       </div>
