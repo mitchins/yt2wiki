@@ -45,11 +45,11 @@ modification is needed.
 **Startup with persistent data:**
 
 ```bash
-export YT2WIKI_HOME=/tmp/p2b-home   # or ~/.local/share/yt2wiki
+export YT2WIKI_HOME=~/.local/share/yt2wiki   # your persistent library; keep this export for every command below
 mkdir -p "$YT2WIKI_HOME"
-YT2WIKI_HOME=/tmp/p2b-home /tmp/pip-test/bin/yt2wiki --help
-YT2WIKI_HOME=/tmp/p2b-home /tmp/pip-test/bin/yt2wiki info     # shows profile, fingerprint, no CUDA
-YT2WIKI_HOME=/tmp/p2b-home /tmp/pip-test/bin/yt2wiki serve --host 127.0.0.1 --port 8080
+/tmp/pip-test/bin/yt2wiki --help
+/tmp/pip-test/bin/yt2wiki info     # shows profile, fingerprint, no CUDA
+/tmp/pip-test/bin/yt2wiki serve --host 127.0.0.1 --port 8080
 ```
 
 Verification (outside checkout, no GPU, `PYTHONPATH` unset):
@@ -65,8 +65,9 @@ Verification (outside checkout, no GPU, `PYTHONPATH` unset):
   `GET /api/articles/{id}/export.md` and `/standalone` (exports)
 - Stop and restart (`Settings.load` with same `YT2WIKI_HOME`, new `Database`) — `SELECT * FROM articles` still returns the article
 
-Evidence: ` /tmp/p2b-dist/yt2wiki-0.1.0-py3-none-any.whl` (217 kB), `tests/test_upload_*` and the
-` /tmp/test_pip_qualification.py` script (6/6 passed plus full suite 202 passed).
+Evidence: `yt2wiki-0.1.0-py3-none-any.whl` (clean `uv venv` install, no `torch`/`transformers`,
+`yt2wiki info`/`inference show` work with `YT2WIKI_HOME` set once via `export`), plus the full
+pytest suite (253 passed) covering the same library/search/edit/revisions/export/restart flow.
 
 Do not publish to PyPI without a separate licence decision — the project has no selected distribution licence.
 
@@ -365,37 +366,48 @@ sqlite3 "yt2wiki-backup-$TAG.sqlite3" "PRAGMA integrity_check;"
 # → ok
 python3 - <<'EOF'
 import sqlite3
+import sys
 from pathlib import Path
 TAG = "REPLACE_WITH_DATE_TAG"  # e.g. 2026-10-23
 root = Path(".")
 conn = sqlite3.connect(f"yt2wiki-backup-{TAG}.sqlite3")
-missing = []
+missing, superseded = [], []
 for article_id, in conn.execute("SELECT article_id FROM articles"):
     for name in ("article.md", "article.html"):
         p = root / f"yt2wiki-backup-{TAG}-articles" / article_id / name
         if not p.is_file():
             missing.append(str(p))
-for rel, in conn.execute("SELECT upload_path FROM sources WHERE upload_path IS NOT NULL"):
-    p = root / f"yt2wiki-backup-{TAG}-uploads" / Path(rel).name
-    if not p.is_file():
-        # Ingest moves the staging file into media/; the row keeps the old
-        # path while video_path becomes the live reference (see below).
-        missing.append(str(p) + " (staging; check video_path)")
-for rel, in conn.execute("SELECT video_path FROM sources WHERE video_path IS NOT NULL"):
-    p = root / f"yt2wiki-backup-{TAG}-media" / Path(rel).relative_to("/data/media")
-    if not p.is_file():
-        missing.append(str(p))
-staging_only = [m for m in missing if m.endswith("(staging; check video_path)")]
-live_missing = [m for m in missing if not m.endswith("(staging; check video_path)")]
-print("live references missing:", live_missing or "none")
-print("superseded staging files:", staging_only or "none")
+for sid, up, vp in conn.execute("SELECT source_id, upload_path, video_path FROM sources"):
+    if vp:
+        # Ingested: media/video.mp4 is the live file; the old upload path is
+        # superseded staging and is only excused when this video exists.
+        p = root / f"yt2wiki-backup-{TAG}-media" / Path(vp).relative_to("/data/media")
+        if not p.is_file():
+            missing.append(str(p) + f" (live video for {sid})")
+        elif up and not (root / f"yt2wiki-backup-{TAG}-uploads" / Path(up).name).is_file():
+            superseded.append(f"{up} (moved to {vp})")
+    elif up:
+        p = root / f"yt2wiki-backup-{TAG}-uploads" / Path(up).name
+        if not p.is_file():
+            missing.append(str(p) + f" (no replacement video for {sid})")
+if missing:
+    print("BACKUP VALIDATION FAILED — missing live files:")
+    print("\n".join(f"  - {m}" for m in missing))
+    sys.exit(1)
+print("backup validation ok: all", conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0],
+      "sources and", conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0],
+      "articles resolve to present files")
+for s in superseded:
+    print("  superseded staging (ok):", s)
 EOF
+# → "backup validation ok: …" or a FAILED list with a non-zero exit
 ```
 
-The check maps each recorded container path to its backup copy (`video_path` →
-`media/…`, `upload_path` → `uploads/…`, articles → `articles/…`). Live references
-must all exist (`none`); a staging file may be absent only when ingest moved it
-into `media/` — in which case its row carries the existing `video_path`.
+The check inspects `upload_path` and `video_path` together: a missing upload is
+accepted as superseded staging **only** when its row carries an existing
+`video_path`. Anything else absent — an article file, an un-ingested upload, or
+a video — fails the validation outright (non-zero exit), never a reassuring
+success message.
 
 Restore into a fresh volume (same steps work for the same volume):
 

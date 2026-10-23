@@ -234,7 +234,13 @@ def _cmd_serve(args) -> int:
           f"(data: {settings.paths.root}, profile: {settings.profile})")
     if nvidia_smi_gpus():
         print("gpus: " + ", ".join(f"{g.name} ({g.free_gb:.1f} GB free)" for g in nvidia_smi_gpus()))
-    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, log_level="info")
+    # The inference-settings guard identifies the operator console by the real
+    # TCP peer (request.client.host) and never trusts forwarding headers.
+    # Uvicorn must not rewrite that peer from X-Forwarded-For either: with its
+    # default proxy handling, FORWARDED_ALLOW_IPS=* would let any remote client
+    # claim 127.0.0.1 and pass the localhost guard. Disable it explicitly.
+    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload,
+                log_level="info", proxy_headers=False)
     return 0
 
 
