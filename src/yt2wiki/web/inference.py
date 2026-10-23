@@ -107,6 +107,25 @@ def save(paths, payload: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
+def read_payload_file(path: str | Path) -> dict[str, Any]:
+    """Read an operator-supplied inference payload file for the console CLI.
+
+    The path is validated as a regular file before opening (never a directory
+    or device), and the content must parse as a JSON object. Failures raise
+    InferenceConfigError so the CLI can report them without a traceback.
+    """
+    candidate = Path(path)
+    if not candidate.is_file():
+        raise InferenceConfigError(f"no such payload file: {candidate}")
+    try:
+        data = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InferenceConfigError(f"cannot read payload file: {exc}") from exc
+    if not isinstance(data, dict):
+        raise InferenceConfigError("payload must be a JSON object with providers/roles")
+    return data
+
+
 def test_endpoint(url: str, api_key_env: str = "", *, timeout: float = 6.0,
                 model: str = "") -> dict[str, Any]:
     """Reachability + capability qualification.

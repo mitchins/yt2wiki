@@ -131,6 +131,26 @@ def test_inference_cli_show_save_roundtrip(tmp_path, capsys):
     assert out["roles"]["writer"] == "lan"
 
 
+def test_read_payload_file_validates(tmp_path):
+    from yt2wiki.web import inference as inf2
+
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps({"providers": [], "roles": {}}))
+    assert inf2.read_payload_file(good) == {"providers": [], "roles": {}}
+    with pytest.raises(Exception, match="no such payload file"):
+        inf2.read_payload_file(tmp_path / "absent.json")
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json{")
+    with pytest.raises(Exception, match="cannot read payload file"):
+        inf2.read_payload_file(bad)
+    lst = tmp_path / "list.json"
+    lst.write_text("[1, 2]")
+    with pytest.raises(Exception, match="must be a JSON object"):
+        inf2.read_payload_file(lst)
+    with pytest.raises(Exception, match="no such payload file"):
+        inf2.read_payload_file(tmp_path)  # a directory is not a payload file
+
+
 def test_inference_cli_save_rejects_invalid(tmp_path, capsys):
     data = tmp_path / "cli-bad"
     bad = tmp_path / "bad.json"

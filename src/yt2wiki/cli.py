@@ -335,20 +335,8 @@ def _cmd_inference_show(settings: Settings) -> int:
 
 
 def _cmd_inference_save(settings: Settings, args) -> int:
-    # S8707: validate the operator-supplied payload path before opening it.
-    payload_path = Path(args.file)
-    if not payload_path.is_file():
-        print(f"no such payload file: {payload_path}", file=sys.stderr)
-        return 2
     try:
-        payload = json.loads(payload_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        print(f"cannot read payload file: {exc}", file=sys.stderr)
-        return 2
-    if not isinstance(payload, dict):
-        print("payload must be a JSON object with providers/roles", file=sys.stderr)
-        return 2
-    try:
+        payload = inf.read_payload_file(args.file)
         cfg = inf.save(settings.paths, payload)
     except inf.InferenceConfigError as exc:
         print(f"invalid inference configuration: {exc}", file=sys.stderr)
