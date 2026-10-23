@@ -4,7 +4,7 @@
 **Remote:** https://github.com/mitchins/yt2wiki
 **Authoritative `origin/main`:** `edb56f9df053b306e130febdf58ea69eeeb79a9b` (PR #9 squash merge)
 **Worktrees:** `main` `496aed8` (pre-GitHub, preserved), `.worktrees/p1` `6105ee5`,
-`.worktrees/p2a` `p2a/sonar-baseline` `bcc404a`, `.worktrees/p2b` `p2b/deploy` `859e7f0`
+`.worktrees/p2a` `p2a/sonar-baseline` `bcc404a`, `.worktrees/p2b` `p2b/deploy` `c052e01`
 (rebased onto `origin/main` `facf3da`; pre-rebase backup branch deleted after verified push)
 **Stashes:** `stash@{0}` `fix/sonar-initial-findings`, `stash@{1,2}` V8 dirt (preserved, not applied)
 **Data:** `~/.local/share/yt2wiki` intact, `HF_HOME=/usbpool/yt-to-wiki/.cache/huggingface` preserved,
@@ -32,7 +32,7 @@ and its now-redundant `sonar.projectVersion=0.1.0` hunk removed for a clean diff
 
 ## PR B — Safe uploads and qualified deployment (evidence below, unmerged)
 
-**PR:** https://github.com/mitchins/yt2wiki/pull/12 `p2b/deploy` `859e7f0` → `main`
+**PR:** https://github.com/mitchins/yt2wiki/pull/12 `p2b/deploy` `c052e01` → `main`
 (`facf3da`; redundant `sonar.projectVersion` hunk removed — the diff holds only P2 files)
 **Chain (rebased, replayed cleanly onto `facf3da`):** `ea0473c` base → docs/coverage/refactor/
 idempotency/operator-console/CPU-ASR/compose/secrets → deploy docs → gate fixes (S8707,
@@ -40,7 +40,7 @@ complexity, S108/S5713) → containment → S7761 → report → CodeRabbit batc
 8-image) → S9073 split → report → **Phase 2:** role-aware CLI exits, validate shapes,
 EXDEV docs, errno parametrize, no-`0.0.0.0` proxy, stop-first backup procedure →
 **closure:** restart semantics, payload staging docs, full backup set, persistence files.
-**CI:** `39912321511` `2m44s` `success` on head `859e7f0` (report sync; earlier `39911947095`
+**CI:** `39912794559` `2m55s` `success` on head `c052e01` (report sync; earlier `39912321511` earlier `39911947095`
 on `62cb5ec` final closure: proxy_headers guard, pip-HOME fix, failing backup validation,
 restart semantics, payload docs; `39901180146`
 on `0bfc77e`, `39893077481` on `1ddcda7`, `39887119549` on `071dc31`, `39884390012` on `7316ec8`,
@@ -209,7 +209,7 @@ No merges performed. Blockers for #3 (Gemma) / #4 (Halogen) remain separate foll
 
 ## Evidence index
 
-- PRs: #11 merged as `facf3da`; #12 `859e7f0` (CI `39912321511` success,
+- PRs: #11 merged as `facf3da`; #12 `c052e01` (CI `39912794559` success,
   Sonar `projectStatus OK`, `new_coverage 95.2%` on verified `new_lines_to_cover 217`,
   zero open issues)
 - Code: `services/__init__.py` upload block (no pragmas, EXDEV-only documented),
