@@ -95,7 +95,7 @@ The image contains:
 - Does not require `--gpus` or NVIDIA runtime to start (`warning: no CUDA device visible` but `uvicorn running on http://0.0.0.0:8000`)
 - Runs as user `yt2wiki` (uid 1000), `WORKDIR /app`, `VOLUME /data`, `YT2WIKI_HOME=/data`, `HF_HOME=/data/models`
 - Persists `SQLite` (`/data/db/yt2wiki.sqlite3*`), `uploads` (`/data/uploads`), `frames` (`/data/frames`), `articles` (`/data/articles`), `assets`, `revisions`, `config` (`/data/config/inference.json`)
-- `recover()` on startup rebuilds the job queue, so interrupted jobs are retried after `docker stop/start`
+- `recover()` on startup rebuilds the job queue: still-queued jobs resume automatically, while a job that was running is marked `interrupted` (finished stages are kept and reused) — it is **not** automatically retried. Retry it explicitly from the UI (`Retry`) or `POST /api/jobs/{id}/reprocess` after the provider returns.
 - Healthcheck: `curl -sf http://127.0.0.1:8000/health` (30s interval, 15s start period)
 - Bounded logs: `json-file` with `max-size 10m` `max-file 3`
 - Serves the library without loading any model (`GET /health`, `GET /library`, `GET /articles/{id}` all work with providers offline)
@@ -178,8 +178,25 @@ docker exec yt2wiki yt2wiki inference save --file /data/config/inference-payload
 docker exec yt2wiki yt2wiki inference test --name lan
 ```
 
+Create the payload file inside `/data/config/` first — `save` only reads regular
+files that resolve inside the config directory (symlinks resolved, `../` escapes
+refused). Minimal valid example (no real credentials or private addresses — use
+your own endpoint and a `YT2WIKI_…` variable name whose value you inject via
+`env_file` or Portainer stack variables):
+
+```bash
+cat > /tmp/inference-payload.json <<'EOF'
+{"providers": [{"name": "lan", "url": "http://192.168.1.20:8000/v1",
+               "model": "qwen3", "api_key_env": "YT2WIKI_LAN_KEY"}],
+ "roles": {"writer": "lan", "vision": "lan"}}
+EOF
+docker cp /tmp/inference-payload.json yt2wiki:/data/config/inference-payload.json
+docker exec yt2wiki yt2wiki inference save --file /data/config/inference-payload.json
+```
+
 - `save` accepts the same `{providers, roles}` JSON schema as the web API and
-  validates it before writing (`YT2WIKI_…` names only, `http(s)://` URLs).
+  validates it before writing (`YT2WIKI_…` names only, `http(s)://` URLs;
+  malformed shapes fail with a controlled error, never a traceback).
 - `test` runs the full qualification (writer JSON probe + 2-image rubric judge),
   records the result in `inference_status.json`, prints it, and exits non-zero
   when the endpoint is not reachable/qualified.
@@ -320,39 +337,98 @@ Stop writers first so the database snapshot and the article files pair exactly;
 copying either store while jobs or edits continue cannot be point-in-time
 consistent.
 
+The database references files beyond `articles/`: the rows' `upload_path` /
+`video_path` live under `uploads/` and `media/`, frames under `frames/`, and the
+endpoint configuration under `config/`. Back all of them up together (`work/`
+job scratch and `logs/` are ephemeral; `models/` is a re-downloadable cache and
+is excluded deliberately):
+
 ```bash
 TAG=$(date +%F)
-docker stop yt2wiki   # quiesce writers; JobRunner recovers cleanly on next start
+mkdir -p backup-$TAG && cd backup-$TAG   # host dir must be writable by UID 1000:
+                                         # the container runs as `yt2wiki` (1000), and bind
+                                         # mounts carry host ownership — a root-owned output
+                                         # dir fails the backup with "Permission denied"
+docker stop yt2wiki   # quiesce writers; on next start queued jobs resume and
+                      # running jobs are marked `interrupted` for explicit retry (not auto-retried)
 # Online backup of the stopped volume (writers quiet, WAL read handled by .backup):
 docker run --rm -v yt2wiki-data:/data -v "$PWD":/out yt2wiki:0.1.0 \
   sqlite3 /data/db/yt2wiki.sqlite3 ".backup '/out/yt2wiki-backup-$TAG.sqlite3'"
-# Article files from the stopped container (no writes can interleave now):
-docker cp yt2wiki:/data/articles "./yt2wiki-articles-backup-$TAG"
+# All persistent media, frames, article files and config from the stopped container:
+for d in articles uploads frames media config; do
+  docker cp "yt2wiki:/data/$d" "./yt2wiki-backup-$TAG-$d"
+done
 docker start yt2wiki
-# Verify the snapshot (host sqlite3 is fine — the backup is a plain file):
+# Verify the snapshot (host sqlite3 is fine — the backup is a plain file),
+# including that every referenced media file is actually present:
 sqlite3 "yt2wiki-backup-$TAG.sqlite3" "PRAGMA integrity_check;"
 # → ok
+python3 - <<'EOF'
+import sqlite3
+from pathlib import Path
+TAG = "REPLACE_WITH_DATE_TAG"  # e.g. 2026-10-23
+root = Path(".")
+conn = sqlite3.connect(f"yt2wiki-backup-{TAG}.sqlite3")
+missing = []
+for article_id, in conn.execute("SELECT article_id FROM articles"):
+    for name in ("article.md", "article.html"):
+        p = root / f"yt2wiki-backup-{TAG}-articles" / article_id / name
+        if not p.is_file():
+            missing.append(str(p))
+for rel, in conn.execute("SELECT upload_path FROM sources WHERE upload_path IS NOT NULL"):
+    p = root / f"yt2wiki-backup-{TAG}-uploads" / Path(rel).name
+    if not p.is_file():
+        # Ingest moves the staging file into media/; the row keeps the old
+        # path while video_path becomes the live reference (see below).
+        missing.append(str(p) + " (staging; check video_path)")
+for rel, in conn.execute("SELECT video_path FROM sources WHERE video_path IS NOT NULL"):
+    p = root / f"yt2wiki-backup-{TAG}-media" / Path(rel).relative_to("/data/media")
+    if not p.is_file():
+        missing.append(str(p))
+staging_only = [m for m in missing if m.endswith("(staging; check video_path)")]
+live_missing = [m for m in missing if not m.endswith("(staging; check video_path)")]
+print("live references missing:", live_missing or "none")
+print("superseded staging files:", staging_only or "none")
+EOF
 ```
 
-Restore into the same volume (or a fresh one — same steps):
+The check maps each recorded container path to its backup copy (`video_path` →
+`media/…`, `upload_path` → `uploads/…`, articles → `articles/…`). Live references
+must all exist (`none`); a staging file may be absent only when ingest moved it
+into `media/` — in which case its row carries the existing `video_path`.
+
+Restore into a fresh volume (same steps work for the same volume):
 
 ```bash
+docker volume create yt2wiki-restored
+docker run --rm -v yt2wiki-restored:/data yt2wiki:0.1.0 mkdir -p /data/db
 docker stop yt2wiki
-docker run --rm -v yt2wiki-data:/data -v "$PWD":/out yt2wiki:0.1.0 \
-  sh -c "rm -f /data/db/yt2wiki.sqlite3-wal /data/db/yt2wiki.sqlite3-shm \
-         && cp '/out/yt2wiki-backup-$TAG.sqlite3' /data/db/yt2wiki.sqlite3 \
+docker run --rm -v yt2wiki-restored:/data -v "$PWD":/out yt2wiki:0.1.0 \
+  sh -c "cp '/out/yt2wiki-backup-$TAG.sqlite3' /data/db/yt2wiki.sqlite3 \
+         && rm -f /data/db/yt2wiki.sqlite3-wal /data/db/yt2wiki.sqlite3-shm \
          && sqlite3 /data/db/yt2wiki.sqlite3 'PRAGMA integrity_check;'"
 # → ok
-docker cp "./yt2wiki-articles-backup-$TAG/." yt2wiki:/data/articles/
-docker start yt2wiki
+for d in articles uploads frames media config; do
+  docker run --rm -v yt2wiki-restored:/data -v "$PWD":/out yt2wiki:0.1.0 \
+    sh -c "mkdir -p /data/$d && cp -a '/out/yt2wiki-backup-$TAG-$d/.' /data/$d/"
+done
+# Restored files must be writable by the service UID (1000 `yt2wiki`):
+docker run --rm --user root -v yt2wiki-restored:/data yt2wiki:0.1.0 \
+  chown -R 1000:1000 /data/db /data/articles /data/uploads /data/frames /data/media /data/config
+docker run -d --name yt2wiki-restored -p 127.0.0.1:18081:8000 -v yt2wiki-restored:/data yt2wiki:0.1.0
+curl -sf http://127.0.0.1:18081/health && curl -sf http://127.0.0.1:18081/library | grep Library
+docker start yt2wiki   # original service back up
 ```
 
-Host-native equivalent (pip install — stop the service first, same WAL rule):
+Host-native equivalent (pip install — stop the service first, same WAL rule;
+`chown` only matters when UIDs differ, e.g. restoring as root):
 
 ```bash
 # stop yt2wiki serve (Ctrl-C / systemctl), then:
 sqlite3 "$YT2WIKI_HOME/db/yt2wiki.sqlite3" ".backup 'yt2wiki-backup-$(date +%F).sqlite3'"
-cp -a "$YT2WIKI_HOME/articles" "yt2wiki-articles-backup-$(date +%F)"
+for d in articles uploads frames media config; do
+  cp -a "$YT2WIKI_HOME/$d" "yt2wiki-backup-$(date +%F)-$d"
+done
 sqlite3 "yt2wiki-backup-$(date +%F).sqlite3" "PRAGMA integrity_check;"
 # → ok
 ```

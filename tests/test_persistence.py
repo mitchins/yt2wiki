@@ -30,7 +30,8 @@ def test_persistent_storage_and_restart_recovery(tmp_path, monkeypatch):
     p.write_bytes(content)
     sid = svc.create_upload_source(p)
 
-    # Simulate pipeline outputs: create article and assets
+    # Simulate pipeline outputs: create the article row plus the article files
+    # the pipeline would write, so the restart check covers files as well as rows.
     article_id = "art-persist"
     now = time.time()
     db.execute(
@@ -38,14 +39,20 @@ def test_persistent_storage_and_restart_recovery(tmp_path, monkeypatch):
         (article_id, sid, "Persist Test", "# Persist\n\nbody", "<p>Persist</p>", 1, "published", now, now),
     )
     db.execute("INSERT INTO articles_fts(article_id, title, markdown) VALUES(?,?,?)", (article_id, "Persist Test", "# Persist body"))
+    settings.paths.article_dir(article_id).mkdir(parents=True, exist_ok=True)
+    settings.paths.article_markdown(article_id).write_text("# Persist\n\nbody", encoding="utf-8")
+    settings.paths.article_html(article_id).write_text("<p>Persist</p>", encoding="utf-8")
     # Config
     (settings.paths.root / "config").mkdir(parents=True, exist_ok=True)
     (settings.paths.root / "config" / "inference.json").write_text(json.dumps({"providers": {}, "roles": {}}))
 
-    # Verify files exist
+    # Verify files exist before restart
     assert (settings.paths.db_path).is_file()
-    assert (settings.paths.uploads_dir / f"{sid}-{p.name}").is_file() or db.query_one("SELECT upload_path FROM sources WHERE source_id=?", (sid,))["upload_path"]
-    assert (settings.paths.articles_dir / article_id / "article.md").exists() or True  # may not be created via DB only, but DB persists
+    stored = Path(db.query_one("SELECT upload_path FROM sources WHERE source_id=?", (sid,))["upload_path"])
+    assert stored.is_file()
+    assert stored.read_bytes() == content
+    assert settings.paths.article_markdown(article_id).is_file()
+    assert settings.paths.article_html(article_id).is_file()
 
     # Simulate restart: new Settings/Database with same data_dir, check data still there
     settings2 = Settings.load(data_dir=data_dir, profile="compact", device_index=None)
@@ -55,8 +62,13 @@ def test_persistent_storage_and_restart_recovery(tmp_path, monkeypatch):
     row = db2.query_one("SELECT title FROM articles WHERE article_id=?", (article_id,))
     assert row
     assert row["title"] == "Persist Test"
-    row2 = db2.query_one("SELECT source_id FROM sources WHERE source_id=?", (sid,))
+    row2 = db2.query_one("SELECT upload_path FROM sources WHERE source_id=?", (sid,))
     assert row2
+    stored2 = Path(row2["upload_path"])
+    assert stored2.is_file(), "registered upload must survive restart"
+    assert stored2.read_bytes() == content
+    assert settings2.paths.article_markdown(article_id).is_file()
+    assert settings2.paths.article_html(article_id).is_file()
     # Config persists
     assert (settings2.paths.root / "config" / "inference.json").is_file()
 
