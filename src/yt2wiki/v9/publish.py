@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..article import format_ts, timestamp_url
+from ..generations import RECIPE_VERSION, record_generation
 
 log = logging.getLogger("yt2wiki.v9.publish")
 
@@ -355,7 +356,8 @@ def normalize_timestamps(md: str, url: str | None, duration_s: float | None = No
 def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
             title: str, markdown: str, sections: list[dict[str, Any]],
             picks: dict[str, list[dict[str, Any]]],
-            provenance: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+            provenance: dict[str, Any], report: dict[str, Any],
+            inference_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     from ..article import markdown_to_html, render_html
     from ..db.schema import json_dumps
     from ..article import Article, FrameRef, Section
@@ -438,6 +440,17 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
                  a.get("alt_text", ""), time.time()))
     (adir / "v9_report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
     (adir / "sections.json").write_text(json.dumps(sections, indent=1), encoding="utf-8")
+    # Immutable generation record: snapshot the just-written outputs before
+    # returning. The current-article paths above keep serving the reader; the
+    # per-generation copy under generations/<gid>/ is never modified again.
+    frame_ids = [p["frame_id"] for plist in picks.values() for p in plist[:2]
+                 if p.get("frame_id")]
+    gen = record_generation(
+        db, settings.paths, article_id=article_id, source_id=source_id,
+        job_id=job_id, recipe="v9", recipe_version=RECIPE_VERSION,
+        settings_fingerprint=provenance.get("fingerprint"),
+        profile=provenance.get("profile"),
+        snapshot=inference_snapshot, frame_ids=frame_ids)
     zp = settings.paths.article_dir(article_id) / "article.zip"
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(md_path, "article.md")
@@ -445,7 +458,9 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
             if f.is_file():
                 zf.write(f, f"assets/{f.name}")
     return {"article_id": article_id, "markdown_chars": len(markdown),
-            "assets": len(list(assets.glob('*'))), "zip_bytes": zp.stat().st_size}
+            "assets": len(list(assets.glob('*'))), "zip_bytes": zp.stat().st_size,
+            "generation_id": gen["generation_id"],
+            "generation_operation": gen["operation"]}
 
 
 def _asset_rows(settings, assets: Path, picks: dict[str, list[dict[str, Any]]],

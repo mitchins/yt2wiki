@@ -380,14 +380,18 @@ def test_inference_test_reports_unreachable(env, monkeypatch):
     assert r["ok"] is False and "YT2WIKI_NO_SUCH_KEY_VAR" in r["error"]
 
 
-def test_schema_stamp_is_never_lowered(tmp_path):
+def test_schema_newer_than_build_is_refused(tmp_path):
+    """A database stamped by a newer unsupported build must not be written."""
+    import pytest
+
     from yt2wiki.db import schema
 
     db = Database(tmp_path / "x.sqlite3")
     db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(schema.SCHEMA_VERSION + 1),))
-    again = Database(tmp_path / "x.sqlite3")
-    again.migrate()
-    v = again.query_one("SELECT value FROM meta WHERE key='schema_version'")["value"]
+    with pytest.raises(RuntimeError, match="newer than this build supports"):
+        Database(tmp_path / "x.sqlite3")
+    # The marker is untouched: the old build neither lowered nor rewrote it.
+    v = db.query_one("SELECT value FROM meta WHERE key='schema_version'")["value"]
     assert int(v) == schema.SCHEMA_VERSION + 1
 
 

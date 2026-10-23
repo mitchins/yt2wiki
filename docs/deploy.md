@@ -76,17 +76,18 @@ Do not publish to PyPI without a separate licence decision — the project has n
 ## 2. Thin service container
 
 **Base image:** `python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70`
-(pinned digest, `124 MB` base). The `yt2wiki:0.1.0` image is `~1.16 GB` including
+(pinned digest, `124 MB` base). The published image `ghcr.io/mitchins/yt2wiki:main`
+is a multi-arch manifest (AMD64 + ARM64; see docs/releases.md) including
 `ffmpeg`/`tesseract` and the Python deps (`fastapi`, `uvicorn`, `jinja2`, `pillow`,
-`httpx`, `yt-dlp`, `pytesseract`, `numpy` — and, since P3, **no**
+`httpx`, `yt-dlp`, `pytesseract`, `numpy` — and **no**
 `faster-whisper`/`ctranslate2`/`av`/`torch`: transcription and inference are
 external HTTP services, see §3/§3.1).
 
-Contents verified:
+Contents verified (replace the tag with the pinned `:sha-<commit>` you deploy):
 
 ```bash
-docker run --rm yt2wiki:0.1.0 pip list | grep -E "torch|transformers"  # no output
-docker run --rm yt2wiki:0.1.0 yt2wiki --help
+docker run --rm ghcr.io/mitchins/yt2wiki:main pip list | grep -E "torch|transformers"  # no output
+docker run --rm ghcr.io/mitchins/yt2wiki:main yt2wiki --help
 docker exec <container> whoami  # yt2wiki (uid 1000, unprivileged)
 docker exec <container> ffmpeg -version
 docker exec <container> tesseract --version
@@ -103,17 +104,17 @@ The image contains:
 - Bounded logs: `json-file` with `max-size 10m` `max-file 3`
 - Serves the library without loading any model (`GET /health`, `GET /library`, `GET /articles/{id}` all work with providers offline)
 
-Build:
+Install and upgrade through Compose only — no local build step:
 
 ```bash
-docker build -t yt2wiki:0.1.0 .
-docker images yt2wiki:0.1.0  # ~1.16 GB
+docker compose pull
+docker compose up -d
 ```
 
-Run (bind to host loopback, data persists):
+Run (bind to host loopback, data persists) — equivalent to `up -d` above:
 
 ```bash
-docker run -d --name yt2wiki -p 127.0.0.1:8080:8000 -v yt2wiki-data:/data yt2wiki:0.1.0
+docker run -d --name yt2wiki -p 127.0.0.1:8080:8000 -v yt2wiki-data:/data ghcr.io/mitchins/yt2wiki:main
 # or bind-mount an existing library without migration:
 # -v /home/mitch/.local/share/yt2wiki:/data
 curl -sf http://127.0.0.1:8080/health
@@ -121,6 +122,13 @@ curl -sf http://127.0.0.1:8080/library | grep "Library"
 docker exec yt2wiki whoami
 docker exec yt2wiki ls -lh /data/db
 docker stop yt2wiki && docker start yt2wiki && curl -sf http://127.0.0.1:8080/health
+```
+
+Developers build locally with the override file (never for ordinary installs;
+see docs/releases.md for tags and digests):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml build
 ```
 
 Inside the container the app listens on `0.0.0.0:8000` so Docker can forward
@@ -234,7 +242,7 @@ server-side model (recorded for provenance — `/asr` echoes no model id).
 - The `/settings` page renders an explicit **Operator only** notice — with these
   exact commands — for every non-localhost viewer, and disables its form.
 
-Verified against the running `yt2wiki:0.1.0` container with an authenticated mock
+Verified against the running `ghcr.io/mitchins/yt2wiki:main` container with an authenticated mock
 provider (`http://172.17.0.1:8931/v1`, key `YT2WIKI_MOCK_KEY=test-secret-xyz` via
 `--env-file`): the mock logged `Authorization: Bearer test-secret-xyz` on
 `/models` and `/chat/completions`, `inference test` reported
@@ -372,13 +380,12 @@ Do not remove the localhost guard merely because requests arrive from a containe
 
 ## 6. Portainer
 
-Import `docker-compose.portainer.yml` as a Portainer Stack:
+Import `docker-compose.portainer.yml` as a Portainer Stack (or paste
+`docker-compose.yml` itself — both pull the same GHCR image, no build step):
 
-- **Build the image first — it is not public.** No `yt2wiki:0.1.0` image has been
-  published to any registry or verified from one. On the Docker endpoint run
-  `docker build -t yt2wiki:0.1.0 .` (from this checkout) and confirm
-  `docker images yt2wiki:0.1.0` before deploying the stack. Alternatively push
-  your build to a private registry and change `image:` to that exact reference.
+- **Prebuilt image.** The stack pulls `ghcr.io/mitchins/yt2wiki:main`
+  automatically; pin releases with the `YT2WIKI_IMAGE_TAG` stack variable
+  (`:vX.Y.Z` or `:sha-<commit>`, see docs/releases.md).
 - One required service `yt2wiki`, one **experimental** `llama` (enable the
   `llama` profile in Portainer's stack options only to attempt your own
   qualification — §4).
@@ -435,7 +442,7 @@ mkdir -p backup-$TAG && cd backup-$TAG   # host dir must be writable by UID 1000
 docker stop yt2wiki   # quiesce writers; on next start queued jobs resume and
                       # running jobs are marked `interrupted` for explicit retry (not auto-retried)
 # Online backup of the stopped volume (writers quiet, WAL read handled by .backup):
-docker run --rm -v yt2wiki-data:/data -v "$PWD":/out yt2wiki:0.1.0 \
+docker run --rm -v yt2wiki-data:/data -v "$PWD":/out ghcr.io/mitchins/yt2wiki:main \
   sqlite3 /data/db/yt2wiki.sqlite3 ".backup '/out/yt2wiki-backup-$TAG.sqlite3'"
 # All persistent media, frames, article files and config from the stopped container:
 for d in articles uploads frames media config; do
@@ -495,21 +502,21 @@ Restore into a fresh volume (same steps work for the same volume):
 
 ```bash
 docker volume create yt2wiki-restored
-docker run --rm -v yt2wiki-restored:/data yt2wiki:0.1.0 mkdir -p /data/db
+docker run --rm -v yt2wiki-restored:/data ghcr.io/mitchins/yt2wiki:main mkdir -p /data/db
 docker stop yt2wiki
-docker run --rm -v yt2wiki-restored:/data -v "$PWD":/out yt2wiki:0.1.0 \
+docker run --rm -v yt2wiki-restored:/data -v "$PWD":/out ghcr.io/mitchins/yt2wiki:main \
   sh -c "cp '/out/yt2wiki-backup-$TAG.sqlite3' /data/db/yt2wiki.sqlite3 \
          && rm -f /data/db/yt2wiki.sqlite3-wal /data/db/yt2wiki.sqlite3-shm \
          && sqlite3 /data/db/yt2wiki.sqlite3 'PRAGMA integrity_check;'"
 # → ok
 for d in articles uploads frames media config; do
-  docker run --rm -v yt2wiki-restored:/data -v "$PWD":/out yt2wiki:0.1.0 \
+  docker run --rm -v yt2wiki-restored:/data -v "$PWD":/out ghcr.io/mitchins/yt2wiki:main \
     sh -c "mkdir -p /data/$d && cp -a '/out/yt2wiki-backup-$TAG-$d/.' /data/$d/"
 done
 # Restored files must be writable by the service UID (1000 `yt2wiki`):
-docker run --rm --user root -v yt2wiki-restored:/data yt2wiki:0.1.0 \
+docker run --rm --user root -v yt2wiki-restored:/data ghcr.io/mitchins/yt2wiki:main \
   chown -R 1000:1000 /data/db /data/articles /data/uploads /data/frames /data/media /data/config
-docker run -d --name yt2wiki-restored -p 127.0.0.1:18081:8000 -v yt2wiki-restored:/data yt2wiki:0.1.0
+docker run -d --name yt2wiki-restored -p 127.0.0.1:18081:8000 -v yt2wiki-restored:/data ghcr.io/mitchins/yt2wiki:main
 curl -sf http://127.0.0.1:18081/health && curl -sf http://127.0.0.1:18081/library | grep Library
 docker start yt2wiki   # original service back up
 ```
@@ -541,7 +548,7 @@ articles copy, integrity check, restart, library still serving — is exercised 
 ### Mode A — service-only (no GPU, no model server)
 
 ```bash
-docker run -d --name yt2wiki-a -p 127.0.0.1:8080:8000 -v yt2wiki-data:/data yt2wiki:0.1.0
+docker run -d --name yt2wiki-a -p 127.0.0.1:8080:8000 -v yt2wiki-data:/data ghcr.io/mitchins/yt2wiki:main
 curl -sf http://127.0.0.1:8080/health
 curl -sf http://127.0.0.1:8080/library | grep Library
 # inside container:
@@ -579,7 +586,7 @@ full production inference qualification based on mocked tests.
 
 ### Management path and credential routing — demonstrated in the running container
 
-Image `yt2wiki:0.1.0` (`1.16 GB`, `1a79ea27c4c6`), container `yt2wiki-demo`,
+Image `ghcr.io/mitchins/yt2wiki:main` (`1.16 GB`, `1a79ea27c4c6`), container `yt2wiki-demo`,
 host port `18080 → 8000` (host `8080` was occupied; same loopback binding),
 `--env-file` with `YT2WIKI_MOCK_KEY=test-secret-xyz`, volume `yt2wiki-demo-data`:
 

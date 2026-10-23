@@ -107,7 +107,8 @@ def test_compose_files_exist_and_are_valid(tmp_path):
     dc = yaml.safe_load((root / "docker-compose.yml").read_text())
     assert "yt2wiki" in dc["services"]
     assert "volumes" in dc
-    assert dc["services"]["yt2wiki"]["image"] == "yt2wiki:0.1.0"
+    assert dc["services"]["yt2wiki"]["image"] == \
+        "ghcr.io/mitchins/yt2wiki:${YT2WIKI_IMAGE_TAG:-main}"
     assert "yt2wiki-data" in dc["volumes"]
     assert dc["services"]["yt2wiki"]["healthcheck"]["test"] == ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
     # No GPU for yt2wiki

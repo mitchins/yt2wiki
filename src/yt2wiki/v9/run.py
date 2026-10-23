@@ -483,7 +483,8 @@ def run_source(settings, db, service, source_id: str, *,
         pub = v9publish.persist(settings, db, article_id=article_id, source_id=source_id,
                                 job_id=v9job, title=article["title"], markdown=md,
                                 sections=sections, picks=picks,
-                                provenance=provenance, report=report)
+                                provenance=provenance, report=report,
+                                inference_snapshot=inference_snapshot)
         _record(db, v9job, "v9_publish", "done", pub, started=t)
         result.update({"article_id": article_id, "ok": True,
                        "wall_s": round(time.time() - t0, 3), "report": report,

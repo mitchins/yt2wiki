@@ -1,0 +1,16 @@
+# Developer-only local build override. Ordinary installs and Portainer
+# stacks use the prebuilt GHCR image from docker-compose.yml and never
+# this file.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml build
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
+#
+# The built image carries the working-tree commit (see Dockerfile BUILD arg)
+# instead of a release commit; tag it explicitly when sharing builds.
+
+services:
+  yt2wiki:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yt2wiki:local

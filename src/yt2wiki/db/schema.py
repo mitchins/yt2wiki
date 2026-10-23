@@ -12,7 +12,38 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+# Additive v4 delta: immutable per-publication generation records. Applied by
+# _migrate() to databases created at v3; fresh databases get it from SCHEMA.
+MIGRATION_V4 = """
+CREATE TABLE IF NOT EXISTS generations (
+    generation_id        TEXT PRIMARY KEY,
+    article_id           TEXT NOT NULL REFERENCES articles(article_id) ON DELETE CASCADE,
+    source_id            TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+    job_id               TEXT,
+    parent_generation_id TEXT REFERENCES generations(generation_id),
+    operation            TEXT NOT NULL DEFAULT 'initial',  -- initial|regenerate
+    recipe               TEXT NOT NULL DEFAULT 'v9',       -- v9|classic
+    recipe_version       INTEGER NOT NULL DEFAULT 1,
+    app_version          TEXT NOT NULL DEFAULT 'unknown',
+    git_commit           TEXT NOT NULL DEFAULT 'unknown',
+    image_digest         TEXT NOT NULL DEFAULT 'unknown',
+    settings_fingerprint TEXT,
+    profile              TEXT,
+    asr_json             TEXT NOT NULL DEFAULT '{}',
+    writer_json          TEXT NOT NULL DEFAULT '{}',
+    vision_json          TEXT NOT NULL DEFAULT '{}',
+    prompts_json         TEXT NOT NULL DEFAULT '{}',
+    selection_json       TEXT NOT NULL DEFAULT '{}',
+    source_content_hash  TEXT,
+    frame_ids_json       TEXT NOT NULL DEFAULT '[]',
+    artifacts_json       TEXT NOT NULL DEFAULT '{}',
+    manifest_path        TEXT,
+    created_at           REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS generations_article ON generations(article_id, created_at);
+"""
 
 SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -225,6 +256,34 @@ CREATE TABLE IF NOT EXISTS article_assets (
     created_at   REAL NOT NULL
 );
 
+-- v4: immutable per-publication generation records (see MIGRATION_V4).
+CREATE TABLE IF NOT EXISTS generations (
+    generation_id        TEXT PRIMARY KEY,
+    article_id           TEXT NOT NULL REFERENCES articles(article_id) ON DELETE CASCADE,
+    source_id            TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+    job_id               TEXT,
+    parent_generation_id TEXT REFERENCES generations(generation_id),
+    operation            TEXT NOT NULL DEFAULT 'initial',
+    recipe               TEXT NOT NULL DEFAULT 'v9',
+    recipe_version       INTEGER NOT NULL DEFAULT 1,
+    app_version          TEXT NOT NULL DEFAULT 'unknown',
+    git_commit           TEXT NOT NULL DEFAULT 'unknown',
+    image_digest         TEXT NOT NULL DEFAULT 'unknown',
+    settings_fingerprint TEXT,
+    profile              TEXT,
+    asr_json             TEXT NOT NULL DEFAULT '{}',
+    writer_json          TEXT NOT NULL DEFAULT '{}',
+    vision_json          TEXT NOT NULL DEFAULT '{}',
+    prompts_json         TEXT NOT NULL DEFAULT '{}',
+    selection_json       TEXT NOT NULL DEFAULT '{}',
+    source_content_hash  TEXT,
+    frame_ids_json       TEXT NOT NULL DEFAULT '[]',
+    artifacts_json       TEXT NOT NULL DEFAULT '{}',
+    manifest_path        TEXT,
+    created_at           REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS generations_article ON generations(article_id, created_at);
+
 -- ------------------------------------------------------------ verification --
 CREATE TABLE IF NOT EXISTS findings (
     finding_id  TEXT PRIMARY KEY,
@@ -282,22 +341,67 @@ CREATE TABLE IF NOT EXISTS app_log (
 """
 
 
+def _schema_version_of(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    if not row:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing database up to SCHEMA_VERSION.
+
+    Additive only: v3 databases gain the v4 generations table and the
+    articles.current_generation_id pointer; existing articles, revisions,
+    sources and assets are untouched (pre-v4 provenance reads as
+    legacy/unknown, never fabricated). Idempotent and safe on restart.
+
+    A database stamped by a newer, unsupported build raises instead of
+    being silently written: unknown future columns must never be corrupted.
+    """
+    current = _schema_version_of(conn)
+    if current > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"database schema v{current} is newer than this build supports "
+            f"(v{SCHEMA_VERSION}); refusing to open it — upgrade yt2wiki "
+            "instead of writing with an older build."
+        )
+    if current < 4 and current > 0:
+        conn.executescript(MIGRATION_V4)
+        if "current_generation_id" not in _table_columns(conn, "articles"):
+            conn.execute("ALTER TABLE articles ADD COLUMN current_generation_id TEXT")
+    elif current == 0:
+        # Fresh database: SCHEMA already created the v4 tables above.
+        if "current_generation_id" not in _table_columns(conn, "articles"):
+            conn.execute("ALTER TABLE articles ADD COLUMN current_generation_id TEXT")
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
+        (str(SCHEMA_VERSION),),
+    )
+
+
 def _stamp_schema_version(conn: sqlite3.Connection) -> None:
     """Record SCHEMA_VERSION, never lowering a newer stamp.
 
-    A library written by a newer build keeps its marker when an older build
-    opens it (the additive schema stays readable either way).
+    Kept for backward compatibility; new code paths go through _migrate(),
+    which refuses databases stamped by a newer unsupported build.
     """
-    row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-    try:
-        current = int(row[0]) if row else 0
-    except (TypeError, ValueError):
-        current = 0
-    if current < SCHEMA_VERSION:
-        conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
-        )
+    if _schema_version_of(conn) > SCHEMA_VERSION:
+        return
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
+        (str(SCHEMA_VERSION),),
+    )
 
 
 class Database:
@@ -316,7 +420,7 @@ class Database:
         self._schema_lock = threading.Lock()
         conn = self.connection()
         conn.executescript(SCHEMA)
-        _stamp_schema_version(conn)
+        _migrate(conn)
         self._migrated = True
 
     # ------------------------------------------------------------------
@@ -355,7 +459,7 @@ class Database:
                 return
             conn = self.connection()
             conn.executescript(SCHEMA)
-            _stamp_schema_version(conn)
+            _migrate(conn)
             self._migrated = True
 
     @contextmanager

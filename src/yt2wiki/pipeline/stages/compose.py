@@ -18,6 +18,7 @@ from typing import Any, Sequence
 from ...article import Article, FrameRef, Section, format_ts, render_markdown, timestamp_url
 from ...backends.loader import ModelManager
 from ...db.schema import json_dumps, json_loads
+from ...generations import CLASSIC_RECIPE_VERSION, record_generation
 from ...literals import Literal, _command_fragments, extract_literals, normalize_value, values_match
 from ...records import Evidence, Procedure
 from .. import StageContext, CancelRequested
@@ -754,6 +755,20 @@ def _store(ctx: StageContext, article: Article, article_id: str, md: str) -> Non
     _copy_assets(ctx, article_id, article, md)
     ctx.artifacts["article_html_chars"] = len(html)
     ctx.record_artifact_hash("markdown", str(md_path))
+    # Immutable generation record (classic recipe): snapshot the outputs just
+    # written above. Parent linkage and regeneration survival are handled by
+    # record_generation; the current-article paths stay canonical.
+    _gen = record_generation(
+        ctx.db, ctx.paths, article_id=article_id, source_id=ctx.source_id,
+        job_id=ctx.job_id, recipe="classic",
+        recipe_version=CLASSIC_RECIPE_VERSION,
+        settings_fingerprint=ctx.fingerprint,
+        profile=getattr(ctx.settings, "profile", None),
+        snapshot=getattr(ctx, "inference_snapshot", None),
+        frame_ids=[n.rsplit(".", 1)[0]
+                   for n in re.findall(r"\]\(assets/([^)]+)\)", md)])
+    ctx.artifacts["generation_id"] = _gen["generation_id"]
+    ctx.artifacts["generation_operation"] = _gen["operation"]
 
 
 def _copy_assets(ctx: StageContext, article_id: str, article: Article, md: str) -> None:
