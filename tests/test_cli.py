@@ -37,6 +37,30 @@ def test_run_stage_subset_is_parsed():
     assert args.force is False
 
 
+def test_serve_disables_proxy_headers(tmp_path, monkeypatch):
+    """Uvicorn must never rewrite the TCP peer from X-Forwarded-For.
+
+    The localhost guard keys on request.client.host; if uvicorn honoured
+    forwarding headers (e.g. with FORWARDED_ALLOW_IPS=* in the environment),
+    a remote peer could claim 127.0.0.1 and pass it. Guard the flag.
+    """
+    import uvicorn
+
+    from yt2wiki.cli import main
+    from yt2wiki.web.app import JobRunner
+
+    seen: dict = {}
+    monkeypatch.setattr(JobRunner, "start", lambda self: None)
+    def fake_run(app, **kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
+    rc = main(["--data-dir", str(tmp_path), "serve", "--port", "0"])
+    assert rc == 0
+    assert seen.get("proxy_headers") is False, seen
+
+
 def test_schemas_command_emits_valid_json(capsys, tmp_path):
     from yt2wiki.cli import main
 

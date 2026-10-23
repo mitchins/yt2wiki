@@ -134,9 +134,18 @@ class WhisperBackend(BaseBackend):
 
         started = time.time()
         os.environ.setdefault("HF_HOME", str(self.hf_home or Path.home() / ".cache" / "huggingface"))
+        compute_type = self.variant.get("compute_type", "int8_float16")
+        if self.device == "cpu" and compute_type in ("int8_float16", "float16"):
+            # CTranslate2 has no efficient float16 kernels on CPU, so the GPU
+            # default is unusable there. Use the registry's explicit CPU compute
+            # type instead of silently degrading; the GPU default is preserved.
+            compute_type = self.variant.get("cpu_compute_type", "int8")
+            log.info("asr %s on cpu: compute_type %s (gpu default %s overridden)",
+                     self.spec.key, compute_type, self.variant.get("compute_type"))
+        self.variant["compute_type"] = compute_type
         kwargs: dict[str, Any] = {
             "device": self.device,
-            "compute_type": self.variant.get("compute_type", "int8_float16"),
+            "compute_type": compute_type,
             "download_root": str(self.hf_home) if self.hf_home else None,
             "local_files_only": False,
         }

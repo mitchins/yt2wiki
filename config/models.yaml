@@ -55,9 +55,9 @@ models:
       Best accuracy/VRAM trade-off in CTranslate2. int8_float16 keeps VRAM near
       3 GB on Blackwell while retaining fp16-quality logits.
     variants:
-      compact: {compute_type: int8_float16, beam_size: 5}
-      standard: {compute_type: int8_float16, beam_size: 5}
-      enhanced: {compute_type: float16, beam_size: 5}
+      compact: {compute_type: int8_float16, cpu_compute_type: int8, beam_size: 5}
+      standard: {compute_type: int8_float16, cpu_compute_type: int8, beam_size: 5}
+      enhanced: {compute_type: float16, cpu_compute_type: int8, beam_size: 5}
     vram_gb: {compact: 3.0, standard: 3.1, enhanced: 3.2}
     fallbacks: [whisper-small]
 
@@ -73,9 +73,9 @@ models:
       Emergency fallback. Measurably worse on dense technical vocabulary; use
       only when large-v3 cannot be allocated.
     variants:
-      compact: {compute_type: int8_float16, beam_size: 5}
-      standard: {compute_type: int8_float16, beam_size: 5}
-      enhanced: {compute_type: int8_float16, beam_size: 5}
+      compact: {compute_type: int8_float16, cpu_compute_type: int8, beam_size: 5}
+      standard: {compute_type: int8_float16, cpu_compute_type: int8, beam_size: 5}
+      enhanced: {compute_type: int8_float16, cpu_compute_type: int8, beam_size: 5}
     vram_gb: {compact: 1.0, standard: 1.0, enhanced: 1.0}
     fallbacks: []
 

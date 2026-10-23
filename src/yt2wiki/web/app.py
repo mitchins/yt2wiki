@@ -39,6 +39,23 @@ WEB_PROFILES = (
 )
 ACTIVE_STATES = ("queued", "running")
 
+# Peers that count as the operator console. Anything else — Docker bridge
+# gateway, LAN address, tunneled port-forward — is a remote viewer, even when
+# the browser runs on the same laptop: the application sees the gateway
+# address, not the browser's loopback. Forwarding headers are never trusted.
+LOCAL_PEERS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1", "testclient", "localhost"})
+
+
+def peer_host(request: Request) -> str:
+    """Best-effort peer address for a request; never consults forwarding headers."""
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", "") if client else ""
+    return host or ""
+
+
+def is_local_peer(host: str) -> bool:
+    return host in LOCAL_PEERS
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.load()
@@ -251,6 +268,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "roles": inference.ROLES, "data_dir": str(settings.paths.root),
             "db_path": str(settings.paths.db_path), "db_size": db_size,
             "n_articles": n_articles,
+            "remote_viewer": not is_local_peer(peer_host(request)),
         })
 
     @app.get("/assets/{article_id}/{filename}")
@@ -438,11 +456,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def _require_local(request: Request) -> None:
         # Inference configuration can exfiltrate secrets and probe internal
-        # networks. Only allow it from localhost; tests use "testclient".
-        host = getattr(request.client, "host", "") if request.client else ""
-        if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "testclient", "localhost"):
+        # networks. Only allow it from the operator console (localhost peer).
+        # Browser sessions through the published Docker port — including SSH
+        # tunnels and LAN addresses — arrive as the gateway address, so they
+        # are refused here; use the operator console instead (see docs/deploy.md).
+        if not is_local_peer(peer_host(request)):
             raise HTTPException(403,
-                "Inference configuration is only allowed from localhost.")
+                "Inference configuration is only allowed from the operator console "
+                "(localhost). Browser sessions through the published Docker port — "
+                "including SSH tunnels — arrive as a non-localhost peer and are refused. "
+                "Configure inference with `yt2wiki inference save --file ...` via "
+                "`docker exec`, then `yt2wiki inference test --name ...`.")
 
     @app.post("/api/settings/inference")
     def api_save_inference(request: Request, payload: dict = Body(...)) -> Any:

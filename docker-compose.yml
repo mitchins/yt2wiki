@@ -1,0 +1,133 @@
+services:
+  yt2wiki:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # For Portainer: use prebuilt image if you prefer: image: ghcr.io/mitchins/yt2wiki:0.1.0
+    image: yt2wiki:0.1.0
+    container_name: yt2wiki
+    # Bind to host loopback only. LAN access goes through an authenticated
+    # reverse proxy (see docs/deploy.md): either a host proxy with this
+    # loopback binding kept, or a container proxy on an isolated internal
+    # network with no published application port. Never publish 0.0.0.0:8080:
+    # that exposes the unauthenticated UI around the proxy.
+    ports:
+      - "127.0.0.1:8080:8000"
+    volumes:
+      - yt2wiki-data:/data                 # SQLite, uploads, frames, articles, assets, revisions, config
+      # For migration-free reuse of an existing library, replace the named volume with a bind mount:
+      # - /home/mitch/.local/share/yt2wiki:/data
+    # Secret injection: provider keys enter the container from an untracked
+    # env_file (Compose interpolation ${VAR} happens on the host; env_file
+    # entries become container environment). Never commit .env; chmod 600.
+    # Copy .env.example to .env and fill in values on the Docker endpoint.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # All settings are env-driven; secrets via YT2WIKI_ env names, not hardcoded.
+      - YT2WIKI_HOME=/data
+      # Optional: choose profile (compact fits 8 GB, standard 12–16 GB). Default is standard.
+      - YT2WIKI_PROFILE=compact
+      # Logging / cache inside container
+      - HF_HOME=/data/models
+    restart: unless-stopped
+    # Health and bounded logs
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # No GPU reservation — the web service never needs NVIDIA to start or serve the library.
+    # It serves the library and fails jobs explicitly when inference is offline.
+
+  # EXPERIMENTAL visual sidecar: NOT qualified. The referenced weights
+  # (Qwen3.5-4B Q4_K_M + F16 projector) are absent from this machine, no
+  # 8-image ranking, CUDA-offload or V9 rubric validation has been performed
+  # against a running server, and no digest is claimed below. Do not represent
+  # this profile as production-ready. The yt2wiki service above is independently
+  # usable without it.
+  # Enable (experimental) with: docker compose --profile llama up -d
+  llama:
+    # Upstream CUDA server build (ggml-org took over from the deprecated
+    # ggerganov account). No digest is pinned here because none was verified
+    # on this machine; pin one on your endpoint after `docker pull`:
+    #   docker pull ghcr.io/ggml-org/llama.cpp:server-cuda
+    #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/ggml-org/llama.cpp:server-cuda
+    # Then replace `image:` with the digest form, e.g.:
+    #   image: ghcr.io/ggml-org/llama.cpp@sha256:<verified digest>
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: yt2wiki-llama
+    profiles: ["llama"]
+    volumes:
+      - yt2wiki-models:/models    # persistent GGUF directory, also usable via YT2WIKI_HOME/models
+      - yt2wiki-data:/data:ro     # sidecar does not need write to library
+    # Models must be staged beforehand under /models; the base service never auto-downloads large weights.
+    # Expected files (UNQUALIFIED — stage only to attempt your own qualification):
+    #   /models/Qwen3.5-4B-Q4_K_M.gguf
+    #   /models/mmproj-F16.gguf   (or gguf/mmproj-F16.gguf per HF layout)
+    # Flag meanings follow upstream llama.cpp docs; they were NOT validated
+    # against a running server here. Qualify before any production claim:
+    # real weights + matching F16 projector, confirmed CUDA offload, an actual
+    # 8-image ranking inside the V9 context budget with valid rubric JSON, and
+    # measured peak VRAM/latency over the Compose network.
+    command:
+      - --model
+      - /models/Qwen3.5-4B-Q4_K_M.gguf
+      - --mmproj
+      - /models/mmproj-F16.gguf
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8081"
+      - --ctx-size
+      - "16384"
+      - --n-gpu-layers
+      - "99"
+      - --reasoning
+      - "off"
+      - --reasoning-budget
+      - "0"
+      # Production image-token budget (V9-Z4 384); 8-image ranking must fit in 16384.
+      # Adjust via env if needed.
+      - --temp
+      - "0.05"
+    ports:
+      - "127.0.0.1:8081:8081"
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8081/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  yt2wiki-data:
+    name: yt2wiki-data
+  yt2wiki-models:
+    name: yt2wiki-models
+
+networks:
+  default:
+    name: yt2wiki
