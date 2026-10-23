@@ -13,4 +13,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Record the working-tree commit in /app/BUILD. Export before building:
+        #   GIT_COMMIT=$(git rev-parse --short HEAD) docker compose \
+        #     -f docker-compose.yml -f docker-compose.build.yml build
+        # Without it the image reports commit "unknown".
+        GIT_COMMIT: "${GIT_COMMIT:-unknown}"
     image: yt2wiki:local

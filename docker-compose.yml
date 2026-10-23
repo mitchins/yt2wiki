@@ -2,8 +2,9 @@ services:
   yt2wiki:
     # Canonical install: prebuilt multi-arch image from GHCR. No local build.
     #   docker compose pull && docker compose up -d
-    # Pin a release with YT2WIKI_IMAGE_TAG=:vX.Y.Z or an immutable build with
-    # YT2WIKI_IMAGE_TAG=:sha-<commit> (see docs/releases.md).
+    # Pin a release with YT2WIKI_IMAGE_TAG=vX.Y.Z or an immutable build with
+    # YT2WIKI_IMAGE_TAG=sha-<commit> (no leading colon — the ':' separator
+    # is already in the reference below). See docs/releases.md.
     image: ghcr.io/mitchins/yt2wiki:${YT2WIKI_IMAGE_TAG:-main}
     # Developer-only local build path (never used for ordinary installs):
     #   docker compose -f docker-compose.yml -f docker-compose.build.yml build
@@ -31,7 +32,7 @@ services:
       # All settings are env-driven; secrets via YT2WIKI_ env names, not hardcoded.
       - YT2WIKI_HOME=/data
       # OCI digest of the running image when the operator pins one
-      # (YT2WIKI_IMAGE_TAG=:sha-...); recorded in generation manifests.
+      # (YT2WIKI_IMAGE_TAG=sha-...); recorded in generation manifests.
       - YT2WIKI_IMAGE_DIGEST=${YT2WIKI_IMAGE_DIGEST:-}
       # Optional: choose profile (compact fits 8 GB, standard 12–16 GB). Default is standard.
       - YT2WIKI_PROFILE=compact

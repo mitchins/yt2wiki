@@ -6,7 +6,7 @@
 #   volumes:
 #     - /home/mitchins/.local/share/yt2wiki:/data
 # Pinned deployments: set the stack variable YT2WIKI_IMAGE_TAG to
-# :vX.Y.Z or :sha-<commit> (see docs/releases.md).
+# vX.Y.Z or sha-<commit> (no leading colon). See docs/releases.md.
 
 services:
   yt2wiki:

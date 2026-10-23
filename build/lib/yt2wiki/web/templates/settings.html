@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Settings — yt2wiki{% endblock %}
+{% block main %}
+<main class="wrap page">
+  <div class="section-head"><h2>Settings</h2></div>
+  <div class="settings">
+
+    <section class="panel set-panel" aria-labelledby="inf-h" data-inference>
+      <h2 id="inf-h">Inference</h2>
+      <p class="lede">yt2wiki sends writing and image-judging requests to an OpenAI-compatible endpoint — a
+        vLLM or llama.cpp server on this machine or your network. Add one, test the connection, then choose what
+        it’s used for.</p>
+
+      <div data-providers>
+        {% for name, p in inference.providers.items() %}
+        {% set st = status.get(name) %}
+        <div class="provider" data-provider>
+          <div class="grid">
+            <label class="field"><span>Name</span><input class="input" data-k="name" value="{{ name }}" placeholder="gemma-lan" required></label>
+            <label class="field"><span>Model</span><input class="input" data-k="model" value="{{ p.model }}" placeholder="Leave empty to use the server’s default"></label>
+            <label class="field wide"><span>Base URL</span><input class="input" data-k="url" type="url" value="{{ p.url }}" placeholder="http://192.168.1.14:8000/v1" required></label>
+            <label class="field wide"><span>API key variable <span class="muted" style="font-weight:400">— optional</span></span>
+              <input class="input" data-k="api_key_env" value="{{ p.api_key_env }}" placeholder="GEMMA_API_KEY" autocomplete="off" spellcheck="false">
+              <small>The name of an environment variable holding the key. The key itself is never stored.</small></label>
+          </div>
+          <div class="foot">
+            <button class="btn btn-quiet btn-sm" type="button" data-test>{{ icon("server") }}Test connection</button>
+            <button class="btn btn-ghost btn-sm" type="button" data-remove>{{ icon("trash") }}Remove</button>
+            <span class="test-result {{ 'ok' if st and st.ok else 'bad' if st else '' }}" data-result>
+              {%- if st and st.ok %}Reachable · {{ st.latency_ms }} ms{% if st.models %} · {{ st.models|join(', ') }}{% endif %} · checked {{ st.checked_at|ago }}
+              {%- elif st %}{{ st.error }} · checked {{ st.checked_at|ago }}
+              {%- else %}Not tested yet{% endif -%}
+            </span>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      <template data-provider-tpl>
+        <div class="provider" data-provider>
+          <div class="grid">
+            <label class="field"><span>Name</span><input class="input" data-k="name" placeholder="gemma-lan" required></label>
+            <label class="field"><span>Model</span><input class="input" data-k="model" placeholder="Leave empty to use the server’s default"></label>
+            <label class="field wide"><span>Base URL</span><input class="input" data-k="url" type="url" placeholder="http://192.168.1.14:8000/v1" required></label>
+            <label class="field wide"><span>API key variable <span class="muted" style="font-weight:400">— optional</span></span>
+              <input class="input" data-k="api_key_env" placeholder="GEMMA_API_KEY" autocomplete="off" spellcheck="false">
+              <small>The name of an environment variable holding the key. The key itself is never stored.</small></label>
+          </div>
+          <div class="foot">
+            <button class="btn btn-quiet btn-sm" type="button" data-test>{{ icon("server") }}Test connection</button>
+            <button class="btn btn-ghost btn-sm" type="button" data-remove>{{ icon("trash") }}Remove</button>
+            <span class="test-result" data-result>Not tested yet</span>
+          </div>
+        </div>
+      </template>
+      {% if not inference.providers %}
+      <p class="muted" data-none style="margin:0 0 4px">No endpoints yet.</p>
+      {% endif %}
+      <button class="btn btn-quiet btn-sm" type="button" data-add style="margin-top:12px">{{ icon("plus") }}Add endpoint</button>
+
+      <div class="roles">
+        {% for role, label in roles %}
+        <label class="field"><span>{{ label }}</span>
+          <select class="input" data-role="{{ role }}">
+            <option value="">Not assigned</option>
+            {% for name in inference.providers %}<option value="{{ name }}" {% if inference.roles.get(role) == name %}selected{% endif %}>{{ name }}</option>{% endfor %}
+          </select>
+          <small>{% if role == 'writer' %}Writes the guide from the transcript.{% else %}Compares frames and picks the images. Needs a model that accepts images.{% endif %}</small>
+        </label>
+        {% endfor %}
+      </div>
+      <div class="set-actions">
+        <button class="btn" type="button" data-save>{{ icon("check") }}Save</button>
+        <span class="muted" data-msg role="status" style="font-size:.88rem"></span>
+      </div>
+    </section>
+
+    <section class="panel set-panel" aria-labelledby="lib-h">
+      <h2 id="lib-h">Library</h2>
+      <p class="lede">Guides, images and exports live in one folder, so the whole library can be backed up or moved as a unit.</p>
+      <dl class="kv">
+        <dt>Data folder</dt><dd><code>{{ data_dir }}</code></dd>
+        <dt>Database</dt><dd><code>{{ db_path }}</code> · {{ (db_size / 1048576)|round(1) }} MB</dd>
+        <dt>Guides</dt><dd>{{ n_articles }} article versions</dd>
+      </dl>
+      <p style="margin:18px 0 0;font-size:.9rem;color:var(--ink-2)">To back up while the service is running, use SQLite’s online backup (safe with WAL), then copy the articles folder:</p>
+      <code class="codeline">sqlite3 "{{ db_path }}" ".backup 'yt2wiki-backup.sqlite3'"
+cp -a "{{ data_dir }}/articles" yt2wiki-articles-backup</code>
+    </section>
+  </div>
+</main>
+{% endblock %}
+{% block scripts %}<script src="/static/app.js" defer></script><script src="/static/settings.js" defer></script>{% endblock %}

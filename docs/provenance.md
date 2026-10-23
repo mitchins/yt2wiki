@@ -2,7 +2,7 @@
 
 ## Version layers
 
-Five things that look like "the version" are tracked separately:
+Six things that look like "the version" are tracked separately:
 
 | Layer | Where | Example |
 |---|---|---|
@@ -29,8 +29,9 @@ Every successful publication records one row in `generations` and snapshots
 - settings fingerprint, profile, source content hash, selected frame ids and
   per-file SHA-256 artifact hashes with creation timestamps
 
-Snapshots may carry env-var *names* but never keys, tokens or credential
-values — anything outside the allowlist is dropped before persisting.
+Snapshots carry only the provider identity fields (provider, URL, model,
+qualification flags) — never key names, keys, tokens or credential values.
+Anything outside the allowlist is dropped before persisting.
 
 Regenerating never erases the parent: the previous generation's files stay
 byte-identical under its own directory (verified by hash), the new

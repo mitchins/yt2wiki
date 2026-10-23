@@ -5,7 +5,6 @@ FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3
 # Build commit baked in by CI (--build-arg GIT_COMMIT=<sha>); local builds
 # record the working-tree commit via `git rev-parse` in docker-compose.build.
 ARG GIT_COMMIT=unknown
-ARG IMAGE_DIGEST=unknown
 
 LABEL org.opencontainers.image.title="yt2wiki" \
       org.opencontainers.image.description="Turn technical videos into illustrated, searchable guides" \

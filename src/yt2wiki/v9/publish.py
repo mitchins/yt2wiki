@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from ..article import format_ts, timestamp_url
-from ..generations import RECIPE_VERSION, record_generation
+from ..generations import (
+    RECIPE_VERSION,
+    insert_generation_row,
+    prepare_generation,
+    write_manifest,
+)
 
 log = logging.getLogger("yt2wiki.v9.publish")
 
@@ -403,54 +408,64 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
                 "t_start": s["t_start"], "t_end": s["t_end"],
                 "frames": [p["frame_id"] for p in picks.get(s["section_id"], [])]}
                for s in sections]
-    with db.transaction() as conn:
-        prev = conn.execute(
-            "SELECT version, markdown, html FROM articles WHERE article_id=?",
-            (article_id,)).fetchone()
-        if prev is not None:
-            # Republishing must never discard what was there (including user
-            # edits): keep it as a restorable revision.
-            import uuid
-            conn.execute(
-                "INSERT INTO article_revisions(revision_id, article_id, version, markdown, html, "
-                "edit_note, origin, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (f"rev-{uuid.uuid4().hex[:12]}", article_id, int(prev["version"]),
-                 prev["markdown"], prev["html"], "kept before republishing", "generated",
-                 time.time()))
-        conn.execute(
-            """INSERT INTO articles(article_id, source_id, job_id, title, markdown, html, version,
-                                     status, fingerprint, outline_json, created_at, updated_at)
-               VALUES(?,?,?,?,?,?,?, 'published',?,?,?,?)
-               ON CONFLICT(article_id) DO UPDATE SET
-                 job_id=excluded.job_id, title=excluded.title, markdown=excluded.markdown,
-                 html=excluded.html, version=articles.version+1, fingerprint=excluded.fingerprint,
-                 outline_json=excluded.outline_json, updated_at=excluded.updated_at""",
-            (article_id, source_id, job_id, title, markdown, html, 1,
-             settings.fingerprint(), json_dumps(outline), time.time(), time.time()))
-        conn.execute("DELETE FROM articles_fts WHERE article_id=?", (article_id,))
-        conn.execute("INSERT INTO articles_fts(article_id, title, markdown) VALUES(?,?,?)",
-                     (article_id, title, markdown))
-        conn.execute("DELETE FROM article_assets WHERE article_id=?", (article_id,))
-        for a in asset_rows:
-            conn.execute(
-                """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path,
-                                                          caption, alt_text, created_at)
-                   VALUES(?,?,?,?,?,?,?)""",
-                (a["asset_id"], article_id, a["frame_id"], a["path"], a["caption"],
-                 a.get("alt_text", ""), time.time()))
     (adir / "v9_report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
     (adir / "sections.json").write_text(json.dumps(sections, indent=1), encoding="utf-8")
-    # Immutable generation record: snapshot the just-written outputs before
-    # returning. The current-article paths above keep serving the reader; the
-    # per-generation copy under generations/<gid>/ is never modified again.
+    # Immutable generation, atomic with the article: snapshot the just-written
+    # outputs first (files only, no DB), then commit the article row and the
+    # generation row in one transaction. A failure anywhere before the commit
+    # leaves no published-without-provenance state behind.
     frame_ids = [p["frame_id"] for plist in picks.values() for p in plist[:2]
                  if p.get("frame_id")]
-    gen = record_generation(
+    prep = prepare_generation(
         db, settings.paths, article_id=article_id, source_id=source_id,
         job_id=job_id, recipe="v9", recipe_version=RECIPE_VERSION,
         settings_fingerprint=provenance.get("fingerprint"),
         profile=provenance.get("profile"),
         snapshot=inference_snapshot, frame_ids=frame_ids)
+    manifest = prep["manifest"]
+    try:
+        with db.transaction() as conn:
+            prev = conn.execute(
+                "SELECT version, markdown, html FROM articles WHERE article_id=?",
+                (article_id,)).fetchone()
+            if prev is not None:
+                # Republishing must never discard what was there (including user
+                # edits): keep it as a restorable revision.
+                import uuid
+                conn.execute(
+                    "INSERT INTO article_revisions(revision_id, article_id, version, markdown, html, "
+                    "edit_note, origin, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (f"rev-{uuid.uuid4().hex[:12]}", article_id, int(prev["version"]),
+                     prev["markdown"], prev["html"], "kept before republishing", "generated",
+                     time.time()))
+            conn.execute(
+                """INSERT INTO articles(article_id, source_id, job_id, title, markdown, html, version,
+                                          status, fingerprint, outline_json, created_at, updated_at)
+                    VALUES(?,?,?,?,?,?,?, 'published',?,?,?,?)
+                    ON CONFLICT(article_id) DO UPDATE SET
+                      job_id=excluded.job_id, title=excluded.title, markdown=excluded.markdown,
+                      html=excluded.html, version=articles.version+1, fingerprint=excluded.fingerprint,
+                      outline_json=excluded.outline_json, updated_at=excluded.updated_at""",
+                (article_id, source_id, job_id, title, markdown, html, 1,
+                 settings.fingerprint(), json_dumps(outline), time.time(), time.time()))
+            conn.execute("DELETE FROM articles_fts WHERE article_id=?", (article_id,))
+            conn.execute("INSERT INTO articles_fts(article_id, title, markdown) VALUES(?,?,?)",
+                         (article_id, title, markdown))
+            conn.execute("DELETE FROM article_assets WHERE article_id=?", (article_id,))
+            for a in asset_rows:
+                conn.execute(
+                    """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path,
+                                                              caption, alt_text, created_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (a["asset_id"], article_id, a["frame_id"], a["path"], a["caption"],
+                     a.get("alt_text", ""), time.time()))
+            insert_generation_row(conn, manifest, provenance.get("fingerprint"),
+                                  provenance.get("profile"))
+    except Exception:
+        import shutil as _shutil
+        _shutil.rmtree(prep["directory"], ignore_errors=True)
+        raise
+    manifest_rel = write_manifest(settings.paths, article_id, manifest)
     zp = settings.paths.article_dir(article_id) / "article.zip"
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(md_path, "article.md")
@@ -459,8 +474,9 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
                 zf.write(f, f"assets/{f.name}")
     return {"article_id": article_id, "markdown_chars": len(markdown),
             "assets": len(list(assets.glob('*'))), "zip_bytes": zp.stat().st_size,
-            "generation_id": gen["generation_id"],
-            "generation_operation": gen["operation"]}
+            "generation_id": manifest["generation_id"],
+            "generation_operation": manifest["operation"],
+            "manifest": manifest_rel}
 
 
 def _asset_rows(settings, assets: Path, picks: dict[str, list[dict[str, Any]]],

@@ -199,7 +199,10 @@ jobs:
           cache-from: type=gha,scope=image-${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=image-${{ matrix.platform }}
 
-      - name: Record digest
+      - name: Smoke-qualify the pushed image
+        run: bash scripts/ci/image-smoke.sh "ghcr.io/mitchins/yt2wiki@${{ steps.build.outputs.digest }}" "${{ matrix.platform }}"
+
+      - name: Record digest (only a smoke-qualified image joins the manifest)
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
@@ -213,9 +216,6 @@ jobs:
           path: /tmp/digests
           if-no-files-found: error
           retention-days: 7
-
-      - name: Smoke-qualify the pushed image
-        run: bash scripts/ci/image-smoke.sh "ghcr.io/mitchins/yt2wiki@${{ steps.build.outputs.digest }}" "${{ matrix.platform }}"
 
   docker-manifest:
     name: Publish multi-arch manifest
@@ -260,7 +260,12 @@ jobs:
           echo "platform refs:$refs"
           test -n "$refs"
           short="${GITHUB_SHA::7}"
-          tags="-t ghcr.io/mitchins/yt2wiki:main -t ghcr.io/mitchins/yt2wiki:sha-$short"
+          # :main tracks the latest qualified main build only; a version tag
+          # must never move it (the tag may point behind the main head).
+          tags="-t ghcr.io/mitchins/yt2wiki:sha-$short"
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            tags="$tags -t ghcr.io/mitchins/yt2wiki:main"
+          fi
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             tags="$tags -t ghcr.io/mitchins/yt2wiki:${GITHUB_REF#refs/tags/}"
           fi

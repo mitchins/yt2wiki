@@ -42,7 +42,7 @@ SELECTION_POLICY = (
 # Snapshot keys that are safe to persist. Anything else — notably API keys,
 # bearer tokens and credential values — is dropped, never stored.
 _SAFE_ROLE_KEYS = (
-    "provider", "url", "model", "revision",
+    "provider", "url", "model", "revision", "mode",
     "reachable", "qualified_for_writer", "qualified_for_vision", "qualified_for_asr",
 )
 
@@ -67,11 +67,29 @@ def prompt_hashes() -> dict[str, str]:
     }
 
 
+def _repo_commit(root: Path) -> str:
+    """Best-effort git commit for a source checkout (never leaves the repo).
+
+    Returns ``unknown`` outside a checkout (installed package, image without
+    source) or when git is unavailable/slow — never a foreign repo's HEAD.
+    """
+    try:
+        if not (root / ".git").is_dir():
+            return UNKNOWN
+        import subprocess
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=root, stderr=subprocess.DEVNULL, text=True, timeout=10).strip()
+        return out or UNKNOWN
+    except Exception:  # noqa: BLE001
+        return UNKNOWN
+
+
 def build_info() -> dict[str, str]:
     """Identify the running application build.
 
-    Version comes from the installed package metadata; the git commit is
-    baked into the image at build time (``/app/BUILD``) with a best-effort
+    Version comes from the installed package metadata; the commit is
+    baked into the image at build time (``/app/BUILD``) with a guarded
     local ``git rev-parse`` fallback; the OCI image digest is only known when
     the runtime environment declares it (``YT2WIKI_IMAGE_DIGEST``).
     Anything unavailable reads ``unknown`` — never fabricated.
@@ -95,14 +113,7 @@ def build_info() -> dict[str, str]:
         except Exception:  # noqa: BLE001
             continue
     if commit == UNKNOWN:
-        try:
-            import subprocess
-            commit = subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                cwd=Path(__file__).resolve().parents[2],
-                stderr=subprocess.DEVNULL, text=True).strip() or UNKNOWN
-        except Exception:  # noqa: BLE001
-            pass
+        commit = _repo_commit(Path(__file__).resolve().parents[2])
     digest = os.environ.get("YT2WIKI_IMAGE_DIGEST", "").strip() or UNKNOWN
     return {"app_version": version, "git_commit": commit, "image_digest": digest}
 
@@ -171,82 +182,60 @@ def _file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def record_generation(db, paths, *, article_id: str, source_id: str,
-                      job_id: str | None, recipe: str,
-                      recipe_version: int,
-                      settings_fingerprint: str | None = None,
-                      profile: str | None = None,
-                      snapshot: dict[str, Any] | None = None,
-                      source_content_hash: str | None = None,
-                      frame_ids: list[str] | None = None,
-                      selection: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Snapshot the current article outputs as one immutable generation.
-
-    Reads ``articles/<article_id>/{article.md, article.html,
-    article.standalone.html, assets/}`` — written by the publisher just
-    before this call — copies them under
-    ``articles/<article_id>/generations/<generation_id>/`` and records the
-    manifest in the ``generations`` table. The parent is whatever generation
-    was current; the first generation for an article uses operation
-    ``initial``, later ones ``regenerate``. The current-article paths and
-    the reader are untouched.
-    """
-    from .db.schema import json_dumps
-
-    adir = paths.article_dir(article_id)
+def _resolve_providers(db, source_id: str, job_id: str | None,
+                       snapshot: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Job-captured provider identities, allowlisted for storage."""
     providers = sanitize_snapshot(snapshot if snapshot is not None
                                   else _job_snapshot(db, job_id))
     asr_recorded = _recorded_asr_identity(db, source_id)
     if asr_recorded and providers.get("asr", {}).get("url") in (
             None, "", asr_recorded.get("url")):
-        providers["asr"] = asr_recorded
-    if source_content_hash is None:
-        try:
-            srow = db.query_one(
-                "SELECT content_hash FROM sources WHERE source_id=?", (source_id,))
-            source_content_hash = (srow["content_hash"] if srow else None) or UNKNOWN
-        except Exception:  # noqa: BLE001
-            source_content_hash = UNKNOWN
+        # The stage-metrics identity takes the same allowlist as the snapshot:
+        # a future stage must never smuggle credential-like keys into storage.
+        providers["asr"] = {k: v for k, v in asr_recorded.items()
+                            if k in _SAFE_ROLE_KEYS}
+        providers["asr"].setdefault("revision", UNKNOWN)
+    return providers
 
+
+def _resolve_source_hash(db, source_id: str,
+                         source_content_hash: str | None) -> str:
+    if source_content_hash is not None:
+        return source_content_hash
+    try:
+        srow = db.query_one(
+            "SELECT content_hash FROM sources WHERE source_id=?", (source_id,))
+        return (srow["content_hash"] if srow else None) or UNKNOWN
+    except Exception:  # noqa: BLE001
+        return UNKNOWN
+
+
+def _plan_generation(db, *, article_id: str) -> tuple[str | None, str]:
+    """Parent generation and operation for the next publication."""
     prev = db.query_one(
         "SELECT generation_id FROM generations WHERE article_id=? "
         "ORDER BY created_at DESC LIMIT 1", (article_id,))
     parent = prev["generation_id"] if prev else None
-    operation = "initial" if parent is None else "regenerate"
-    gid = f"gen-{uuid.uuid4().hex[:12]}"
-    now = time.time()
+    return parent, ("initial" if parent is None else "regenerate")
 
-    gdir = adir / "generations" / gid
-    assets_src = paths.article_assets(article_id)
-    artifacts: dict[str, str] = {}
-    stored_frames = sorted(frame_ids or [])
-    try:
-        gdir.mkdir(parents=True, exist_ok=False)
-        for name in ("article.md", "article.html", "article.standalone.html"):
-            src = adir / name
-            if src.is_file():
-                shutil.copy2(src, gdir / name)
-                artifacts[name] = _file_hash(src)
-        if assets_src.is_dir():
-            gassets = gdir / "assets"
-            gassets.mkdir(exist_ok=True)
-            for f in sorted(assets_src.glob("*")):
-                if f.is_file():
-                    shutil.copy2(f, gassets / f.name)
-                    artifacts[f"assets/{f.name}"] = _file_hash(f)
-    except Exception:
-        log.exception("generation snapshot failed for %s", article_id)
-        raise
 
+def _build_manifest(*, generation_id: str, article_id: str, source_id: str,
+                    job_id: str | None, parent: str | None, operation: str,
+                    recipe: str, recipe_version: int,
+                    settings_fingerprint: str | None, profile: str | None,
+                    providers: dict[str, dict[str, Any]],
+                    source_content_hash: str, stored_frames: list[str],
+                    artifacts: dict[str, str], selection: dict[str, Any] | None,
+                    created_at: float) -> dict[str, Any]:
     build = build_info()
-    prompts = {"recipe_version": str(recipe_version)}
+    prompts: dict[str, Any] = {"recipe_version": str(recipe_version)}
     if recipe == "v9":
         try:
             prompts.update(prompt_hashes())
         except Exception:  # noqa: BLE001
             prompts["error"] = "prompt hash unavailable"
-    manifest = {
-        "generation_id": gid,
+    return {
+        "generation_id": generation_id,
         "article_id": article_id,
         "source_id": source_id,
         "job_id": job_id,
@@ -263,39 +252,160 @@ def record_generation(db, paths, *, article_id: str, source_id: str,
         "source_content_hash": source_content_hash,
         "frame_ids": stored_frames,
         "artifacts": artifacts,
-        "created_at": now,
+        "created_at": created_at,
     }
-    manifest_rel = f"generations/{gid}/manifest.json"
-    (gdir / "manifest.json").write_text(
-        json.dumps(manifest, indent=1, sort_keys=True), encoding="utf-8")
 
-    with db.transaction() as conn:
-        conn.execute(
-            """INSERT INTO generations(generation_id, article_id, source_id, job_id,
-                                      parent_generation_id, operation, recipe, recipe_version,
-                                      app_version, git_commit, image_digest,
-                                      settings_fingerprint, profile,
-                                      asr_json, writer_json, vision_json,
-                                      prompts_json, selection_json,
-                                      source_content_hash, frame_ids_json, artifacts_json,
-                                      manifest_path, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (gid, article_id, source_id, job_id, parent, operation, recipe,
-             recipe_version, build["app_version"], build["git_commit"],
-             build["image_digest"], settings_fingerprint, profile,
-             json_dumps(providers.get("asr", {})),
-             json_dumps(providers.get("writer", {})),
-             json_dumps(providers.get("vision", {})),
-             json_dumps(prompts),
-             json_dumps(manifest["selection"]),
-             source_content_hash, json_dumps(stored_frames),
-             json_dumps(artifacts), manifest_rel, now),
-        )
-        conn.execute("UPDATE articles SET current_generation_id=? WHERE article_id=?",
-                     (gid, article_id))
-    return {"generation_id": gid, "parent_generation_id": parent,
-            "operation": operation, "manifest": manifest_rel,
-            "artifacts": len(artifacts)}
+
+def snapshot_generation_files(paths, article_id: str,
+                              generation_id: str) -> dict[str, str]:
+    """Copy the current article outputs to the immutable generation directory.
+
+    No database writes. On failure the partial directory is removed and the
+    exception propagates — the publisher must treat this as a failed
+    publication, not a published article without provenance.
+    """
+    adir = paths.article_dir(article_id)
+    gdir = adir / "generations" / generation_id
+    assets_src = paths.article_assets(article_id)
+    artifacts: dict[str, str] = {}
+    try:
+        gdir.mkdir(parents=True, exist_ok=False)
+        for name in ("article.md", "article.html", "article.standalone.html"):
+            src = adir / name
+            if src.is_file():
+                shutil.copy2(src, gdir / name)
+                artifacts[name] = _file_hash(src)
+        if assets_src.is_dir():
+            gassets = gdir / "assets"
+            gassets.mkdir(exist_ok=True)
+            for f in sorted(assets_src.glob("*")):
+                if f.is_file():
+                    shutil.copy2(f, gassets / f.name)
+                    artifacts[f"assets/{f.name}"] = _file_hash(f)
+    except Exception:
+        log.exception("generation snapshot failed for %s", article_id)
+        shutil.rmtree(gdir, ignore_errors=True)
+        raise
+    return artifacts
+
+
+def write_manifest(paths, article_id: str, manifest: dict[str, Any]) -> str:
+    """Persist the manifest JSON beside the snapshotted files."""
+    manifest_rel = f"generations/{manifest['generation_id']}/manifest.json"
+    (paths.article_dir(article_id) / manifest_rel).write_text(
+        json.dumps(manifest, indent=1, sort_keys=True), encoding="utf-8")
+    return manifest_rel
+
+
+def insert_generation_row(conn, manifest: dict[str, Any],
+                          settings_fingerprint: str | None,
+                          profile: str | None) -> None:
+    """Insert the generation row on the caller's connection/transaction.
+
+    Lets publishers commit the article and its generation atomically: either
+    both land or neither does. Never commits by itself.
+    """
+    from .db.schema import json_dumps
+
+    providers = manifest["providers"]
+    prompts = manifest["prompts"]
+    conn.execute(
+        """INSERT INTO generations(generation_id, article_id, source_id, job_id,
+                                   parent_generation_id, operation, recipe, recipe_version,
+                                   app_version, git_commit, image_digest,
+                                   settings_fingerprint, profile,
+                                   asr_json, writer_json, vision_json,
+                                   prompts_json, selection_json,
+                                   source_content_hash, frame_ids_json, artifacts_json,
+                                   manifest_path, created_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (manifest["generation_id"], manifest["article_id"], manifest["source_id"],
+         manifest["job_id"], manifest["parent_generation_id"], manifest["operation"],
+         manifest["recipe"], manifest["recipe_version"],
+         manifest["app"]["app_version"], manifest["app"]["git_commit"],
+         manifest["app"]["image_digest"], settings_fingerprint, profile,
+         json_dumps(providers.get("asr", {})),
+         json_dumps(providers.get("writer", {})),
+         json_dumps(providers.get("vision", {})),
+         json_dumps(prompts),
+         json_dumps(manifest["selection"]),
+         manifest["source_content_hash"], json_dumps(manifest["frame_ids"]),
+         json_dumps(manifest["artifacts"]),
+         f"generations/{manifest['generation_id']}/manifest.json",
+         manifest["created_at"]),
+    )
+    conn.execute("UPDATE articles SET current_generation_id=? WHERE article_id=?",
+                 (manifest["generation_id"], manifest["article_id"]))
+
+
+def prepare_generation(db, paths, *, article_id: str, source_id: str,
+                       job_id: str | None, recipe: str, recipe_version: int,
+                       settings_fingerprint: str | None = None,
+                       profile: str | None = None,
+                       snapshot: dict[str, Any] | None = None,
+                       source_content_hash: str | None = None,
+                       frame_ids: list[str] | None = None,
+                       selection: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Plan + snapshot a generation without touching the database.
+
+    Returns the manifest dict and its directory. The caller inserts the row
+    with :func:`insert_generation_row` inside its own article transaction and
+    then calls :func:`write_manifest`. Any failure before the transaction
+    commits leaves no visible trace (the snapshot directory is removed).
+    """
+    providers = _resolve_providers(db, source_id, job_id, snapshot)
+    parent, operation = _plan_generation(db, article_id=article_id)
+    gid = f"gen-{uuid.uuid4().hex[:12]}"
+    now = time.time()
+    artifacts = snapshot_generation_files(paths, article_id, gid)
+    manifest = _build_manifest(
+        generation_id=gid, article_id=article_id, source_id=source_id,
+        job_id=job_id, parent=parent, operation=operation, recipe=recipe,
+        recipe_version=recipe_version, settings_fingerprint=settings_fingerprint,
+        profile=profile, providers=providers,
+        source_content_hash=_resolve_source_hash(db, source_id, source_content_hash),
+        stored_frames=sorted(frame_ids or []), artifacts=artifacts,
+        selection=selection, created_at=now)
+    return {"manifest": manifest,
+            "directory": str(paths.article_dir(article_id) / "generations" / gid)}
+
+
+def record_generation(db, paths, *, article_id: str, source_id: str,
+                      job_id: str | None, recipe: str,
+                      recipe_version: int,
+                      settings_fingerprint: str | None = None,
+                      profile: str | None = None,
+                      snapshot: dict[str, Any] | None = None,
+                      source_content_hash: str | None = None,
+                      frame_ids: list[str] | None = None,
+                      selection: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Snapshot the current article outputs as one immutable generation.
+
+    Composed from :func:`prepare_generation` (files) plus a dedicated
+    transaction for the row: either both the files and the row land or the
+    snapshot directory is removed and nothing is recorded. Publishers that
+    need article + generation atomicity use ``prepare_generation`` /
+    ``insert_generation_row`` / ``write_manifest`` directly inside their own
+    article transaction.
+    """
+    prep = prepare_generation(
+        db, paths, article_id=article_id, source_id=source_id, job_id=job_id,
+        recipe=recipe, recipe_version=recipe_version,
+        settings_fingerprint=settings_fingerprint, profile=profile,
+        snapshot=snapshot, source_content_hash=source_content_hash,
+        frame_ids=frame_ids, selection=selection)
+    manifest = prep["manifest"]
+    try:
+        with db.transaction() as conn:
+            insert_generation_row(conn, manifest, settings_fingerprint, profile)
+    except Exception:
+        shutil.rmtree(prep["directory"], ignore_errors=True)
+        raise
+    manifest_rel = write_manifest(paths, article_id, manifest)
+    return {"generation_id": manifest["generation_id"],
+            "parent_generation_id": manifest["parent_generation_id"],
+            "operation": manifest["operation"], "manifest": manifest_rel,
+            "artifacts": len(manifest["artifacts"])}
 
 
 def restore_generation(db, paths, generation_id: str) -> dict[str, Any]:

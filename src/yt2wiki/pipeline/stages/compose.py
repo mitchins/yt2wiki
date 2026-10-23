@@ -18,7 +18,12 @@ from typing import Any, Sequence
 from ...article import Article, FrameRef, Section, format_ts, render_markdown, timestamp_url
 from ...backends.loader import ModelManager
 from ...db.schema import json_dumps, json_loads
-from ...generations import CLASSIC_RECIPE_VERSION, record_generation
+from ...generations import (
+    CLASSIC_RECIPE_VERSION,
+    insert_generation_row,
+    prepare_generation,
+    write_manifest,
+)
 from ...literals import Literal, _command_fragments, extract_literals, normalize_value, values_match
 from ...records import Evidence, Procedure
 from .. import StageContext, CancelRequested
@@ -733,32 +738,10 @@ def _store(ctx: StageContext, article: Article, article_id: str, md: str) -> Non
     md_path.write_text(md, encoding="utf-8")
     ctx.paths.article_html(article_id).write_text(html, encoding="utf-8")
     outline = [{"heading": s.heading, "level": s.level} for s in article.sections if s.heading != "__skip__"]
-    with ctx.db.transaction() as conn:
-        conn.execute(
-            """INSERT INTO articles(article_id, source_id, job_id, title, markdown, html, version,
-                                     status, fingerprint, outline_json, created_at, updated_at)
-               VALUES(?,?,?,?,?,?,?, 'draft',?,?,?,?)
-               ON CONFLICT(article_id) DO UPDATE SET
-                 title=excluded.title, markdown=excluded.markdown, html=excluded.html,
-                 version=excluded.version, fingerprint=excluded.fingerprint,
-                 outline_json=excluded.outline_json, updated_at=excluded.updated_at""",
-            (
-                article_id, ctx.source_id, ctx.job_id, article.title, md, html, 1,
-                ctx.settings.fingerprint(), json_dumps(outline), time.time(), time.time(),
-            ),
-        )
-        conn.execute("DELETE FROM articles_fts WHERE article_id=?", (article_id,))
-        conn.execute(
-            "INSERT INTO articles_fts(article_id, title, markdown) VALUES(?,?,?)",
-            (article_id, article.title, md),
-        )
-    _copy_assets(ctx, article_id, article, md)
-    ctx.artifacts["article_html_chars"] = len(html)
-    ctx.record_artifact_hash("markdown", str(md_path))
-    # Immutable generation record (classic recipe): snapshot the outputs just
-    # written above. Parent linkage and regeneration survival are handled by
-    # record_generation; the current-article paths stay canonical.
-    _gen = record_generation(
+    # Immutable generation, atomic with the article (classic recipe): snapshot
+    # the outputs just written above (files only), then commit the article row
+    # and the generation row in one transaction.
+    _prep = prepare_generation(
         ctx.db, ctx.paths, article_id=article_id, source_id=ctx.source_id,
         job_id=ctx.job_id, recipe="classic",
         recipe_version=CLASSIC_RECIPE_VERSION,
@@ -767,8 +750,39 @@ def _store(ctx: StageContext, article: Article, article_id: str, md: str) -> Non
         snapshot=getattr(ctx, "inference_snapshot", None),
         frame_ids=[n.rsplit(".", 1)[0]
                    for n in re.findall(r"\]\(assets/([^)]+)\)", md)])
-    ctx.artifacts["generation_id"] = _gen["generation_id"]
-    ctx.artifacts["generation_operation"] = _gen["operation"]
+    _manifest = _prep["manifest"]
+    try:
+        with ctx.db.transaction() as conn:
+            conn.execute(
+                """INSERT INTO articles(article_id, source_id, job_id, title, markdown, html, version,
+                                          status, fingerprint, outline_json, created_at, updated_at)
+                    VALUES(?,?,?,?,?,?,?, 'draft',?,?,?,?)
+                    ON CONFLICT(article_id) DO UPDATE SET
+                      title=excluded.title, markdown=excluded.markdown, html=excluded.html,
+                      version=excluded.version, fingerprint=excluded.fingerprint,
+                      outline_json=excluded.outline_json, updated_at=excluded.updated_at""",
+                (
+                    article_id, ctx.source_id, ctx.job_id, article.title, md, html, 1,
+                    ctx.settings.fingerprint(), json_dumps(outline), time.time(), time.time(),
+                ),
+            )
+            conn.execute("DELETE FROM articles_fts WHERE article_id=?", (article_id,))
+            conn.execute(
+                "INSERT INTO articles_fts(article_id, title, markdown) VALUES(?,?,?)",
+                (article_id, article.title, md),
+            )
+            insert_generation_row(conn, _manifest, ctx.fingerprint,
+                                  getattr(ctx.settings, "profile", None))
+    except Exception:
+        import shutil as _shutil
+        _shutil.rmtree(_prep["directory"], ignore_errors=True)
+        raise
+    write_manifest(ctx.paths, article_id, _manifest)
+    _copy_assets(ctx, article_id, article, md)
+    ctx.artifacts["article_html_chars"] = len(html)
+    ctx.record_artifact_hash("markdown", str(md_path))
+    ctx.artifacts["generation_id"] = _manifest["generation_id"]
+    ctx.artifacts["generation_operation"] = _manifest["operation"]
 
 
 def _copy_assets(ctx: StageContext, article_id: str, article: Article, md: str) -> None:

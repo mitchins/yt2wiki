@@ -16,15 +16,16 @@ needed — one manifest reference automatically resolves to the host platform.
 | Tag | Meaning |
 |---|---|
 | `ghcr.io/mitchins/yt2wiki:main` | Latest successfully qualified main build |
-| `ghcr.io/mitchins/yt2wiki:sha-<commit>` | Immutable build for one commit (pinned deployments) |
+| `ghcr.io/mitchins/yt2wiki:sha-<commit>` | Immutable commit-specific build |
 | `ghcr.io/mitchins/yt2wiki:vX.Y.Z` | Intentional version releases only |
 
-`:latest` is never moved automatically. Pin production with a `:sha-<commit>`
-or `:vX.Y.Z` tag via the `YT2WIKI_IMAGE_TAG` variable:
+`:latest` is never moved automatically. Pin production with a `sha-<commit>`
+or `vX.Y.Z` tag via the `YT2WIKI_IMAGE_TAG` variable (no leading colon —
+the `:` separator is already in the Compose reference):
 
 ```bash
-YT2WIKI_IMAGE_TAG=:sha-abc1234 docker compose pull
-YT2WIKI_IMAGE_TAG=:sha-abc1234 docker compose up -d
+YT2WIKI_IMAGE_TAG=sha-abc1234 docker compose pull
+YT2WIKI_IMAGE_TAG=sha-abc1234 docker compose up -d
 ```
 
 ## Platforms
@@ -55,18 +56,18 @@ job-scoped `packages: write` permission. The base image stays digest-pinned
 
 Every publish uploads a `release-report` artifact with the commit, the
 manifest digest, the qualified platform list and an anonymous-pull probe
-(whether `ghcr.io` serves the tag without credentials). The digest is also
-baked into the image as an OCI `revision` label and recorded in each
-generation manifest (`app.image_digest`) when the operator declares
-`YT2WIKI_IMAGE_DIGEST` for a pinned deployment.
+(whether `ghcr.io` serves the tag without credentials). The image records
+`GIT_COMMIT` in its OCI `revision` label and `/app/BUILD`. The manifest digest
+is recorded in each generation manifest (`app.image_digest`) only when the
+operator declares `YT2WIKI_IMAGE_DIGEST` for a pinned deployment.
 
 ## Developer builds
 
 Local development only — never for installs:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.build.yml build
-docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
+GIT_COMMIT=$(git rev-parse --short HEAD) \
+  docker compose -f docker-compose.yml -f docker-compose.build.yml build
 ```
 
 The local image is tagged `yt2wiki:local` and records the working-tree commit

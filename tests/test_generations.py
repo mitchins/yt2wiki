@@ -384,8 +384,6 @@ def test_asr_server_identity_wins_over_empty_snapshot_entry(tmp_path):
 
 
 def test_record_generation_without_job_uses_snapshot_and_hash_failure(tmp_path, monkeypatch):
-    from yt2wiki import generations as _g
-
     paths = Paths(root=tmp_path / "data")
     db = Database(paths.db_path)
     _seed_source_job(db)
@@ -422,7 +420,7 @@ def test_snapshot_write_failure_aborts_generation(tmp_path):
     md = paths.article_markdown("art9-yt-abc")
     md.chmod(0o000)
     try:
-        with pytest.raises(Exception):
+        with pytest.raises(OSError):
             record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
                               job_id="job-1", recipe="v9",
                               recipe_version=RECIPE_VERSION)
@@ -592,3 +590,158 @@ def test_restore_list_manifest_is_unreadable(tmp_path):
     (gdir / "manifest.json").write_text("[1, 2]", encoding="utf-8")
     with pytest.raises(ValueError, match="unreadable"):
         restore_generation(db, paths, g["generation_id"])
+
+
+def test_v9_publish_is_atomic_when_generation_fails(tmp_path, monkeypatch):
+    """A generation failure must not leave a published-without-provenance article."""
+    from yt2wiki.v9 import publish as v9publish
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db, inference=_JOB_SNAPSHOT)
+    _seed_article(db)
+    frame_src = tmp_path / "frame.jpg"
+    frame_src.write_bytes(b"\xff\xd8fakejpg")
+    picks = {"s1": [{"frame_id": "f-1", "path": str(frame_src),
+                     "caption": "c", "alt_text": "a"}]}
+    sections = [{"section_id": "s1", "heading": "H", "t_start": 0.0, "t_end": 10.0,
+                 "body": "Do it."}]
+    settings = SimpleNamespace(paths=paths, fingerprint=lambda: "fp")
+
+    def _boom(conn, manifest, fp, prof):
+        raise RuntimeError("generation insert failed")
+
+    monkeypatch.setattr(v9publish, "insert_generation_row", _boom)
+    with pytest.raises(RuntimeError, match="generation insert failed"):
+        v9publish.persist(
+            settings, db, article_id="art9-yt-abc", source_id="yt-abc", job_id="job-1",
+            title="T", markdown="# T", sections=sections, picks=picks,
+            provenance={"url": "http://x", "fingerprint": "fp", "profile": "compact"},
+            report={}, inference_snapshot=_JOB_SNAPSHOT)
+    # Nothing committed: article row is the seeded stub, no generations, no dirs.
+    assert db.query_one(
+        "SELECT markdown FROM articles WHERE article_id='art9-yt-abc'")["markdown"] == "# T"
+    assert db.query_one("SELECT COUNT(*) c FROM generations")["c"] == 0
+    assert db.query_one("SELECT COUNT(*) c FROM article_revisions")["c"] == 0
+    gdir = paths.article_dir("art9-yt-abc") / "generations"
+    assert not gdir.is_dir() or list(gdir.iterdir()) == []
+
+
+def test_wrapper_cleans_snapshot_when_row_insert_fails(tmp_path, monkeypatch):
+    from yt2wiki import generations as _g
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db)
+    _seed_article(db)
+    _article_files(paths, "art9-yt-abc", body="# One", assets={})
+    monkeypatch.setattr(_g, "insert_generation_row",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no row")))
+    with pytest.raises(RuntimeError):
+        _g.record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
+                             job_id="job-1", recipe="v9",
+                             recipe_version=RECIPE_VERSION)
+    assert db.query_one("SELECT COUNT(*) c FROM generations")["c"] == 0
+    assert list((paths.article_dir("art9-yt-abc") / "generations").iterdir()) == []
+
+
+def test_recorded_asr_identity_is_allowlisted(tmp_path):
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db)  # no snapshot: recorded identity decides
+    _seed_article(db)
+    _article_files(paths, "art9-yt-abc", body="# One", assets={})
+    t = 1700000000.0
+    db.execute("INSERT INTO stages(job_id, stage, state, metrics_json, finished_at)"
+               " VALUES('job-1', 'transcribe', 'done', ?, ?)",
+               (json.dumps({"mode": "asr", "asr_identity": {
+                   "url": "http://asr:9000", "model": "large-v3",
+                   "api_key": "sekrit", "token": "sekrit2"}}), t))
+    g = record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
+                          job_id="job-1", recipe="v9", recipe_version=RECIPE_VERSION)
+    asr = json.loads(db.query_one(
+        "SELECT asr_json FROM generations WHERE generation_id=?",
+        (g["generation_id"],))["asr_json"])
+    assert asr == {"url": "http://asr:9000", "model": "large-v3", "revision": "unknown"}
+    blob = (paths.article_dir("art9-yt-abc") / "generations" /
+            g["generation_id"] / "manifest.json").read_text()
+    assert "sekrit" not in blob
+
+
+def test_repo_commit_guard(tmp_path):
+    from yt2wiki import generations as _g
+
+    assert _g._repo_commit(tmp_path) == "unknown"  # no .git: never foreign HEAD
+    repo_root = Path(__file__).resolve().parents[1]
+    if (repo_root / ".git").is_dir():
+        import subprocess as _sp
+        expected = _sp.check_output(["git", "rev-parse", "--short", "HEAD"],
+                                    cwd=repo_root, text=True).strip()
+        assert _g._repo_commit(repo_root) == expected
+
+
+def test_peek_refusal_leaves_newer_file_untouched(tmp_path):
+    import sqlite3 as _s3
+
+    p = tmp_path / "newer.sqlite3"
+    conn = _s3.connect(str(p))
+    conn.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', '999')")
+    conn.commit()
+    before = p.stat().st_size
+    conn.close()
+    with pytest.raises(RuntimeError, match="newer than this build supports"):
+        Database(p)
+    assert p.stat().st_size == before
+    check = _s3.connect(str(p))
+    try:
+        tables = {r[0] for r in check.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        check.close()
+    assert tables == {"meta"}  # no empty v4 tables were created
+
+
+def test_generation_pointer_race_is_tolerated(tmp_path, monkeypatch):
+    from yt2wiki.db import schema as _s
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    assert "current_generation_id" in _s._table_columns(db.connection(), "articles")
+    # Concurrent migrator won the race: duplicate column reads as done.
+    monkeypatch.setattr(_s, "_table_columns", lambda conn, table: set())
+    _s._ensure_generation_pointer(db.connection())  # must not raise
+    # Any other OperationalError still propagates.
+    import sqlite3 as _s3
+
+    class _BadConn:
+        def execute(self, *a, **k):
+            raise _s3.OperationalError("disk I/O error")
+
+    with pytest.raises(_s3.OperationalError):
+        _s._ensure_generation_pointer(_BadConn())
+
+
+def test_peek_version_edge_cases(tmp_path):
+    import sqlite3 as _s3
+
+    from yt2wiki.db import schema as _s
+
+    assert _s._peek_schema_version(tmp_path / "missing.sqlite3") == 0
+    no_meta = tmp_path / "empty.sqlite3"
+    _s3.connect(str(no_meta)).close()
+    assert _s._peek_schema_version(no_meta) == 0
+    garbage = tmp_path / "garbage.sqlite3"
+    conn = _s3.connect(str(garbage))
+    conn.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', 'abc')")
+    conn.commit()
+    conn.close()
+    assert _s._peek_schema_version(garbage) == 0
+    # Direct migration on a newer stamp still refuses (defence in depth).
+    newer = _s3.connect(":memory:")
+    newer.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    newer.execute("INSERT INTO meta(key, value) VALUES('schema_version', '999')")
+    import pytest as _pt
+    with _pt.raises(RuntimeError, match="newer than this build supports"):
+        _s._migrate(newer)

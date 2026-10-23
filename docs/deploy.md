@@ -242,12 +242,14 @@ server-side model (recorded for provenance — `/asr` echoes no model id).
 - The `/settings` page renders an explicit **Operator only** notice — with these
   exact commands — for every non-localhost viewer, and disables its form.
 
-Verified against the running `ghcr.io/mitchins/yt2wiki:main` container with an authenticated mock
+Verified against a locally built image of the same Dockerfile (tag `yt2wiki:0.1.0`,
+pre-GHCR) running with an authenticated mock
 provider (`http://172.17.0.1:8931/v1`, key `YT2WIKI_MOCK_KEY=test-secret-xyz` via
 `--env-file`): the mock logged `Authorization: Bearer test-secret-xyz` on
 `/models` and `/chat/completions`, `inference test` reported
 `qualified_for_writer/…_vision: true`, and `/data/config/inference.json`
-contained only the variable name (see §7).
+contained only the variable name (see §7). Re-verify against the published
+`ghcr.io/mitchins/yt2wiki:main` image after the first GHCR publish.
 
 ### 3.1 Default transcription backend (HTTP, no bundled ASR runtime)
 
@@ -586,7 +588,7 @@ full production inference qualification based on mocked tests.
 
 ### Management path and credential routing — demonstrated in the running container
 
-Image `ghcr.io/mitchins/yt2wiki:main` (`1.16 GB`, `1a79ea27c4c6`), container `yt2wiki-demo`,
+Locally built image of the same Dockerfile (`1.16 GB`, `1a79ea27c4c6`), container `yt2wiki-demo`,
 host port `18080 → 8000` (host `8080` was occupied; same loopback binding),
 `--env-file` with `YT2WIKI_MOCK_KEY=test-secret-xyz`, volume `yt2wiki-demo-data`:
 
