@@ -462,3 +462,32 @@ def test_cli_test_exit_unassigned_is_connectivity_only(tmp_path, capsys, monkeyp
     assert _run_cli("--data-dir", str(data), "inference", "show") == 0
     show = json.loads(capsys.readouterr().out)
     assert "mock" not in (show["roles"] or {}).values()
+
+
+def test_cli_test_exit_asr_unqualified(tmp_path, capsys, monkeypatch):
+    data = tmp_path / "exit-asr"
+    _save_provider(data, "mock", {"asr": "mock"}, capsys)
+    _patch_mock_provider(monkeypatch, _mock_handler(models="unreachable", asr="unreachable"))
+    rc, result = _run_test(data, capsys, "mock")
+    assert rc == 1
+    assert result["ok"] is False
+
+
+def test_cli_test_exit_asr_protocol_ok_but_unassigned_ok(tmp_path, capsys, monkeypatch):
+    # Provider speaks /asr but is not assigned the asr role: reachable, exit 0.
+    data = tmp_path / "exit-asr-ok"
+    _save_provider(data, "mock", {"writer": "mock"}, capsys)
+    _patch_mock_provider(monkeypatch, _mock_handler(models="unreachable", asr="ok"))
+    rc, result = _run_test(data, capsys, "mock")
+    assert result["ok"] is True and result["qualified_for_asr"] is True
+
+
+def test_cli_test_exit_asr_assigned_to_llm_provider(tmp_path, capsys, monkeypatch):
+    # Provider serves /models (LLM) but is assigned the asr role: the asr
+    # check must fail loudly instead of passing on LLM qualification.
+    data = tmp_path / "exit-asr-llm"
+    _save_provider(data, "mock", {"asr": "mock"}, capsys)
+    _patch_mock_provider(monkeypatch, _mock_handler(models=200, writer="json"))
+    rc, result = _run_test(data, capsys, "mock")
+    assert rc == 1
+    assert result.get("qualified_for_asr") in (None, False)

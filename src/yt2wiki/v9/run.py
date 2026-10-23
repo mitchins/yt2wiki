@@ -169,6 +169,34 @@ def _ensure_base(settings, db, service, source_id: str,
                 "SELECT COUNT(*) c FROM frames WHERE source_id=?", (source_id,))["c"]}
 
 
+def _live_snapshot(settings) -> dict[str, Any] | None:
+    """Build an inference snapshot from the live operator config (CLI jobs).
+
+    Separated for testability; `run_source` prefers a job-captured snapshot.
+    """
+    try:
+        from ..web import inference as _inf
+        snap = {}
+        cfg = _inf.load(settings.paths)
+        st = _inf.load_status(settings.paths)
+        for role in ("writer", "vision", "asr"):
+            name = (cfg.get("roles") or {}).get(role)
+            if name:
+                prov = (cfg.get("providers") or {}).get(name, {})
+                status = st.get(name, {})
+                snap[role] = {
+                    "provider": name, "url": prov.get("url"), "model": prov.get("model"),
+                    "api_key_env": prov.get("api_key_env"),
+                    "reachable": bool(status.get("ok")),
+                    "qualified_for_writer": bool(status.get("qualified_for_writer")),
+                    "qualified_for_vision": bool(status.get("qualified_for_vision")),
+                    "qualified_for_asr": bool(status.get("qualified_for_asr")),
+                }
+        return snap or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def run_source(settings, db, service, source_id: str, *,
                enable_captions: bool = False, enable_enrichment: bool = False,
                profile: str | None = None, job_id: str | None = None,
@@ -195,27 +223,7 @@ def run_source(settings, db, service, source_id: str, *,
             inference_snapshot = None
     # Fallback: live config for CLI jobs that have no snapshot
     if inference_snapshot is None:
-        try:
-            from ..web import inference as _inf
-            snap = {}
-            cfg = _inf.load(settings.paths)
-            st = _inf.load_status(settings.paths)
-            for role in ("writer", "vision", "asr"):
-                name = (cfg.get("roles") or {}).get(role)
-                if name:
-                    prov = (cfg.get("providers") or {}).get(name, {})
-                    status = st.get(name, {})
-                    snap[role] = {
-                        "provider": name, "url": prov.get("url"), "model": prov.get("model"),
-                        "api_key_env": prov.get("api_key_env"),
-                        "reachable": bool(status.get("ok")),
-                        "qualified_for_writer": bool(status.get("qualified_for_writer")),
-                        "qualified_for_vision": bool(status.get("qualified_for_vision")),
-                        "qualified_for_asr": bool(status.get("qualified_for_asr")),
-                    }
-            inference_snapshot = snap or None
-        except Exception:  # noqa: BLE001
-            inference_snapshot = None
+        inference_snapshot = _live_snapshot(settings)
 
     t0 = time.time()
     result: dict[str, Any] = {"source_id": source_id, "stages": {}}

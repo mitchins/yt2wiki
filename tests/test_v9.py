@@ -305,3 +305,67 @@ def test_cite_rule_uses_real_url_or_plain_brackets():
     assert "{cite_rule}" not in SECTION_PROMPT.format(
         video_title="T", heading="H", t_start=0.0, t_end=1.0,
         transcript="[0.0-1.0] hi", cite_rule=up)
+
+
+def test_assemble_markdown_upload_has_no_source_link():
+    from yt2wiki.v9.publish import assemble_markdown
+    sections = [{"section_id": "sec-01-x", "heading": "X",
+                 "body": "Do X [0:04].", "t_start": 0.0, "t_end": 60.0}]
+    md, _ = assemble_markdown("T", "S", sections, {},
+                              {"url": None, "uploader": None})
+    assert "Source video" not in md
+    assert "no source URL" in md
+
+
+def test_live_snapshot_reads_all_three_roles(tmp_path):
+    from yt2wiki.config import Settings
+    from yt2wiki.db.schema import Database
+    from yt2wiki.v9 import run as v9run
+    from yt2wiki.web import inference as inf
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    db = Database(tmp_path / "db.sqlite3")
+    db.migrate()
+    inf.save(settings.paths, {"providers": [
+        {"name": "h", "url": "http://lan:8000/v1", "model": "m", "api_key_env": ""},
+        {"name": "a", "url": "http://asr:9000", "model": "large-v3", "api_key_env": ""}],
+        "roles": {"writer": "h", "vision": "h", "asr": "a"}})
+    inf.record_test(settings.paths, "h", {"ok": True, "qualified_for_writer": True,
+                                         "qualified_for_vision": True})
+    inf.record_test(settings.paths, "a", {"ok": True, "qualified_for_asr": True})
+    snap = v9run._live_snapshot(settings)
+    assert snap["writer"]["provider"] == "h"
+    assert snap["vision"]["qualified_for_vision"] is True
+    assert snap["asr"]["url"] == "http://asr:9000"
+
+
+def test_write_article_uses_cite_rule(tmp_path):
+    import time as _time
+
+    from yt2wiki.config import Settings
+    from yt2wiki.db.schema import Database
+    from yt2wiki.v9 import writer as v9writer
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    db = Database(tmp_path / "db.sqlite3")
+    db.migrate()
+    sid = "yt-cite001"
+    db.execute("INSERT INTO sources(source_id, kind, origin_url, title, uploader, duration_s, created_at)"
+               " VALUES(?,?,?,?,?,?,?)",
+               (sid, "youtube", None, "T", "u", 60.0, _time.time()))
+    db.execute("INSERT INTO transcript_segments VALUES(?,?,?,?,?,?,?,?,?)",
+               (sid, 0, 0.0, 5.0, "do the thing now", 0.0, 0.0, 0.0, "captions"))
+
+    seen = {}
+
+    class StubBackend:
+        def chat(self, msgs, **kw):
+            seen["prompt"] = msgs[-1]["content"]
+            if "Video title" in msgs[-1]["content"] or "First transcript" in msgs[-1]["content"]:
+                return '{"title": "T", "summary": "S", "kind": "procedure"}'
+            return ('{"heading": "H", "body": "Do it [0:04].", '
+                    '"key_points": [], "warnings": []}')
+
+    out = v9writer.write_article(settings, db, sid, backend=StubBackend())
+    assert out["sections"][0]["body"] == "Do it [0:04]."
+    assert "no source URL" in seen["prompt"]

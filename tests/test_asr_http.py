@@ -372,6 +372,7 @@ def test_transcribe_stage_records_server_and_unsupported(tmp_path):
     class FakeBackend:
         server = "http://asr:9000 (model large-v3)"
         last_unsupported = ["initial_prompt"]
+        last_warnings = ["2 zero-duration words in 1 segment(s)"]
 
         def transcribe(self, *a, **k):
             return fake_t
@@ -395,6 +396,7 @@ def test_transcribe_stage_records_server_and_unsupported(tmp_path):
     assert metrics["mode"] == "asr"
     assert metrics["asr_server"].startswith("http://asr:9000")
     assert "initial_prompt" in metrics["asr_unsupported_options"]
+    assert metrics["asr_warnings"] == ["2 zero-duration words in 1 segment(s)"]
     rows = db.query("SELECT * FROM transcript_segments WHERE source_id=?", (sid,))
     assert len(rows) == 1 and rows[0]["text"] == "hi"
 
@@ -459,3 +461,195 @@ def test_probe_asr_requires_200(monkeypatch):
     monkeypatch.setattr("httpx.post", lambda *a, **k: Resp())
     out = inf.test_endpoint("http://asr:9000", timeout=5.0)
     assert out["ok"] is False
+
+
+# ------------------------------------------------------- coverage: wire edges
+def test_wav_duration_rejects_garbage(tmp_path):
+    bad = tmp_path / "bad.wav"
+    bad.write_bytes(b"not a wav at all")
+    with pytest.raises(AsrHttpError):
+        wav_duration_s(bad)
+
+
+def test_wav_duration_rejects_bad_rate(tmp_path):
+    import wave as _wave
+    p = tmp_path / "zero.wav"
+    with _wave.open(str(p), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(8000)
+    # rewrite header with a zero rate via mock
+    with (mock.patch("wave.open", side_effect=ValueError("nope")),
+          pytest.raises(AsrHttpError)):
+        wav_duration_s(p)
+
+
+def test_detect_language_branches(tmp_path):
+    from yt2wiki.backends import asr_http as _m
+    wav = _wav(tmp_path)
+
+    def _resp(status=200, payload=None, boom=False):
+        import httpx as _h
+        if boom:
+            raise _h.ConnectError("down")
+        m = mock.Mock(status_code=status)
+        if payload == "badjson":
+            m.json.side_effect = ValueError("nope")
+        else:
+            m.json.return_value = payload
+        return m
+
+    def _client(resp):
+        ctx = mock.MagicMock()
+        ctx.__enter__.return_value.post.return_value = resp
+        return ctx
+
+    with mock.patch("httpx.Client", return_value=_client(_resp(500))):
+        assert _m.detect_language("http://s", wav, timeout=5.0) == (None, None)
+    import httpx as _h
+    with mock.patch("httpx.Client", side_effect=_h.ConnectError("x")):
+        assert _m.detect_language("http://s", wav, timeout=5.0) == (None, None)
+    with mock.patch("httpx.Client", return_value=_client(_resp(200, ["nope"]))):
+        assert _m.detect_language("http://s", wav, timeout=5.0) == (None, None)
+    with mock.patch("httpx.Client", return_value=_client(_resp(200, "badjson"))):
+        assert _m.detect_language("http://s", wav, timeout=5.0) == (None, None)
+    with mock.patch("httpx.Client", return_value=_client(
+            _resp(200, {"language_code": "", "confidence": "high"}))):
+        assert _m.detect_language("http://s", wav, timeout=5.0) == (None, None)
+    with mock.patch("httpx.Client", return_value=_client(
+            _resp(200, {"language_code": "en", "confidence": 0.97}))):
+        assert _m.detect_language("http://s", wav, timeout=5.0) == ("en", 0.97)
+
+
+def test_parse_shape_problems():
+    data = {"language": "en", "text": "x", "segments": [
+        ["not", "a", "dict"],
+        {"start": 0.0, "end": 1.0, "text": "ok", "words": "notalist"},
+        {"start": 2.0, "end": 3.0, "text": "ok2",
+         "words": [["bad"], {"start": 2.0, "end": 2.5},
+                   {"start": "x", "end": 2.5, "word": "w"}]},
+    ]}
+    with pytest.raises(AsrHttpError) as exc:
+        parse(data, duration_s=5.0, require_words=False, server="s")
+    msg = str(exc.value)
+    assert "not an object" in msg and "not a list" in msg
+    assert "bad timestamp/text" in msg
+
+
+def test_validate_word_edges():
+    bad_finite = _t(_s(0.0, 2.0, words=[Word(start=float("nan"), end=1.0, word="x")]))
+    p, _ = validate(bad_finite, 10.0, require_words=False)
+    assert any("non-finite" in x for x in p)
+    bad_span = _t(_s(0.0, 2.0, words=[Word(start=1.5, end=1.0, word="x")]))
+    p, _ = validate(bad_span, 10.0, require_words=False)
+    assert any("bad span" in x for x in p)
+    ooo = _t(_s(0.0, 3.0, words=[_w(1.0, 2.0, "a"), _w(0.0, 0.5, "b")]))
+    p, _ = validate(ooo, 10.0, require_words=False)
+    assert any("out of order" in x for x in p)
+
+
+def test_backend_auth_header_and_unload_and_not_loaded(tmp_path, monkeypatch):
+    monkeypatch.setenv("YT2WIKI_PROBE_KEY", "sekret")
+    b = HttpAsrBackend(_spec(), {}, "cpu", None, base_url="http://asr:9000",
+                       api_key_env="YT2WIKI_PROBE_KEY")
+    assert b._headers.get("Authorization") == "Bearer sekret"
+    b.load()
+    b.unload()
+    assert not b.loaded
+    with pytest.raises(RuntimeError, match="not loaded"):
+        b.transcribe(_wav(tmp_path))
+
+
+def test_resolve_env_timeout_fallback(monkeypatch):
+    from yt2wiki.backends.asr_http import resolve_env_variant
+    monkeypatch.setenv("YT2WIKI_ASR_TIMEOUT", "bogus")
+    out = resolve_env_variant({"timeout": 300.0})
+    assert out["timeout"] == 300.0
+    monkeypatch.setenv("YT2WIKI_ASR_TIMEOUT", "45")
+    assert resolve_env_variant({})["timeout"] == 45.0
+
+
+def test_post_asr_returns_dict_on_success(tmp_path):
+    ok = mock.Mock(status_code=200)
+    ok.json.return_value = {"language": "en", "text": "hi", "segments": []}
+    with mock.patch("httpx.Client", return_value=_client_mock(post=lambda *a, **k: ok)):
+        assert post_asr("http://asr:9000", _wav(tmp_path), query="output=json",
+                        timeout=5.0)["language"] == "en"
+
+
+def test_wav_duration_rejects_zero_rate(tmp_path):
+    import contextlib
+
+    class _BadWav:
+        def getnframes(self): return 100
+        def getframerate(self): return 0
+
+    @contextlib.contextmanager
+    def _fake_open(*a, **k):
+        yield _BadWav()
+
+    with (mock.patch("wave.open", _fake_open),
+          pytest.raises(AsrHttpError, match="sample rate")):
+        wav_duration_s(tmp_path / "x.wav")
+
+
+def test_backend_empty_key_env_sets_no_header(tmp_path, monkeypatch):
+    monkeypatch.setenv("YT2WIKI_EMPTY_KEY", "")
+    b = HttpAsrBackend(_spec(), {}, "cpu", None, base_url="http://asr:9000",
+                       api_key_env="YT2WIKI_EMPTY_KEY")
+    assert "Authorization" not in b._headers
+
+
+def test_endpoint_models_bad_json_falls_back_to_asr_probe(monkeypatch):
+    from yt2wiki.web import inference as inf
+
+    class BadJson:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("not json")
+
+    class NotFound:
+        status_code = 404
+        text = "nope"
+
+    monkeypatch.setattr("httpx.get", lambda *a, **k: BadJson())
+    monkeypatch.setattr("httpx.post", lambda *a, **k: NotFound())
+    out = inf.test_endpoint("http://x:9000", timeout=5.0)
+    assert out["ok"] is False and out.get("kind") == "asr"
+
+
+def test_probe_asr_non_json_body(monkeypatch):
+    from yt2wiki.web import inference as inf
+
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("html, not json")
+
+    monkeypatch.setattr("httpx.get", _no_models)
+    monkeypatch.setattr("httpx.post", lambda *a, **k: Resp())
+    out = inf.test_endpoint("http://x:9000", timeout=5.0)
+    assert out["ok"] is False and "transcription JSON" in out.get("error", "")
+
+
+def test_probe_asr_cleanup_failure_ignored(monkeypatch, tmp_path):
+    from yt2wiki.web import inference as inf
+
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return _payload()
+
+    monkeypatch.setattr("httpx.get", _no_models)
+    monkeypatch.setattr("httpx.post", lambda *a, **k: Resp())
+    import pathlib as _pl
+    real_unlink = _pl.Path.unlink
+    monkeypatch.setattr(_pl.Path, "unlink", lambda self, **k: (_ for _ in ()).throw(OSError("busy")))
+    try:
+        out = inf.test_endpoint("http://asr:9000", timeout=5.0)
+    finally:
+        monkeypatch.setattr(_pl.Path, "unlink", real_unlink)
+    assert out["ok"] is True and out["qualified_for_asr"] is True

@@ -247,3 +247,74 @@ def test_text_role_uses_writer_assignment(tmp_path):
     mgr2 = ModelManager(settings, inference_snapshot=bad)
     with pytest.raises(RuntimeError, match="not qualified for writing"):
         mgr2._remote_spec("text")
+
+
+def test_remote_spec_asr_qualified_and_unqualified(tmp_path):
+    from yt2wiki.backends.loader import ModelManager
+    from yt2wiki.config import Settings
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    good = {"asr": {"provider": "asr", "url": "http://asr:9000", "model": "large-v3",
+                    "api_key_env": "", "reachable": True, "qualified_for_asr": True}}
+    mgr = ModelManager(settings, inference_snapshot=good)
+    spec, provider = mgr._remote_spec("asr")
+    assert spec is not None and spec.engine == "asr-http"
+    assert provider["url"] == "http://asr:9000"
+    bad = {"asr": {"provider": "asr", "url": "http://asr:9000", "model": "",
+                   "api_key_env": "", "reachable": True, "qualified_for_asr": False}}
+    with pytest.raises(RuntimeError, match="not qualified for transcription"):
+        ModelManager(settings, inference_snapshot=bad)._remote_spec("asr")
+
+
+def test_remote_spec_asr_live_config_requires_qualification(tmp_path):
+    from yt2wiki.backends.loader import ModelManager
+    from yt2wiki.config import Settings
+    from yt2wiki.web import inference as inf
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    inf.save(settings.paths, {"providers": [{"name": "asr", "url": "http://asr:9000",
+                                             "model": "large-v3", "api_key_env": ""}],
+                              "roles": {"asr": "asr", "writer": "", "vision": ""}})
+    inf.record_test(settings.paths, "asr", {"ok": True, "qualified_for_asr": False})
+    with pytest.raises(RuntimeError, match="not qualified for transcription"):
+        ModelManager(settings)._remote_spec("asr")
+    inf.record_test(settings.paths, "asr", {"ok": True, "qualified_for_asr": True})
+    spec, _ = ModelManager(settings)._remote_spec("asr")
+    assert spec.engine == "asr-http"
+
+
+def test_build_asr_http_requires_url_or_env(tmp_path, monkeypatch):
+    from yt2wiki.backends.loader import ModelManager
+    from yt2wiki.config import Settings
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    mgr = ModelManager(settings)
+    spec = settings.model("asr")
+    assert spec.engine == "asr-http"
+    monkeypatch.delenv("YT2WIKI_ASR_URL", raising=False)
+    with pytest.raises(RuntimeError, match="no ASR server configured"):
+        mgr.build("asr", spec)
+    monkeypatch.setenv("YT2WIKI_ASR_URL", "http://asr:9000")
+    monkeypatch.setenv("YT2WIKI_ASR_MODEL", "large-v3")
+    backend = mgr.build("asr", spec)
+    assert backend.base_url == "http://asr:9000"
+
+
+def test_acquire_asr_http_skips_gpu_and_records(tmp_path, monkeypatch):
+    from yt2wiki.backends.loader import ModelManager
+    from yt2wiki.config import Settings
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    monkeypatch.setenv("YT2WIKI_ASR_URL", "http://asr:9000")
+    seen = []
+    mgr = ModelManager(settings, recorder=seen.append)
+    with mgr.acquire("asr") as backend:
+        assert backend.loaded
+    assert any(r.get("device") == "http" and r.get("model_key") == "asr-http"
+               for r in seen)
+
+
+def test_role_timeout_asr_env_invalid(monkeypatch):
+    from yt2wiki.backends.loader import _role_timeout
+    monkeypatch.setenv("YT2WIKI_ASR_TIMEOUT", "bogus")
+    assert _role_timeout("asr", None) == 300.0
