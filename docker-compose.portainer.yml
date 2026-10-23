@@ -1,5 +1,14 @@
-# Portainer stack — one required yt2wiki service, one optional llama.cpp sidecar.
+# Portainer stack — one required yt2wiki service, one EXPERIMENTAL llama.cpp sidecar.
 # Deploy as a Portainer "Stack" with environment variables and bind mounts.
+#
+# IMAGE HONESTY: `yt2wiki:0.1.0` is NOT a public image — no registry copy has
+# been published or verified. Build it on the Docker endpoint first, then
+# deploy this stack against the local image:
+#   docker build -t yt2wiki:0.1.0 .
+#   docker images yt2wiki:0.1.0
+# (Alternative: push your build to a private registry and change `image:`
+# below to that exact reference. Do not invent a public tag.)
+#
 # For a migration-free install of an existing library, replace the named volume with a bind mount:
 #   volumes:
 #     - /home/mitch/.local/share/yt2wiki:/data
@@ -7,7 +16,7 @@
 
 services:
   yt2wiki:
-    image: yt2wiki:0.1.0   # or ghcr.io/mitchins/yt2wiki:0.1.0 after you push a tagged image
+    image: yt2wiki:0.1.0   # local build required (see above); not a public registry image
     container_name: yt2wiki
     ports:
       - "127.0.0.1:8080:8000"   # bind to host loopback; put an authenticated proxy in front for LAN
@@ -17,8 +26,16 @@ services:
       - YT2WIKI_HOME=/data
       - YT2WIKI_PROFILE=${YT2WIKI_PROFILE:-compact}
       - HF_HOME=/data/models
-      # External providers: set via Portainer env, not hardcoded. Secrets stay in env vars:
-      #   YT2WIKI_OPENAI_API_KEY, YT2WIKI_GEMMA_API_KEY, etc. — referenced by inference.json via api_key_env
+      # External provider keys: define these names in the Portainer stack
+      # "Environment variables" / "Advanced mode" UI (or a Portainer secret
+      # mounted as env), NOT hardcoded here. Stack-variable mapping:
+      #   YT2WIKI_OPENAI_API_KEY=${YT2WIKI_OPENAI_API_KEY:-}
+      #   YT2WIKI_GEMMA_API_KEY=${YT2WIKI_GEMMA_API_KEY:-}
+      # `${VAR}` is interpolated by Portainer/Compose at deploy time from the
+      # stack variables you set; the container then receives the resolved value
+      # as its environment. inference.json stores only the variable NAME.
+      - YT2WIKI_OPENAI_API_KEY=${YT2WIKI_OPENAI_API_KEY:-}
+      - YT2WIKI_GEMMA_API_KEY=${YT2WIKI_GEMMA_API_KEY:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
@@ -32,8 +49,10 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # EXPERIMENTAL sidecar: NOT qualified (no weights, no digest verified, no
+  # 8-image validation performed). Deploy only to attempt your own qualification.
   llama:
-    image: ghcr.io/ggerganov/llama.cpp:server   # pin after pull: @sha256:...
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda   # pin after pull: @sha256:<verified digest>
     container_name: yt2wiki-llama
     profiles: ["llama"]
     volumes:

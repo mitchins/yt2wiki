@@ -13,13 +13,18 @@ services:
       - yt2wiki-data:/data                 # SQLite, uploads, frames, articles, assets, revisions, config
       # For migration-free reuse of an existing library, replace the named volume with a bind mount:
       # - /home/mitch/.local/share/yt2wiki:/data
+    # Secret injection: provider keys enter the container from an untracked
+    # env_file (Compose interpolation ${VAR} happens on the host; env_file
+    # entries become container environment). Never commit .env; chmod 600.
+    # Copy .env.example to .env and fill in values on the Docker endpoint.
+    env_file:
+      - path: .env
+        required: false
     environment:
       # All settings are env-driven; secrets via YT2WIKI_ env names, not hardcoded.
       - YT2WIKI_HOME=/data
       # Optional: choose profile (compact fits 8 GB, standard 12–16 GB). Default is standard.
       - YT2WIKI_PROFILE=compact
-      # Example external providers (set via host env or an env_file, not in compose):
-      # - YT2WIKI_OPENAI_API_KEY=...  # name of env var that holds the key, kept out of compose/logs
       # Logging / cache inside container
       - HF_HOME=/data/models
     restart: unless-stopped
@@ -38,25 +43,36 @@ services:
     # No GPU reservation — the web service never needs NVIDIA to start or serve the library.
     # It serves the library and fails jobs explicitly when inference is offline.
 
-  # Optional visual sidecar: Qwen3.5-4B Q4_K_M + F16 projector, V9-Z4 qualified.
-  # Enable with: docker compose --profile llama up -d
-  # Or Portainer: select the "llama" profile when deploying the stack.
+  # EXPERIMENTAL visual sidecar: NOT qualified. The referenced weights
+  # (Qwen3.5-4B Q4_K_M + F16 projector) are absent from this machine, no
+  # 8-image ranking, CUDA-offload or V9 rubric validation has been performed
+  # against a running server, and no digest is claimed below. Do not represent
+  # this profile as production-ready. The yt2wiki service above is independently
+  # usable without it.
+  # Enable (experimental) with: docker compose --profile llama up -d
   llama:
-    # Pinned upstream llama.cpp server where practical. Pin a digest after `docker pull`:
-    #   docker pull ghcr.io/ggerganov/llama.cpp:server
-    #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/ggerganov/llama.cpp:server
+    # Upstream CUDA server build (ggml-org took over from the deprecated
+    # ggerganov account). No digest is pinned here because none was verified
+    # on this machine; pin one on your endpoint after `docker pull`:
+    #   docker pull ghcr.io/ggml-org/llama.cpp:server-cuda
+    #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/ggml-org/llama.cpp:server-cuda
     # Then replace `image:` with the digest form, e.g.:
-    #   image: ghcr.io/ggerganov/llama.cpp@sha256:...
-    image: ghcr.io/ggerganov/llama.cpp:server
+    #   image: ghcr.io/ggml-org/llama.cpp@sha256:<verified digest>
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: yt2wiki-llama
     profiles: ["llama"]
     volumes:
       - yt2wiki-models:/models    # persistent GGUF directory, also usable via YT2WIKI_HOME/models
       - yt2wiki-data:/data:ro     # sidecar does not need write to library
     # Models must be staged beforehand under /models; the base service never auto-downloads large weights.
-    # Expected files (Qwen3.5-4B qualified):
+    # Expected files (UNQUALIFIED — stage only to attempt your own qualification):
     #   /models/Qwen3.5-4B-Q4_K_M.gguf
     #   /models/mmproj-F16.gguf   (or gguf/mmproj-F16.gguf per HF layout)
+    # Flag meanings follow upstream llama.cpp docs; they were NOT validated
+    # against a running server here. Qualify before any production claim:
+    # real weights + matching F16 projector, confirmed CUDA offload, an actual
+    # 8-image ranking inside the V9 context budget with valid rubric JSON, and
+    # measured peak VRAM/latency over the Compose network.
     command:
       - --model
       - /models/Qwen3.5-4B-Q4_K_M.gguf
