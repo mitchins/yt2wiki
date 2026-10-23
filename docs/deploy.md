@@ -145,38 +145,103 @@ Verification:
 
 Keep secrets out of exported articles and logs: `article.standalone.html` and `article.zip` contain only markdown/assets, never `inference.json` or env values; `app_log` and `model_loads` store `model_key`/`repo`, not API keys.
 
----
+### Secrets: env_file (Compose) vs stack variables (Portainer)
 
-## 4. Optional llama.cpp sidecar
-
-Do not bundle inference into the service image. Use a separate Compose profile:
+Provider keys enter the container as environment, never as committed text:
 
 ```bash
-# Stage models once (persistent, not auto-downloaded at service start)
-mkdir -p /data/models
-# Place the already-qualified Qwen3.5-4B files:
-#   /data/models/Qwen3.5-4B-Q4_K_M.gguf
-#   /data/models/mmproj-F16.gguf
-# Verify sha256 if you have a reference.
+cp .env.example .env && chmod 600 .env   # on the Docker endpoint; .env is git-ignored
+# edit .env: YT2WIKI_OPENAI_API_KEY=... (real key lives only here, mode 600)
+docker compose up -d yt2wiki
+```
 
-# Start the base service only:
+Two mechanisms, do not confuse them:
+
+- **Compose interpolation** (`${VAR}` in YAML) is resolved **on the host** when
+  Compose renders the file — values come from the host shell or the `.env` file.
+- **`env_file`** entries are injected **into the container** as environment at
+  container start. This is how provider keys reach the app.
+- **`inference.json` stores only the variable NAME** (`api_key_env`); the app
+  reads the value from the container environment at request time. Verify:
+  `docker exec yt2wiki cat /data/config/inference.json` must show the name,
+  never the key.
+
+### Operator console: `yt2wiki inference` (required in Docker)
+
+The settings web API refuses non-localhost peers (see §5), so browser sessions
+through the published Docker port — including SSH tunnels — cannot save or test
+endpoints. Configure inference from the operator console instead:
+
+```bash
+docker exec yt2wiki yt2wiki inference show
+docker exec yt2wiki yt2wiki inference save --file /data/config/inference-payload.json
+docker exec yt2wiki yt2wiki inference test --name lan
+```
+
+- `save` accepts the same `{providers, roles}` JSON schema as the web API and
+  validates it before writing (`YT2WIKI_…` names only, `http(s)://` URLs).
+- `test` runs the full qualification (writer JSON probe + 2-image rubric judge),
+  records the result in `inference_status.json`, prints it, and exits non-zero
+  when the endpoint is not reachable/qualified.
+- The `/settings` page renders an explicit **Operator only** notice — with these
+  exact commands — for every non-localhost viewer, and disables its form.
+
+Verified against the running `yt2wiki:0.1.0` container with an authenticated mock
+provider (`http://172.17.0.1:8931/v1`, key `YT2WIKI_MOCK_KEY=test-secret-xyz` via
+`--env-file`): the mock logged `Authorization: Bearer test-secret-xyz` on
+`/models` and `/chat/completions`, `inference test` reported
+`qualified_for_writer/…_vision: true`, and `/data/config/inference.json`
+contained only the variable name (see §7).
+
+---
+
+## 4. Optional llama.cpp sidecar — EXPERIMENTAL, not qualified
+
+Do not bundle inference into the service image. A Compose profile exists for a
+local sidecar, but it is **experimental**: the referenced weights are absent
+from this machine, no digest was verified here (`docker pull` of the CUDA image
+was denied from this network), no 8-image ranking, CUDA-offload check or V9
+rubric validation has been performed against a running server, and the flags
+below are transcribed from upstream docs, not validated here. Do not represent
+this profile as production-ready. The `yt2wiki` service above is independently
+usable without it.
+
+```bash
+# Start the base service only (the supported deployment):
 docker compose up -d yt2wiki
 
-# Start the visual sidecar (requires NVIDIA):
+# Only to attempt your own qualification (requires NVIDIA + staged weights):
+#   /models/Qwen3.5-4B-Q4_K_M.gguf + /models/mmproj-F16.gguf (NOT provided here;
+#   do not download another model merely to finish this PR — stage your own
+#   already-available weights and verify sha256 against your reference)
 docker compose --profile llama up -d
-# or Portainer: enable the "llama" profile when deploying the stack
 ```
 
 `docker-compose.yml` `llama` service:
 
-- Image: `ghcr.io/ggerganov/llama.cpp:server` — pin after pull via `docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/ggerganov/llama.cpp:server` and replace `image:` with the `@sha256:` form for reproducibility.
-- Volumes: `yt2wiki-models:/models` (read-write, also `YT2WIKI_HOME/models`), `yt2wiki-data:/data:ro` (no Docker socket inside yt2wiki)
-- Command uses the V9-Z4 qualified settings: `--ctx-size 16384 --n-gpu-layers 99 --reasoning off --reasoning-budget 0 --temp 0.05` plus `--mmproj /models/mmproj-F16.gguf` and production `--vision_image_tokens 384` equivalent (1280×720 → ~384 tokens). 8-image ranking fits in 16384.
-- `deploy.resources.reservations.devices` reserves 1 NVIDIA GPU for the sidecar only; the `yt2wiki` service has no GPU reservation and runs without `--gpus`.
+- Image: `ghcr.io/ggml-org/llama.cpp:server-cuda` (the upstream CUDA 12 server
+  build; the old `ggerganov` account is deprecated). **No digest is pinned here
+  because none was verified on this machine.** Pin one on your endpoint after a
+  successful pull, then replace `image:` with the digest form:
+  ```bash
+  docker pull ghcr.io/ggml-org/llama.cpp:server-cuda
+  docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/ggml-org/llama.cpp:server-cuda
+  # image: ghcr.io/ggml-org/llama.cpp@sha256:<verified digest>
+  ```
+- Volumes: `yt2wiki-models:/models` (read-write, also `YT2WIKI_HOME/models`), `yt2wiki-data:/data:ro`
+- Command proposes `--ctx-size 16384 --n-gpu-layers 99 --reasoning off --temp 0.05`
+  plus `--mmproj /models/mmproj-F16.gguf`. These flag meanings follow upstream
+  llama.cpp docs; they were **not** validated against a running server here.
+- `deploy.resources.reservations.devices` reserves 1 NVIDIA GPU for the sidecar only.
 - Healthcheck `curl -sf http://127.0.0.1:8081/health`, `restart: unless-stopped`
-- No auto-download of large weights when running the base service; the sidecar only starts when the `llama` profile is selected. No sophisticated JIT orchestration — if the llama.cpp build has reliable idle sleep, it can be used; otherwise leave the server running normally.
 
-The sidecar is qualified for vision only. Its visual qualification does not prove it is a qualified article writer — writer and vision are separate qualifications (see §3).
+A real sidecar qualification requires **all** of: actual Qwen3.5-4B Q4_K_M weights
+with matching F16 projector, confirmed CUDA offload (no unintended CPU offload),
+an actual 8-image ranking inside the V9 context budget with valid rubric JSON, a
+successful service-to-sidecar request over the Compose network, and measured peak
+VRAM + latency. A mocked HTTP 200 from `httpx.MockTransport` proves routing, not
+fit. Until that qualification exists, writer and vision for production use come
+from external OpenAI-compatible endpoints (§3).
 
 ---
 
@@ -184,18 +249,18 @@ The sidecar is qualified for vision only. Its visual qualification does not prov
 
 The web app has editing (`POST /api/articles/{id}`), uploads (`POST /api/sources/upload`), job execution (`POST /api/jobs/{id}/reprocess`) and inference config (`POST /api/settings/inference`) — all unauthenticated.
 
-- Default `docker-compose.yml` binds `127.0.0.1:8080:8000` so the admin UI is only reachable from the host's loopback. Access it via `ssh -L 8080:localhost:8080 user@host` then `http://localhost:8080`, or via a VPN. Do not change the host binding to `0.0.0.0:8080:8000` without an authenticated proxy.
-- `src/yt2wiki/web/app.py:_require_local` checks `request.client.host` is `127.0.0.1`, `::1`, `::ffff:127.0.0.1`, `testclient` or `localhost`. It does **not** trust `X-Forwarded-For` or `X-Real-IP` — arbitrary client-supplied headers cannot grant admin access. Under Docker the forwarded host is the gateway (e.g. `172.18.0.1`), so a direct `curl` from the host's network to `0.0.0.0:8080` would still be blocked for `/api/settings/inference` — this is intentional. Use `docker exec yt2wiki curl -sf http://127.0.0.1:8000/api/settings/inference` or SSH tunnel to the host's loopback, not a raw LAN exposure.
-- For broader LAN operation, put an authenticated boundary in front, e.g. Caddy/Traefik with `basic_auth` or Authelia, then proxy to `yt2wiki:8000`. Example `Caddyfile`:
+- Default `docker-compose.yml` binds `127.0.0.1:8080:8000` so the admin UI is only reachable from the host's loopback. Reach it from your laptop with `ssh -L 8080:localhost:8080 user@host` then `http://localhost:8080`, or via a VPN — but understand what that does **not** do: an SSH tunnel does **not** make the settings API accept your browser. The app sees the Docker gateway address (e.g. `172.18.0.1`), not your browser's loopback, so `/api/settings/inference` still returns `403` through a tunnel. Do not change the host binding to `0.0.0.0:8080:8000` without an authenticated proxy, and do not tell users a tunnel fixes the guard — it does not.
+- `src/yt2wiki/web/app.py` (`LOCAL_PEERS`, `peer_host`, `is_local_peer`) allows inference configuration only from a localhost peer (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`, `testclient`, `localhost`). It does **not** trust `X-Forwarded-For` or `X-Real-IP` — arbitrary client-supplied headers cannot grant admin access, and whitelisting the Docker gateway is explicitly not done. The 403 message points at the operator console instead. For Docker deployments the working management path is `docker exec yt2wiki yt2wiki inference …` (see §3), which the `/settings` page also states in its **Operator only** notice for every non-localhost viewer (with its mutation form disabled).
+- For broader LAN operation, put an authenticated boundary in front, e.g. Caddy/Traefik with `basic_auth` or Authelia. Keep the yt2wiki container itself on host loopback or an isolated Docker network — never publish the unauthenticated app port broadly. Example `Caddyfile` (proxy on the host network, upstream via loopback):
   ```
   yt2wiki.lan {
       basicauth * {
           admin $2a$14$...
       }
-      reverse_proxy yt2wiki:8000
+      reverse_proxy 127.0.0.1:8080
   }
   ```
-  Test that unauthenticated `curl http://yt2wiki.lan/api/settings/inference` returns `401` from the proxy, while authenticated requests succeed and are still subject to yt2wiki's own localhost check only when the proxy is on the same host network (configure the proxy to connect via `127.0.0.1` inside the host network, or run the proxy as the trusted entrypoint and keep yt2wiki on an internal network).
+  Or give the proxy and yt2wiki an isolated network (`docker network create yt2wiki-net`, attach both, no published `ports:` on yt2wiki) and proxy to `http://yt2wiki:8000` inside that network. Test that unauthenticated `curl http://yt2wiki.lan/api/settings/inference` returns `401` from the proxy. Note the proxy does **not** make browser sessions localhost peers: even behind an authenticated proxy, settings save/test from a browser still requires the operator console unless authenticated management is implemented (the localhost guard intentionally stays).
 - Secrets: `api_key_env` names an env var (`YT2WIKI_GEMMA_API_KEY`) that is set via host env or `env_file` with `0600` permissions, not baked into the image or compose. `inference.json` stores only the name, and job `config_json` stores `url`/`model`/`api_key_env` name, not the key. Logs and exports never include keys.
 
 Do not remove the localhost guard merely because requests arrive from a container network address.
@@ -206,14 +271,30 @@ Do not remove the localhost guard merely because requests arrive from a containe
 
 Import `docker-compose.portainer.yml` as a Portainer Stack:
 
-- One required service `yt2wiki`, one optional `llama` (enable the `llama` profile in Portainer's stack options).
+- **Build the image first — it is not public.** No `yt2wiki:0.1.0` image has been
+  published to any registry or verified from one. On the Docker endpoint run
+  `docker build -t yt2wiki:0.1.0 .` (from this checkout) and confirm
+  `docker images yt2wiki:0.1.0` before deploying the stack. Alternatively push
+  your build to a private registry and change `image:` to that exact reference.
+- One required service `yt2wiki`, one **experimental** `llama` (enable the
+  `llama` profile in Portainer's stack options only to attempt your own
+  qualification — §4).
 - Persistent named volumes `yt2wiki-data` and `yt2wiki-models` (or replace with bind mounts for an existing library — see below).
-- Environment-variable-based settings: `YT2WIKI_HOME`, `YT2WIKI_PROFILE`, `HF_HOME`; provider keys via env names.
+- Environment-variable-based settings: `YT2WIKI_HOME`, `YT2WIKI_PROFILE`, `HF_HOME`.
+- Provider keys via Portainer stack variables (Stack → Environment variables →
+  Advanced mode): define `YT2WIKI_OPENAI_API_KEY`, `YT2WIKI_GEMMA_API_KEY`, …,
+  and the compose mapping `YT2WIKI_OPENAI_API_KEY=${YT2WIKI_OPENAI_API_KEY:-}`
+  interpolates your value into the container environment at deploy time. The
+  container receives the resolved value; `inference.json` stores only the name.
 - Health and `restart: unless-stopped` policies.
 - No mandatory GPU for `yt2wiki`; GPU reservation only for `llama`.
 
 Connecting existing LAN inference providers instead of the sidecar: in Portainer set
-`YT2WIKI_PROFILE` and create `/data/config/inference.json` (via the Settings UI or `docker exec`) pointing `writer`/`vision` to your `http://192.168.1.x:8000` providers, then `POST /api/settings/inference/test` to qualify.
+`YT2WIKI_PROFILE` and the provider key stack variables above, then from the
+endpoint shell run `docker exec yt2wiki yt2wiki inference save --file …` pointing
+`writer`/`vision` at your `http://192.168.1.x:8000` providers, then
+`docker exec yt2wiki yt2wiki inference test --name …` to qualify. The Settings UI
+cannot save/test from a browser session (see §3/§5) — use the operator console.
 
 Migration-free installation for an already existing article library:
 
@@ -227,6 +308,20 @@ Migration-free installation for an already existing article library:
 ```
 
 After switching the mount, `GET /library` shows the existing guides, and `GET /articles/{id}` renders them without loading a model.
+
+WAL-safe backup while the service is running (SQLite WAL mode — never copy the
+bare `.sqlite3` file while `-wal`/`-shm` sidecars exist):
+
+```bash
+docker exec yt2wiki sqlite3 /data/db/yt2wiki.sqlite3 ".backup '/tmp/yt2wiki-backup.sqlite3'"
+docker cp yt2wiki:/tmp/yt2wiki-backup.sqlite3 ./yt2wiki-backup.sqlite3
+docker exec yt2wiki rm /tmp/yt2wiki-backup.sqlite3
+docker cp yt2wiki:/data/articles ./yt2wiki-articles-backup   # markdown/assets (read-only copy)
+```
+
+(`.backup` checkpoints the WAL into a consistent snapshot; the articles copy is
+plain files. The same commands work on the host against `$YT2WIKI_HOME`, as the
+Settings → Library panel states.)
 
 ---
 
@@ -271,21 +366,67 @@ HF_HOME=/data/models YT2WIKI_HOME=/data yt2wiki run --profile compact <source-id
 If no fully qualified writer/vision combination is available, report that limitation — do not claim
 full production inference qualification based on mocked tests.
 
-### Optional sidecar — real multimodal ranking
+### Management path and credential routing — demonstrated in the running container
 
-On the qualified NVIDIA hardware (`nvidia-smi` shows 5060/5060 Ti/3060), with the sidecar running:
+Image `yt2wiki:0.1.0` (`1.16 GB`, `1a79ea27c4c6`), container `yt2wiki-demo`,
+host port `18080 → 8000` (host `8080` was occupied; same loopback binding),
+`--env-file` with `YT2WIKI_MOCK_KEY=test-secret-xyz`, volume `yt2wiki-demo-data`:
 
-```bash
-docker compose --profile llama up -d
-curl -sf http://127.0.0.1:8081/health
-# Run the 2-image rubric probe used for qualification (see web/inference.py:_qualify_vision)
-python -m tests.test_llama_sidecar  # 8-image ranking fits in 16384, no OOM
-docker logs yt2wiki-llama | grep "llamacpp.*resident"
-```
+- `GET /health` → `{"ok":true}`; `docker exec … whoami` → `yt2wiki` (uid 1000);
+  `pip list` shows no `torch`/`transformers`; `import torch` → `ModuleNotFoundError`.
+- `GET /settings` from the host (gateway peer `172.17.0.1`) renders the
+  **Operator only** notice with `data-remote` and the `docker exec` commands;
+  `POST /api/settings/inference` from the host → `403` with the operator-console
+  message (also with `X-Forwarded-For: 127.0.0.1` — headers never grant access).
+- `docker exec yt2wiki-demo curl … http://127.0.0.1:8000/api/settings/inference`
+  (localhost peer) → `200`.
+- `docker exec yt2wiki-demo yt2wiki inference save --file /tmp/payload.json`
+  (provider `mock` → `http://172.17.0.1:8931/v1`, `api_key_env: YT2WIKI_MOCK_KEY`)
+  then `yt2wiki inference test --name mock` → `ok: true`,
+  `qualified_for_writer/…_vision: true`. The mock logged
+  `Authorization: Bearer test-secret-xyz` on `/models` and `/chat/completions`;
+  `/data/config/inference.json` contains only the variable name (`grep -c` for the
+  secret → `0`).
+- CPU ASR inside the same container (no GPU, no torch): faster-whisper
+  `whisper-small` cold load `11.7 s` (first download to `/data/models`),
+  transcribe of the 11 s 16 kHz fixture `2.3 s` (RTF `4.7×`), peak RSS `0.8 GB`,
+  correct transcript with word-level timestamps — proving new-video ASR works
+  on the GPU-free service.
 
-No model bake-off is performed here — the sidecar's visual qualification is the already-recorded
-V9-Z4 result (Qwen3.5-4B Q4_K_M, ctx 16384, n_gpu_layers 99, reasoning off, 384 tokens). Its
-visual qualification does not automatically prove writer qualification.
+### CPU ASR — qualified on real audio (host, CUDA hidden)
+
+Fixture: `jfk.flac` (OpenAI whisper sample, 11 s, sha256
+`63a4b1e4…9a4a`) → `ffmpeg -ar 16000 -ac 1` → 16 kHz mono PCM16 (extraction proven),
+`CUDA_VISIBLE_DEVICES=""` throughout:
+
+| model | compute | cold load | transcribe 11 s | RTF | peak RSS | transcript |
+|---|---|---|---|---|---|---|
+| faster-whisper-small | `int8` (registry `cpu_compute_type`) | 1.2 s | 2.0 s | 5.5× | 1.18 GB | correct + word timestamps |
+| faster-whisper-large-v3 (default) | `int8` (registry `cpu_compute_type`) | 4.8 s (68 s incl. first download) | 9.3 s | 1.18× | 4.3 GB | correct + word timestamps |
+
+- The previous GPU default (`int8_float16`, also `float16` for enhanced) fails
+  hard on CPU: `ValueError: Requested int8_float16 compute type, but the target
+  device or backend do not support efficient int8_float16 computation.` The
+  backend now substitutes the registry's explicit `cpu_compute_type: int8` on
+  `device == "cpu"` and records the effective type in the load report; GPU
+  defaults are untouched.
+- No hidden CUDA requirement: `import faster-whisper` leaves `torch` unimported;
+  `torch` in this dev venv arrives only via the optional guarded import in
+  `yt2wiki/gpu.py`, and the container image has no `torch` at all.
+- Speed/quality: `int8` is CTranslate2's recommended CPU quantization; large-v3
+  stays the default for accuracy, at ~1× realtime on CPU. A registry fingerprint
+  change invalidates cached `transcribe` outputs once (by design — tuning keys);
+  rerunning jobs retranscribes.
+- Consequence for the service: new-video ASR **works** GPU-free (small or
+  large-v3 on CPU). No external ASR capability is required.
+
+### Optional sidecar — NOT qualified (do not use for production claims)
+
+The `llama` profile remains in the Compose files as an experimental staging for
+your own qualification (§4). Not performed here: no Qwen3.5-4B weights (none
+downloaded, per scope), no digest pinned (`docker pull …:server-cuda` denied
+from this network), no validated flags, no 8-image ranking, no VRAM/latency
+numbers. The gateway/mock qualification above covers routing only.
 
 ---
 
