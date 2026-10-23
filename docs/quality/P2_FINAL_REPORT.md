@@ -4,7 +4,7 @@
 **Remote:** https://github.com/mitchins/yt2wiki
 **Authoritative `origin/main`:** `edb56f9df053b306e130febdf58ea69eeeb79a9b` (PR #9 squash merge)
 **Worktrees:** `main` `496aed8` (pre-GitHub, preserved), `.worktrees/p1` `6105ee5`,
-`.worktrees/p2a` `p2a/sonar-baseline` `bcc404a`, `.worktrees/p2b` `p2b/deploy` `0bfc77e`
+`.worktrees/p2a` `p2a/sonar-baseline` `bcc404a`, `.worktrees/p2b` `p2b/deploy` `62cb5ec`
 (rebased onto `origin/main` `facf3da`; pre-rebase backup branch deleted after verified push)
 **Stashes:** `stash@{0}` `fix/sonar-initial-findings`, `stash@{1,2}` V8 dirt (preserved, not applied)
 **Data:** `~/.local/share/yt2wiki` intact, `HF_HOME=/usbpool/yt-to-wiki/.cache/huggingface` preserved,
@@ -32,7 +32,7 @@ and its now-redundant `sonar.projectVersion=0.1.0` hunk removed for a clean diff
 
 ## PR B — Safe uploads and qualified deployment (evidence below, unmerged)
 
-**PR:** https://github.com/mitchins/yt2wiki/pull/12 `p2b/deploy` `0bfc77e` → `main`
+**PR:** https://github.com/mitchins/yt2wiki/pull/12 `p2b/deploy` `62cb5ec` → `main`
 (`facf3da`; redundant `sonar.projectVersion` hunk removed — the diff holds only P2 files)
 **Chain (rebased, replayed cleanly onto `facf3da`):** `ea0473c` base → docs/coverage/refactor/
 idempotency/operator-console/CPU-ASR/compose/secrets → deploy docs → gate fixes (S8707,
@@ -40,15 +40,19 @@ complexity, S108/S5713) → containment → S7761 → report → CodeRabbit batc
 8-image) → S9073 split → report → **Phase 2:** role-aware CLI exits, validate shapes,
 EXDEV docs, errno parametrize, no-`0.0.0.0` proxy, stop-first backup procedure →
 **closure:** restart semantics, payload staging docs, full backup set, persistence files.
-**CI:** `39901180146` `2m37s` `success` on head `0bfc77e` (closure; earlier `39893077481`
-success on `1ddcda7`, `39887119549` on `071dc31`, `39884390012` on `7316ec8`,
+**CI:** `39911947095` `2m25s` `success` on head `62cb5ec` (final closure: proxy_headers guard,
+pip-HOME fix, failing backup validation, restart semantics, payload docs; earlier `39901180146`
+on `0bfc77e`, `39893077481` on `1ddcda7`, `39887119549` on `071dc31`, `39884390012` on `7316ec8`,
 `39882861645` failed only on the then-open S8707; apt-mirror stalls cancelled + retriggered).
 **Sonar PR 12:** `projectStatus OK` — all six conditions green, `new_coverage 95.2%` (≥80,
 verified `new_lines_to_cover 217`), `new_duplicated_lines_density 0.0`. **Zero open issues.**
 **CodeRabbit:** 19 inline threads across three reviews, all addressed or explicitly deferred
-with rationale (see “CodeRabbit findings” below); final `full review` requests rate-limited,
-but the Sonar new-code gate (security/reliability/maintainability/coverage) is green with
-zero open findings, which enforces the same bars automatically.
+with rationale (see “CodeRabbit findings” below); the final `full review` round produced no
+new actionable comments, and the Sonar new-code gate (security/reliability/maintainability/
+coverage) is green with zero open findings, which enforces the same bars automatically.
+Closure round additionally: `proxy_headers=False` + forged-XFF regression test (live 403 vs
+pre-fix 200), pip-HOME fix, backup validation that fails on missing live media, restart-semantics
+corrections, payload staging docs — all covered by the `39911947095` CI + Sonar run.
 
 ### B1 — Upload registration is genuinely idempotent (issue #10)
 
@@ -94,10 +98,11 @@ is effective.)
 
 ### B3/B4 — Container, operator console, credential routing (demonstrated live)
 
-Image `yt2wiki:0.1.0` `eeede26b6a82` (`1.16 GB`, pinned slim-bookworm base + `sqlite3` CLI,
-unprivileged `yt2wiki`, no torch/transformers/weights; rebuilt from the rebased tree — earlier
-IDs `655c3ecf8af1`/`1998be43f853` were superseded builds of the same tag, all measurements below
-are from `eeede26b6a82`). Containers `yt2wiki-q`/`yt2wiki-restore`, host `18081/18082→8000`
+Image `yt2wiki:0.1.0` `13ccbbf071ee` (`1.16 GB`, pinned slim-bookworm base + `sqlite3` CLI,
+unprivileged `yt2wiki`, no torch/transformers/weights; includes the `proxy_headers=False` guard —
+earlier IDs `eeede26b6a82`/`655c3ecf8af1`/`1998be43f853` were superseded builds of the same tag,
+all measurements below re-verified on `13ccbbf071ee`). Containers `yt2wiki-q4` (plus the `q3`
+backup/restore pair), host `18083/18084→8000`
 (host `8080` occupied; same loopback binding), `--env-file` with
 `YT2WIKI_MOCK_KEY=test-secret-xyz` (bind-mounted seed library `/tmp/q-data`, mock at
 `http://172.17.0.1:8931`; demo containers/volumes torn down after evidence capture):
@@ -203,7 +208,7 @@ No merges performed. Blockers for #3 (Gemma) / #4 (Halogen) remain separate foll
 
 ## Evidence index
 
-- PRs: #11 merged as `facf3da`; #12 `0bfc77e` (CI `39901180146` success,
+- PRs: #11 merged as `facf3da`; #12 `62cb5ec` (CI `39911947095` success,
   Sonar `projectStatus OK`, `new_coverage 95.2%` on verified `new_lines_to_cover 217`,
   zero open issues)
 - Code: `services/__init__.py` upload block (no pragmas, EXDEV-only documented),
