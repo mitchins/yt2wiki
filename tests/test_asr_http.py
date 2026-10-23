@@ -795,3 +795,26 @@ def test_stage_fingerprint_includes_asr_identity(tmp_path, monkeypatch):
     monkeypatch.setenv("YT2WIKI_ASR_URL", "http://two:9000")
     assert ctx.stage_fingerprint("transcribe") != fp1
     assert "asr_identity" not in ctx.stage_fingerprint("compose") or True
+
+
+def test_detect_language_cleans_temp_head(tmp_path, monkeypatch):
+    from yt2wiki.backends import asr_http as _m
+    import httpx as _h
+    wav = _wav(tmp_path, seconds=60.0)
+
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return {"language_code": "en", "confidence": 0.9}
+
+    def _client(*a, **k):
+        ctx = mock.MagicMock()
+        ctx.__enter__.return_value.post.return_value = Resp()
+        return ctx
+
+    monkeypatch.setattr(_h, "Client", _client)
+    assert _m.detect_language("http://s", wav, timeout=5.0) == ("en", 0.9)
+    leftovers = [p for p in tmp_path.iterdir()] + [
+        q for d in tmp_path.iterdir() if d.is_dir() for q in d.iterdir()]
+    assert all("head" not in str(p) for p in leftovers)
