@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from typing import Any, Iterator, Sequence
+from typing import Any
 
 from ..config import ModelSpec, Settings
 from ..gpu import (

@@ -161,6 +161,8 @@ def detect_language(
 ) -> tuple[str | None, float | None]:
     """Ask ``/detect-language`` (first 30 s) for (code, confidence).
 
+    Only the head of the audio is uploaded: the endpoint processes the
+    first 30 s anyway, so sending a 900 s file wastes the upload.
     Returns ``(None, None)`` when the endpoint is unavailable — the caller
     falls back to the ``/asr`` language with unknown confidence rather than
     inventing a number.
@@ -168,9 +170,10 @@ def detect_language(
     import httpx
 
     server = base_url.rstrip("/")
+    head = _head_wav(Path(wav_path), seconds=35.0)
     try:
-        with open(wav_path, "rb") as fh:
-            files = {"audio_file": (wav_path.name, fh, "audio/wav")}
+        with open(head, "rb") as fh:
+            files = {"audio_file": (head.name, fh, "audio/wav")}
             with httpx.Client(timeout=timeout, headers=headers or {}) as client:
                 r = client.post(f"{server}/detect-language", files=files)
         if r.status_code != 200:
@@ -178,6 +181,12 @@ def detect_language(
         data = r.json()
     except Exception:
         return None, None
+    finally:
+        if head != Path(wav_path):
+            try:
+                head.unlink()
+            except OSError:  # noqa: BLE001
+                pass
     if not isinstance(data, dict):
         return None, None
     code = data.get("language_code")
@@ -423,11 +432,14 @@ class HttpAsrBackend(BaseBackend):
         self.last_unsupported = unsupported
         self.last_warnings = []
         duration_s = wav_duration_s(Path(wav_path))
+        # Long audio needs a long server budget: at least the configured
+        # timeout, at least ~5x the measured HTTP RTF (~0.2) as headroom.
+        timeout = max(self.timeout, duration_s * 1.0)
         query = build_query(language=language,
                             word_timestamps=word_timestamps,
                             vad_filter=vad_filter)
         data = post_asr(self.base_url, Path(wav_path), query=query,
-                        timeout=self.timeout, headers=self._headers)
+                        timeout=timeout, headers=self._headers)
         transcript = parse(data, duration_s=duration_s,
                            require_words=word_timestamps, server=self.server)
         self.last_warnings = list(transcript.warnings)
@@ -463,6 +475,28 @@ def resolve_env_variant(variant: dict[str, Any]) -> dict[str, Any]:
     except ValueError:
         out["timeout"] = float(variant.get("timeout", 300.0))
     return out
+
+
+def _head_wav(path: Path, *, seconds: float = 35.0) -> Path:
+    """Copy the first `seconds` of a 16 kHz mono WAV (stdlib only).
+
+    Used for language detection: the endpoint only reads the head anyway.
+    Returns `path` itself when the file is already short (no temp copy).
+    """
+    import tempfile
+
+    with wave.open(str(path), "rb") as wf:
+        rate, nch, sw = wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
+        if wf.getnframes() <= int(seconds * rate):
+            return path
+        head_frames = wf.readframes(int(seconds * rate))
+    tmp = Path(tempfile.mkdtemp(prefix="yt2wiki-asr-head-")) / "head.wav"
+    with wave.open(str(tmp), "wb") as wf:
+        wf.setnchannels(nch)
+        wf.setsampwidth(sw)
+        wf.setframerate(rate)
+        wf.writeframes(head_frames)
+    return tmp
 
 
 def write_sine_wav(path: Path, *, seconds: float = 2.0, freq: float = 440.0) -> Path:

@@ -113,8 +113,39 @@ def adjudicate_section_with_judge(vb, sec: dict[str, Any],
     return chosen, record
 
 
+def _effective_asr_identity(settings, inference_snapshot: dict | None) -> dict[str, str]:
+    """The ASR server a new job would actually use (snapshot wins)."""
+    entry = (inference_snapshot or {}).get("asr") or {}
+    if entry.get("url"):
+        return {"url": str(entry["url"]).rstrip("/"), "model": str(entry.get("model") or "")}
+    return settings.asr_identity()
+
+
+def _recorded_asr_identity(db, source_id: str) -> dict | None:
+    """The ASR identity behind the stored transcript, if it was recorded."""
+    try:
+        rows = db.query(
+            """SELECT s.metrics_json FROM stages s JOIN jobs j ON j.job_id = s.job_id
+               WHERE j.source_id = ? AND s.stage = 'transcribe' AND s.state = 'done'
+               ORDER BY s.finished_at DESC LIMIT 5""",
+            (source_id,))
+    except Exception:  # noqa: BLE001
+        return None
+    for row in rows:
+        try:
+            metrics = json.loads(row["metrics_json"] or "{}")
+        except ValueError:
+            continue
+        if metrics.get("mode") == "asr" and isinstance(metrics.get("asr_identity"), dict):
+            return metrics["asr_identity"]
+        if metrics.get("mode") == "captions":
+            return {"mode": "captions"}
+    return None
+
+
 def _ensure_base(settings, db, service, source_id: str,
-                 job_id: str | None = None) -> dict[str, Any]:
+                 job_id: str | None = None,
+                 inference_snapshot: dict | None = None) -> dict[str, Any]:
     """Run acquisition/inspect/transcribe/frame_candidates only where missing.
 
     With `job_id`, the base stages are recorded under that job (so one job
@@ -130,6 +161,24 @@ def _ensure_base(settings, db, service, source_id: str,
     n_frames = db.query_one(
         "SELECT COUNT(*) c FROM frames WHERE source_id=?", (source_id,))["c"]
     counts["frames"] = n_frames
+    # Staleness check: a stored transcript made by a different ASR server
+    # must not be reused. Captions-mode transcripts carry no ASR identity
+    # and stay reusable; unrecorded (pre-feature) ones are trusted once.
+    if n_trans > 0:
+        recorded = _recorded_asr_identity(db, source_id)
+        if isinstance(recorded, dict) and recorded.get("url"):
+            effective = _effective_asr_identity(settings, inference_snapshot)
+            if recorded.get("url") != effective.get("url") or \
+                    recorded.get("model") != effective.get("model"):
+                log.info("asr identity changed (%s -> %s); retranscribing %s",
+                         recorded, effective, source_id)
+                db.execute("DELETE FROM transcript_segments WHERE source_id=?", (source_id,))
+                db.execute("DELETE FROM transcript_words WHERE source_id=?", (source_id,))
+                db.execute("DELETE FROM transcript_fts WHERE source_id=?", (source_id,))
+                # The per-job transcript.jsonl is rewritten by _persist; the
+                # stale job dir keeps its own copy, keyed by job id.
+                n_trans = 0
+                counts["transcript_segments"] = 0
     if n_trans > 0 and n_frames > 0:
         if job_id:
             for name in BASE_STAGES:
@@ -140,7 +189,8 @@ def _ensure_base(settings, db, service, source_id: str,
     from ..services import Service  # noqa: F401
     job = job_id or service.create_job(source_id, profile=settings.profile)
     ctx = StageContext(job_id=job, source_id=source_id, settings=settings, db=db,
-                       paths=settings.paths, fingerprint=settings.fingerprint())
+                       paths=settings.paths, fingerprint=settings.fingerprint(),
+                       inference_snapshot=inference_snapshot)
     for name, mod in (("acquisition", acquisition), ("inspect", inspect),
                       ("transcribe", transcribe), ("frame_candidates", frame_candidates)):
         if ((name == "acquisition" and n_trans > 0 and video_ok)
@@ -239,7 +289,8 @@ def run_source(settings, db, service, source_id: str, *,
 
     try:
         # --- base media/ASR ---
-        base = _ensure_base(settings, db, service, source_id, job_id=v9job)
+        base = _ensure_base(settings, db, service, source_id, job_id=v9job,
+                            inference_snapshot=inference_snapshot)
         result["base"] = base
 
         # --- write ---

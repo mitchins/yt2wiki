@@ -121,8 +121,10 @@ def cite_rule(url: str | None) -> str:
     for uploads (which have no origin URL). Uploads cite plain [m:ss].
     """
     if url:
-        return (f"cite timestamps ONLY as [m:ss]({url}&t=SECONDS), e.g. "
-                f"[2:39]({url}&t=159). Never write bare seconds like [159] or "
+        # Plain query joining: youtu.be/ID style URLs carry no query yet.
+        sep = "&" if "?" in url else "?"
+        return (f"cite timestamps ONLY as [m:ss]({url}{sep}t=SECONDS), e.g. "
+                f"[2:39]({url}{sep}t=159). Never write bare seconds like [159] or "
                 "[159:0], never invent any other URL")
     return ("cite timestamps ONLY as plain [m:ss] with no link, e.g. "
             "[0:04] (this upload has no source URL). Never write seconds "

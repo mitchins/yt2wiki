@@ -156,12 +156,16 @@ def assemble_markdown(article_title: str, summary: str, sections: list[dict[str,
         quote.append(provenance["attribution_line"])
     if provenance.get("url"):
         quote.append(f"Source video: {provenance['url']}")
+    # The "link" claim holds only when citations actually link: the writer
+    # emits [m:ss](url&t=..) for YouTube sources, plain [m:ss] otherwise
+    # (uploads, non-YouTube URLs) — normalize_timestamps only links youtu targets.
+    if provenance.get("url") and "youtu" in provenance["url"]:
         quote.append("This illustrated guide was compiled locally from the video's narration "
                      "and original frames. Timestamps link each section to its source span.")
     else:
         quote.append("This illustrated guide was compiled locally from the video's narration "
                      "and original frames. Timestamps mark each claim's source span "
-                     "(this upload has no source URL to link).")
+                     "(no source URL to link).")
     lines.append("> " + "\n> ".join(quote))
     lines.append("")
     if summary:

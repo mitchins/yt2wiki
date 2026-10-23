@@ -116,7 +116,8 @@ def _run_asr(
     row: Any,
 ) -> Transcript:
     t = ctx.settings.tuning
-    manager = ModelManager(ctx.settings, recorder=_recorder(ctx, "transcribe"))
+    manager = ModelManager(ctx.settings, recorder=_recorder(ctx, "transcribe"),
+                           inference_snapshot=ctx.inference_snapshot)
     hint = _vocabulary_hint(ctx, row)
 
     def on_progress(done: int, end_s: float, total: float) -> None:
@@ -135,9 +136,17 @@ def _run_asr(
         server = getattr(backend, "server", "")
         unsupported = list(getattr(backend, "last_unsupported", []) or [])
         asr_warnings = list(getattr(backend, "last_warnings", []) or [])
+        # Machine-readable identity for reuse-invalidation (see
+        # v9._ensure_base): the job that made this transcript, in full.
+        identity = {"url": getattr(backend, "base_url", "") or "",
+                    "model": getattr(backend, "server_model", "") or ""}
+        if not identity["url"]:
+            identity = {"url": (server.split(" (model")[0] or server).strip(),
+                        "model": ""}
         metrics_extra = {}
         if server:
             metrics_extra["asr_server"] = server
+        metrics_extra["asr_identity"] = identity
         if unsupported:
             # Options outside the HTTP contract are server-side defaults or
             # omitted — recorded here so the gap is explicit, never silent.
@@ -147,6 +156,7 @@ def _run_asr(
         ctx.artifacts["asr_server"] = server
         ctx.artifacts["asr_unsupported_options"] = unsupported
         ctx.artifacts["asr_warnings"] = asr_warnings
+        ctx.artifacts["asr_identity"] = metrics_extra["asr_identity"]
         return transcript, metrics_extra
 
 

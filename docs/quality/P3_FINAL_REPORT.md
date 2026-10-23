@@ -126,13 +126,13 @@ to both roles; `inference test` from inside the deployment:
 `qualified_for_writer=true`, `qualified_for_vision=true` (real probes).
 
 - Writer: title probe 7.2 s, valid JSON; full production section prompt
-  (150 s technical span, exact-value-dense) 35.7 s, `finish_reason=stop`,
-  valid JSON with heading/body/key_points/warnings, body 1210 chars.
+  (150 s technical span, exact-value-dense) at the production
+  `max_new_tokens=1600`: 26.9 s, `finish_reason=stop` (not length), 1409
+  completion tokens (601 reasoning + ~808 content), valid JSON with
+  heading/body/key_points/warnings, body 1716 chars.
   Exact tokens preserved (`npx`, `index`, `npm start`, `[2:xx]`); `CRACO` /
   `PostCSS` absent because the TRANSCRIPT renders them `CCO`/`post CSS`
   (transcript fidelity, not writer invention — no invented steps found).
-  Reasoning model: 1001 reasoning tokens inside a 2000 budget; V9's
-  `max_new_tokens=1600` per section holds with margin.
 - Vision: real 2/4/8-image production rubric requests on library frames —
   3/3 valid (`EXPAND`/`REPLACE`/`REPLACE`, 17.5/20.0/26.1 s isolated),
   scores/vetoes editorially sensible (wrong-context foggy street vetoed,
@@ -247,8 +247,11 @@ follow-up); headings are transcript-derived and occasionally awkward;
 `Soul MD` vs `SO.md` inconsistency inherited from transcript ASR.
 
 Verified live: full-text search finds the article; markdown/zip/standalone
-exports byte-complete (zip: md + 2 JPEGs); section edit → version 4;
-container restart → library, article, revisions intact.
+exports byte-complete (zip at publish: article.md + the 3 selected JPEGs,
+matching the article's 3 `![](assets/…)` references and the standalone
+page's 3 `<img>` tags); section edit → version 4 (DB article only; the
+published export files are the job's pristine output); container restart →
+library, article, revisions intact.
 
 ## 8. Performance and failure measurements
 

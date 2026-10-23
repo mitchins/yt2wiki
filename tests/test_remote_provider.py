@@ -318,3 +318,32 @@ def test_role_timeout_asr_env_invalid(monkeypatch):
     from yt2wiki.backends.loader import _role_timeout
     monkeypatch.setenv("YT2WIKI_ASR_TIMEOUT", "bogus")
     assert _role_timeout("asr", None) == 300.0
+
+
+def test_remote_spec_text_unreachable_snapshot_and_live(tmp_path):
+    from yt2wiki.backends.loader import ModelManager
+    from yt2wiki.config import Settings
+    from yt2wiki.web import inference as inf
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    bad_snap = {"writer": {"provider": "lan", "url": "http://x/v1", "model": "m",
+                           "api_key_env": "", "reachable": False,
+                           "qualified_for_writer": True}}
+    with pytest.raises(RuntimeError, match="was not reachable"):
+        ModelManager(settings, inference_snapshot=bad_snap)._remote_spec("text")
+    inf.save(settings.paths, {"providers": [{"name": "lan", "url": "http://x/v1",
+                                             "model": "m", "api_key_env": ""}],
+                              "roles": {"writer": "lan", "vision": "", "asr": ""}})
+    inf.record_test(settings.paths, "lan", {"ok": False, "error": "down"})
+    with pytest.raises(RuntimeError, match="is not reachable"):
+        ModelManager(settings)._remote_spec("text")
+
+
+def test_build_local_asr_engine(tmp_path):
+    from yt2wiki.backends.loader import ModelManager
+    from yt2wiki.config import Settings
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact",
+                             model_overrides={"asr": "whisper-large-v3"})
+    backend = ModelManager(settings).build("asr", settings.model("asr"))
+    assert type(backend).__name__ == "WhisperBackend"

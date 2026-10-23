@@ -72,6 +72,14 @@
    ]
   }
  },
+ "writer_production_1600": {
+  "latency_s": 26.9,
+  "finish": "stop",
+  "completion_tokens": 1409,
+  "reasoning_tokens": 601,
+  "parse": "ok",
+  "body_chars": 1716
+ },
  "vision_probe": [
   {
    "endpoint": "halogen",
@@ -186,7 +194,8 @@
    "winner": null,
    "scores": [],
    "latency_s": 4.6,
-   "truncated": 4
+   "truncated": 4,
+   "raw_head": "{\"scores\": [{\"idx\": 1, \"relevance\": 0, \"clarity\": 1, \"instructional\": 0, \"payoff\": 0, \"veto\": true, \"veto_reason\": \"wrong-context\", \"context_ok\": false, \"weakness\": \"shows a person in fog near a car\"}, {\"idx\": 2, \"relevance\": 1, \"clarity\": 2, \"instructional\": 0, \"payoff\": 0, \"veto\": false, \"veto_rea\u2026"
   },
   {
    "source": "yt-pfaSUYaSgRo",
@@ -397,7 +406,8 @@
    "winner": null,
    "scores": [],
    "latency_s": 3.9,
-   "truncated": 4
+   "truncated": 4,
+   "raw_head": "{\"scores\": [{\"idx\": 1, \"relevance\": 2, \"clarity\": 1, \"instructional\": 1, \"payoff\": 1, \"veto\": false, \"veto_reason\": \"\", \"context_ok\": false, \"weakness\": \"Color palette overlay obscures code text\"}, \"idx\": 2, \"relevance\": 1, \"clarity\": 2, \"instructional\": 1, \"payoff\": 1, \"veto\": false, \"veto_reason\":\u2026"
   },
   {
    "source": "yt-pfaSUYaSgRo",
@@ -456,7 +466,8 @@
    "winner": null,
    "scores": [],
    "latency_s": 3.6,
-   "truncated": 4
+   "truncated": 4,
+   "raw_head": "{\"scores\": [{\"idx\": 1, \"relevance\": 0, \"clarity\": 2, \"instructional\": 0, \"payoff\": 0, \"veto\": false, \"veto_reason\": \"\", \"context_ok\": false, \"weakness\": \"Shows breakpoint table, not hover animation or icon styling.\"}, {\"idx\": 2, \"relevance\": 1, \"clarity\": 2, \"instructional\": 1, \"payoff\": 1, \"veto\": \u2026"
   },
   {
    "source": "yt-pfaSUYaSgRo",
@@ -503,7 +514,8 @@
    "winner": null,
    "scores": [],
    "latency_s": 4.8,
-   "truncated": 1
+   "truncated": 1,
+   "raw_head": "{\"scores\": [{\"idx\": 1, \"relevance\": 1, \"clarity\": 2, \"instructional\": 1, \"payoff\": 0, \"veto\": false, \"veto_reason\": \"\", \"context_ok\": false, \"weakness\": \"Generic HTML snippet lacks specific logic or Tailwind context.\"}, {\"idx\": 2, \"relevance\": 2, \"clarity\": 1, \"instructional\": 2, \"payoff\": 2, \"veto\"\u2026"
   },
   {
    "source": "file-9c2317b8458649c0",
@@ -638,7 +650,8 @@
    "winner": null,
    "scores": [],
    "latency_s": 4.0,
-   "truncated": 4
+   "truncated": 4,
+   "raw_head": "{\"scores\": [{\"idx\": 1, \"relevance\": 0, \"clarity\": 2, \"instructional\": 0, \"payoff\": 0, \"veto\": true, \"veto_reason\": \"wrong-context\", \"context_ok\": false, \"weakness\": \"Shows internal motherboard components, not thumbsticks or battery.\"}, {\"idx\": 2, \"relevance\": 0, \"clarity\": 2, \"instructional\": 0, \"pa\u2026"
   },
   {
    "source": "file-9c2317b8458649c0",
@@ -1001,7 +1014,8 @@
    "winner": null,
    "scores": [],
    "latency_s": 3.5,
-   "truncated": 4
+   "truncated": 4,
+   "raw_head": "{\"scores\": [{\"idx\": 1, \"relevance\": 1, \"clarity\": 1, \"instructional\": 1, \"payoff\": 1, \"veto\": false, \"veto_reason\": \"\", \"context_ok\": false, \"weakness\": \"Action is prying, not pulling adhesive tabs\"}, \"idx\": 2, \"relevance\": 1, \"clarity\": 1, \"instructional\": 1, \"payoff\": 0, \"veto\": false, \"veto_reaso\u2026"
   },
   {
    "source": "hermes-p3",
@@ -1432,7 +1446,8 @@
    "winner": null,
    "scores": [],
    "latency_s": 4.2,
-   "truncated": 4
+   "truncated": 4,
+   "raw_head": "{\"scores\": [{\"idx\": 1, \"relevance\": 1, \"clarity\": 1, \"instructional\": 0, \"payoff\": 0, \"veto\": false, \"veto_reason\": \"\", \"context_ok\": false, \"weakness\": \"Presenter shot with no UI visible\"}, {\"idx\": 2, \"relevance\": 0, \"clarity\": 0, \"instructional\": 0, \"payoff\": 0, \"veto\": true, \"veto_reason\": \"promo\u2026"
   }
  ],
  "job_final": {

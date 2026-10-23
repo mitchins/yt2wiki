@@ -369,3 +369,134 @@ def test_write_article_uses_cite_rule(tmp_path):
     out = v9writer.write_article(settings, db, sid, backend=StubBackend())
     assert out["sections"][0]["body"] == "Do it [0:04]."
     assert "no source URL" in seen["prompt"]
+
+
+def test_asr_identity_tracks_effective_server(tmp_path, monkeypatch):
+    from yt2wiki.config import Settings
+    from yt2wiki.web import inference as inf
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    monkeypatch.delenv("YT2WIKI_ASR_URL", raising=False)
+    inf.save(settings.paths, {"providers": [{"name": "a", "url": "http://asr:9000",
+                                             "model": "large-v3", "api_key_env": ""}],
+                              "roles": {"asr": "a", "writer": "", "vision": ""}})
+    assert settings.asr_identity() == {"url": "http://asr:9000", "model": "large-v3"}
+    fp_before = settings.fingerprint()
+    monkeypatch.setenv("YT2WIKI_ASR_URL", "http://other:9000")
+    inf.save(settings.paths, {"providers": [], "roles": {}})
+    assert settings.asr_identity()["url"] == "http://other:9000"
+    assert settings.fingerprint() != fp_before
+
+
+def test_ensure_base_retranscribes_on_server_change(tmp_path):
+    import json as _json
+    import time as _time
+
+    from yt2wiki.config import Settings
+    from yt2wiki.db.schema import Database
+    from yt2wiki.v9 import run as v9run
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    db = Database(tmp_path / "db.sqlite3")
+    db.migrate()
+    sid = "yt-retrans001"
+    db.execute("INSERT INTO sources(source_id, kind, origin_url, title, uploader, duration_s, created_at)"
+               " VALUES(?,?,?,?,?,?,?)",
+               (sid, "youtube", "https://youtu.be/x", "T", "u", 60.0, _time.time()))
+    db.execute("INSERT INTO transcript_segments VALUES(?,?,?,?,?,?,?,?,?)",
+               (sid, 0, 0.0, 1.0, "old words", 0.0, 0.0, 0.0, "remote-asr"))
+    import time as _t2
+    db.execute("INSERT INTO frames(frame_id, source_id, t, path, kind, created_at) VALUES(?,?,?,?,?,?)",
+               ("f-1", sid, 0.5, "/tmp/f-1.jpg", "scene", _t2.time()))
+    job_old = "job-old"
+    db.execute("INSERT INTO jobs(job_id, source_id, profile, fingerprint, state, config_json, created_at, updated_at)"
+               " VALUES(?,?,?,?,?,?,?,?)",
+               (job_old, sid, "compact", "x", "done", "{}", _time.time(), _time.time()))
+    db.execute("INSERT INTO stages(job_id, stage, state, started_at, finished_at, duration_s, metrics_json, error)"
+               " VALUES(?,?,?,?,?,?,?,?)",
+               (job_old, "transcribe", "done", _time.time(), _time.time(), 1.0,
+                _json.dumps({"mode": "asr", "asr_server": "http://old:9000 (model large-v3)",
+                             "asr_identity": {"url": "http://old:9000", "model": "large-v3"}}), None))
+    # same server -> reuse, no rerun
+    for jid in ("job-new1", "job-new2"):
+        db.execute("INSERT INTO jobs(job_id, source_id, profile, fingerprint, state, config_json, created_at, updated_at)"
+                   " VALUES(?,?,?,?,?,?,?,?)",
+                   (jid, sid, "compact", "x", "queued", "{}", _time.time(), _time.time()))
+    out = v9run._ensure_base(settings, db, None, sid, job_id="job-new1",
+                             inference_snapshot={"asr": {"url": "http://old:9000", "model": "large-v3"}})
+    assert out["reused"] is True
+    # changed server -> transcript wiped and base rerun attempted
+    import yt2wiki.pipeline.stages.acquisition as acq
+    import yt2wiki.pipeline.stages.frame_candidates as fc
+    import yt2wiki.pipeline.stages.inspect as insp
+    import yt2wiki.pipeline.stages.transcribe as tr
+    called = []
+    orig = (tr.run, acq.run, insp.run, fc.run)
+    tr.run = lambda ctx: called.append(ctx) or {"mode": "asr"}
+    acq.run = lambda ctx: {"mode": "upload"}
+    insp.run = lambda ctx: {"audio": "ok"}
+    fc.run = lambda ctx: {"frames": 1}
+    try:
+        out = v9run._ensure_base(settings, db, None, sid, job_id="job-new2",
+                                 inference_snapshot={"asr": {"url": "http://new:9000", "model": "large-v3"}})
+    finally:
+        tr.run, acq.run, insp.run, fc.run = orig
+    assert called, "transcribe must rerun after an ASR server change"
+    assert db.query_one("SELECT COUNT(*) c FROM transcript_segments WHERE source_id=?",
+                        (sid,))["c"] == 0
+
+
+def test_transcribe_uses_job_snapshot_not_live_config(tmp_path, monkeypatch):
+    from yt2wiki.config import Settings
+    from yt2wiki.db.schema import Database
+    from yt2wiki.pipeline import StageContext
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    db = Database(tmp_path / "db.sqlite3")
+    db.migrate()
+    sid = "yt-snap001"
+    import time as _time
+    db.execute("INSERT INTO sources(source_id, kind, origin_url, title, uploader, duration_s, created_at)"
+               " VALUES(?,?,?,?,?,?,?)",
+               (sid, "youtube", "https://youtu.be/x", "T", "u", 10.0, _time.time()))
+    wav = tmp_path / "a.wav"
+    from yt2wiki.backends.asr_http import write_sine_wav
+    write_sine_wav(wav, seconds=1.0)
+    ctx = StageContext(job_id="j", source_id=sid, settings=settings, db=db,
+                       paths=settings.paths, fingerprint="x",
+                       inference_snapshot={"asr": {"provider": "s", "url": "http://snap:9000",
+                                                 "model": "m", "reachable": True,
+                                                 "qualified_for_asr": True}})
+    ctx.artifacts["audio_path"] = str(wav)
+    seen = {}
+
+    class CapManager:
+        def __init__(self, settings, recorder=None, inference_snapshot=None):
+            seen["snapshot"] = inference_snapshot
+
+        def acquire(self, role):
+            raise AssertionError("no backend expected in this unit test")
+
+    monkeypatch.setattr("yt2wiki.pipeline.stages.transcribe.ModelManager", CapManager)
+    from yt2wiki.pipeline.stages import transcribe as stage
+    with __import__("pytest").raises(AssertionError):
+        stage._run_asr(ctx, wav, 1.0, {"mode": "asr"}, {"title": "t", "uploader": "u"})
+    assert seen["snapshot"]["asr"]["url"] == "http://snap:9000"
+
+
+def test_cite_rule_joins_bare_urls_with_question_mark():
+    from yt2wiki.v9.writer import cite_rule
+    assert "?t=SECONDS" in cite_rule("https://youtu.be/abc")
+    assert "&t=SECONDS" in cite_rule("https://www.youtube.com/watch?v=abc")
+    assert "youtu.be/abc?t=159" in cite_rule("https://youtu.be/abc")
+
+
+def test_assemble_markdown_non_youtube_url_has_no_link_claim():
+    from yt2wiki.v9.publish import assemble_markdown
+    sections = [{"section_id": "sec-01-x", "heading": "X",
+                 "body": "Do X [0:04].", "t_start": 0.0, "t_end": 60.0}]
+    md, _ = assemble_markdown("T", "S", sections, {},
+                              {"url": "https://cdn.example.com/v.mp4", "uploader": None})
+    assert "Source video" in md
+    assert "no source URL" in md
+    assert "link each section" not in md

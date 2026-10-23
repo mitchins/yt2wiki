@@ -225,6 +225,31 @@ class Settings:
             key = spec.fallbacks[0] if spec.fallbacks else ""
         return out
 
+    def asr_identity(self) -> dict[str, str]:
+        """Effective ASR identity: the server that will actually transcribe.
+
+        Registry `asr-http` variants carry only `url_env`/`model_env` names,
+        so the raw variant cannot fingerprint the server. Resolve with the
+        same precedence the loader uses: an assigned inference provider wins,
+        otherwise the environment-resolved registry variant.
+        """
+        try:
+            from .web import inference as _inf
+            cfg = _inf.load(self.paths)
+            name = (cfg.get("roles") or {}).get("asr")
+            prov = (cfg.get("providers") or {}).get(name or "", {})
+            if name and prov.get("url"):
+                return {"url": str(prov["url"]).rstrip("/"),
+                        "model": str(prov.get("model") or "")}
+        except Exception:  # noqa: BLE001 - fall through to the registry default
+            pass
+        variant = self.model("asr").variant(self.profile)
+        return {
+            "url": (os.environ.get(str(variant.get("url_env") or "YT2WIKI_ASR_URL"), "")
+                    or "").rstrip("/"),
+            "model": os.environ.get(str(variant.get("model_env") or "YT2WIKI_ASR_MODEL"), ""),
+        }
+
     # ------------------------------------------------------------------
     def fingerprint(self) -> str:
         """Stable hash of everything that can change pipeline output."""
@@ -234,6 +259,9 @@ class Settings:
                        ((r, self.model(r)) for r in ("asr", "vision", "text", "verify"))},
             "variants": {role: self.model(role).variant(self.profile) for role in
                          ("asr", "vision", "text", "verify")},
+            # The asr-http variant holds env names, not values: hash the
+            # resolved server too, so switching ASR servers retranscribes.
+            "asr_identity": self.asr_identity(),
             "tuning": self.tuning.fingerprint_dict(),
             "registry_version": _registry(self).get("schema_version", 0),
         }

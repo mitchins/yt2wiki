@@ -85,6 +85,10 @@ class StageContext:
     fingerprint: str
     artifacts: dict[str, Any] = field(default_factory=dict)
     _cancelled: Callable[[], bool] | None = None
+    # Job-captured inference provider identities (writer/vision/asr). When
+    # present, remote backends use these instead of the live config, so later
+    # settings changes cannot rewrite a running job's backend choice.
+    inference_snapshot: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------
     @property

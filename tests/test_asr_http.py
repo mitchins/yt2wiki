@@ -653,3 +653,62 @@ def test_probe_asr_cleanup_failure_ignored(monkeypatch, tmp_path):
     finally:
         monkeypatch.setattr(_pl.Path, "unlink", real_unlink)
     assert out["ok"] is True and out["qualified_for_asr"] is True
+
+
+def test_head_wav_slices_long_audio(tmp_path):
+    long = _wav(tmp_path / "long.wav", seconds=60.0)
+    head = __import__("yt2wiki.backends.asr_http", fromlist=["_head_wav"])._head_wav(long)
+    assert head != long and abs(__import__("yt2wiki.backends.asr_http", fromlist=["wav_duration_s"]).wav_duration_s(head) - 35.0) < 0.1
+    head.unlink()
+    head.parent.rmdir()
+
+
+def test_transcribe_timeout_scales_with_duration(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_post(base, wav, *, query, timeout, headers=None):
+        seen["timeout"] = timeout
+        return _payload()
+
+    with mock.patch.object(asr_http, "post_asr", side_effect=fake_post), \
+         mock.patch.object(asr_http, "detect_language", return_value=(None, None)):
+        b = HttpAsrBackend(_spec(), {}, "cpu", None, base_url="http://asr:9000", timeout=300.0)
+        b.load()
+        b.transcribe(_wav(tmp_path, seconds=3.0))
+        assert seen["timeout"] == 300.0
+        b.transcribe(_wav(tmp_path, seconds=900.0))
+        assert seen["timeout"] == 900.0
+
+
+def test_detect_language_cleanup_failure_ignored(tmp_path, monkeypatch):
+    from yt2wiki.backends import asr_http as _m
+    wav = _wav(tmp_path, seconds=60.0)
+
+    def fake_head(path, *, seconds=35.0):
+        p = tmp_path / "head.wav"
+        import shutil as _sh
+        _sh.copy(path, p)
+        return p
+
+    monkeypatch.setattr(_m, "_head_wav", fake_head)
+    real_unlink = __import__("pathlib").Path.unlink
+    monkeypatch.setattr(__import__("pathlib").Path, "unlink",
+                        lambda self, **k: (_ for _ in ()).throw(OSError("busy")))
+    import httpx as _h
+
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return {"language_code": "en", "confidence": 0.9}
+
+    def _client(*a, **k):
+        ctx = mock.MagicMock()
+        ctx.__enter__.return_value.post.return_value = Resp()
+        return ctx
+
+    monkeypatch.setattr(_h, "Client", _client)
+    try:
+        assert _m.detect_language("http://s", wav, timeout=5.0) == ("en", 0.9)
+    finally:
+        monkeypatch.setattr(__import__("pathlib").Path, "unlink", real_unlink)
