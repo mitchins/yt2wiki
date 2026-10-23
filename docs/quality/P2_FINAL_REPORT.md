@@ -4,8 +4,8 @@
 **Remote:** https://github.com/mitchins/yt2wiki
 **Authoritative `origin/main`:** `edb56f9df053b306e130febdf58ea69eeeb79a9b` (PR #9 squash merge)
 **Worktrees:** `main` `496aed8` (pre-GitHub, preserved), `.worktrees/p1` `6105ee5`,
-`.worktrees/p2a` `p2a/sonar-baseline` `bcc404a`, `.worktrees/p2b` `p2b/deploy` `1ddcda7`
-(rebased onto `origin/main` `facf3da`; pre-rebase backup branch `p2b-backup-fd7e7e3` kept until merge)
+`.worktrees/p2a` `p2a/sonar-baseline` `bcc404a`, `.worktrees/p2b` `p2b/deploy` `0bfc77e`
+(rebased onto `origin/main` `facf3da`; pre-rebase backup branch deleted after verified push)
 **Stashes:** `stash@{0}` `fix/sonar-initial-findings`, `stash@{1,2}` V8 dirt (preserved, not applied)
 **Data:** `~/.local/share/yt2wiki` intact, `HF_HOME=/usbpool/yt-to-wiki/.cache/huggingface` preserved,
 `UV_CACHE_DIR=/usbpool/yt-to-wiki/.cache/uv` preserved
@@ -32,16 +32,16 @@ and its now-redundant `sonar.projectVersion=0.1.0` hunk removed for a clean diff
 
 ## PR B — Safe uploads and qualified deployment (evidence below, unmerged)
 
-**PR:** https://github.com/mitchins/yt2wiki/pull/12 `p2b/deploy` `1ddcda7` → `main` (`facf3da`,
-PR #11 merged; redundant `sonar.projectVersion` hunk removed — the diff holds only P2 files)
-**Chain (rebased, 21 commits replayed cleanly):** `ea0473c` base → `f6d9db3` docs → `c0d5590`
-coverage refactor → `210646f` retrigger → `d2b3c31` ruff → genuine idempotency →
-operator console → CPU ASR → compose/secrets → deploy docs → gate fixes (S8707, complexity,
-S108/S5713) → containment → S7761 → report → CodeRabbit batch (sqlite3, backup, 8-image) →
-S9073 split → report → **Phase 2:** role-aware CLI exits, validate shapes, EXDEV docs,
-errno parametrize, no-`0.0.0.0` proxy, stop-first backup procedure.
-**CI:** `39893077481` `2m26s` `success` on rebased head `1ddcda7` (force-with-lease after clean
-rebase; earlier `39887119549` success on `071dc31`, `39884390012` success on `7316ec8`,
+**PR:** https://github.com/mitchins/yt2wiki/pull/12 `p2b/deploy` `0bfc77e` → `main`
+(`facf3da`; redundant `sonar.projectVersion` hunk removed — the diff holds only P2 files)
+**Chain (rebased, replayed cleanly onto `facf3da`):** `ea0473c` base → docs/coverage/refactor/
+idempotency/operator-console/CPU-ASR/compose/secrets → deploy docs → gate fixes (S8707,
+complexity, S108/S5713) → containment → S7761 → report → CodeRabbit batch (sqlite3, backup,
+8-image) → S9073 split → report → **Phase 2:** role-aware CLI exits, validate shapes,
+EXDEV docs, errno parametrize, no-`0.0.0.0` proxy, stop-first backup procedure →
+**closure:** restart semantics, payload staging docs, full backup set, persistence files.
+**CI:** `39901180146` `2m37s` `success` on head `0bfc77e` (closure; earlier `39893077481`
+success on `1ddcda7`, `39887119549` on `071dc31`, `39884390012` on `7316ec8`,
 `39882861645` failed only on the then-open S8707; apt-mirror stalls cancelled + retriggered).
 **Sonar PR 12:** `projectStatus OK` — all six conditions green, `new_coverage 95.2%` (≥80,
 verified `new_lines_to_cover 217`), `new_duplicated_lines_density 0.0`. **Zero open issues.**
@@ -203,7 +203,7 @@ No merges performed. Blockers for #3 (Gemma) / #4 (Halogen) remain separate foll
 
 ## Evidence index
 
-- PRs: #11 merged as `facf3da`; #12 `1ddcda7` (CI `39893077481` success,
+- PRs: #11 merged as `facf3da`; #12 `0bfc77e` (CI `39901180146` success,
   Sonar `projectStatus OK`, `new_coverage 95.2%` on verified `new_lines_to_cover 217`,
   zero open issues)
 - Code: `services/__init__.py` upload block (no pragmas, EXDEV-only documented),
