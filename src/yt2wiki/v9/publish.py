@@ -10,6 +10,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from ..article import format_ts, timestamp_url
+
 log = logging.getLogger("yt2wiki.v9.publish")
 
 
@@ -73,7 +75,6 @@ def _section_source_ref(t_start: float, t_end: float, url: str | None,
     reference covering the section's time window, formatted as m:ss.
     For YouTube it deep-links; for local uploads it is plain metadata.
     """
-    from ..article import format_ts, timestamp_url
     start = format_ts(t_start)
     end = format_ts(t_end)
     prov = {"t_start": t_start, "t_end": t_end, "duration": duration,
@@ -148,8 +149,6 @@ def assemble_markdown(article_title: str, summary: str, sections: list[dict[str,
     optional expandable detailed view in the reader), and only YouTube
     references are clickable. Local uploads get non-clickable metadata.
     """
-    from ..article import format_ts, timestamp_url
-
     lines = [f"# {article_title}", ""]
     quote = []
     if provenance.get("attribution_line"):
@@ -300,12 +299,17 @@ def normalize_timestamps(md: str, url: str | None, duration_s: float | None = No
         if target is not None and (target.startswith("assets/")
                                    or target.strip().lower() in ("none", "null", "")):
             target = None
+        # Targets truncate (int) while labels round (fmt): a [203.7] citation
+        # displays [3:24] and links t=203. Preserve that exact contract.
+        tgt = int(secs)
         if url and ("youtu" in url):
-            sep = "&" if "?" in url else "?"
-            return f"[{fmt(secs)}]({url}{sep}t={int(secs)})"
+            link = timestamp_url(url, tgt)
+            assert link is not None
+            return f"[{fmt(secs)}]({link})"
         if target and ("youtu" in target):
-            sep = "&" if "?" in target else "?"
-            return f"[{fmt(secs)}]({target}{sep}t={int(secs)})"
+            link = timestamp_url(target, tgt)
+            assert link is not None
+            return f"[{fmt(secs)}]({link})"
         return fmt(secs)
 
     def fix_label(label: str, target: str | None) -> str:
@@ -319,8 +323,9 @@ def normalize_timestamps(md: str, url: str | None, duration_s: float | None = No
                 if hi < lo:
                     lo, hi = hi, lo  # descending ranges are authoring slips, not time travel
                 if target is not None and url and ("youtu" in url):
-                    sep = "&" if "?" in url else "?"
-                    return f"[{fmt(lo)}-{fmt(hi)}]({url}{sep}t={int(lo)})"
+                    link = timestamp_url(url, int(lo))
+                    assert link is not None
+                    return f"[{fmt(lo)}-{fmt(hi)}]({link})"
                 return f"[{fmt(lo)}-{fmt(hi)}]"
             return label
         secs = _choose(_citation_candidates(label), hint_s, duration_s)

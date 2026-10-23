@@ -205,6 +205,26 @@ docker cp /tmp/inference-payload.json yt2wiki:/data/config/inference-payload.jso
 docker exec yt2wiki yt2wiki inference save --file /data/config/inference-payload.json
 ```
 
+Transcription uses a separate provider entry pointing at the Whisper
+service (no `/v1` suffix — the adapter drives its `/asr` contract) and the
+`asr` role. Do not reuse the LLM `/v1` example for ASR:
+
+```bash
+cat > /tmp/inference-asr-payload.json <<'EOF'
+{"providers": [{"name": "whisper-svc", "url": "http://asr:9000",
+               "model": "large-v3", "api_key_env": ""}],
+ "roles": {"asr": "whisper-svc"}}
+EOF
+docker cp /tmp/inference-asr-payload.json yt2wiki:/data/config/inference-asr-payload.json
+docker exec yt2wiki yt2wiki inference save --file /data/config/inference-asr-payload.json
+docker exec yt2wiki yt2wiki inference test --name whisper-svc
+```
+
+`test` reports `qualified_for_asr` only when the server speaks the
+transcription protocol; per-transcription validation still hard-fails a
+text-only server when words are required. `model` is the operator-declared
+server-side model (recorded for provenance — `/asr` echoes no model id).
+
 - `save` accepts the same `{providers, roles}` JSON schema as the web API and
   validates it before writing (`YT2WIKI_…` names only, `http(s)://` URLs;
   malformed shapes fail with a controlled error, never a traceback).

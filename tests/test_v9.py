@@ -350,9 +350,13 @@ def test_write_article_uses_cite_rule(tmp_path):
     db = Database(tmp_path / "db.sqlite3")
     db.migrate()
     sid = "yt-cite001"
-    db.execute("INSERT INTO sources(source_id, kind, origin_url, title, uploader, duration_s, created_at)"
-               " VALUES(?,?,?,?,?,?,?)",
-               (sid, "youtube", None, "T", "u", 60.0, _time.time()))
+    import json as _json
+    db.execute("INSERT INTO sources(source_id, kind, origin_url, title, uploader, duration_s, meta_json, created_at)"
+               " VALUES(?,?,?,?,?,?,?,?)",
+               (sid, "youtube", None, "T", "u", 600.0,
+                _json.dumps({"chapters": [{"start_time": 0, "end_time": 30.0, "title": "Setup"},
+                                           {"start_time": 30.0, "end_time": 600.0, "title": "Later"}]}),
+                _time.time()))
     db.execute("INSERT INTO transcript_segments VALUES(?,?,?,?,?,?,?,?,?)",
                (sid, 0, 0.0, 5.0, "do the thing now", 0.0, 0.0, 0.0, "captions"))
 
@@ -667,3 +671,32 @@ def test_run_source_threads_snapshot_to_transcribe(tmp_path, monkeypatch):
     # No snapshot and no live config: the live-snapshot fallback runs.
     out2 = v9run.run_source(settings, db, svc, sid, enable_captions=False)
     assert out2["article_id"].startswith("art9-")
+
+
+def test_timestamp_url_replaces_existing_t_param():
+    from yt2wiki.article import timestamp_url, timestamp_url_pattern
+    assert timestamp_url("https://youtu.be/abc?t=1", 159) == "https://youtu.be/abc?t=159"
+    assert timestamp_url("https://www.youtube.com/watch?v=abc&t=1", 159) == \
+        "https://www.youtube.com/watch?v=abc&t=159"
+    assert timestamp_url("https://www.youtube.com/watch?v=abc&list=x&t=99", 5) == \
+        "https://www.youtube.com/watch?v=abc&list=x&t=5"
+    assert timestamp_url("https://youtu.be/abc", 159) == "https://youtu.be/abc?t=159"
+    assert timestamp_url("https://example.com/v.mp4", 159) == "https://example.com/v.mp4"
+    assert timestamp_url(None, 159) is None and timestamp_url("https://youtu.be/abc", None) is None
+    assert timestamp_url_pattern("https://youtu.be/abc?t=1") == "https://youtu.be/abc?t=SECONDS"
+    assert timestamp_url_pattern("https://youtu.be/abc?t=1").count("t=") == 1
+
+
+def test_cite_rule_never_duplicates_t_param():
+    from yt2wiki.v9.writer import cite_rule
+    rule = cite_rule("https://www.youtube.com/watch?v=abc&t=1")
+    assert rule.count("t=") == 2  # one pattern, one example — never t=1&t=159
+    assert "?t=SECONDS" in cite_rule("https://youtu.be/abc")
+    assert "&t=SECONDS" in cite_rule("https://www.youtube.com/watch?v=abc")
+
+
+def test_normalize_replaces_existing_t_param():
+    from yt2wiki.v9.publish import normalize_timestamps
+    md = normalize_timestamps("See [2:39](https://youtu.be/abc?t=1).",
+                              "https://youtu.be/abc?t=1", duration_s=524.0)
+    assert md.count("t=") == 1 and "t=159" in md

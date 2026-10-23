@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
+from ..article import timestamp_url, timestamp_url_pattern
+
 log = logging.getLogger("yt2wiki.v9.writer")
 
 TITLE_PROMPT = """You write concise technical documentation from a tutorial transcript.
@@ -118,13 +120,16 @@ def cite_rule(url: str | None) -> str:
 
     The old template said "[m:ss](url)" without ever substituting it, so the
     model hallucinated video URLs for YouTube sources and wrote bare "m:ss"
-    for uploads (which have no origin URL). Uploads cite plain [m:ss].
+    for uploads (which have no origin URL). Link form shares
+    :func:`timestamp_url_pattern` with the pipeline, so the cited pattern can
+    never drift from the links `normalize_timestamps` emits — including
+    replacing a pre-existing `t` param instead of duplicating it.
     """
-    if url:
-        # Plain query joining: youtu.be/ID style URLs carry no query yet.
-        sep = "&" if "?" in url else "?"
-        return (f"cite timestamps ONLY as [m:ss]({url}{sep}t=SECONDS), e.g. "
-                f"[2:39]({url}{sep}t=159). Never write bare seconds like [159] or "
+    if url and "youtu" in url:
+        example = timestamp_url(url, 159)
+        assert example is not None
+        return (f"cite timestamps ONLY as [m:ss]({timestamp_url_pattern(url)}), e.g. "
+                f"[2:39]({example}). Never write bare seconds like [159] or "
                 "[159:0], never invent any other URL")
     return ("cite timestamps ONLY as plain [m:ss] with no link, e.g. "
             "[0:04] (this upload has no source URL). Never write seconds "

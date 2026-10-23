@@ -792,9 +792,12 @@ def test_stage_fingerprint_includes_asr_identity(tmp_path, monkeypatch):
                        paths=settings.paths, fingerprint="x")
     monkeypatch.setenv("YT2WIKI_ASR_URL", "http://one:9000")
     fp1 = ctx.stage_fingerprint("transcribe")
+    compose1 = ctx.stage_fingerprint("compose")
     monkeypatch.setenv("YT2WIKI_ASR_URL", "http://two:9000")
+    # The transcribe fingerprint must move with the server (or a stale
+    # transcript is reused); unrelated stages must stay put.
     assert ctx.stage_fingerprint("transcribe") != fp1
-    assert "asr_identity" not in ctx.stage_fingerprint("compose") or True
+    assert ctx.stage_fingerprint("compose") == compose1
 
 
 def test_detect_language_cleans_temp_head(tmp_path, monkeypatch):
@@ -814,7 +817,18 @@ def test_detect_language_cleans_temp_head(tmp_path, monkeypatch):
         return ctx
 
     monkeypatch.setattr(_h, "Client", _client)
+    import tempfile as _tf
+    real_mkdtemp = _tf.mkdtemp
+    made = []
+
+    def _recording_mkdtemp(*a, **k):
+        k.setdefault("prefix", "yt2wiki-asr-head-")
+        d = real_mkdtemp(dir=str(tmp_path), *a, **k)
+        made.append(d)
+        return d
+
+    monkeypatch.setattr(_tf, "mkdtemp", _recording_mkdtemp)
     assert _m.detect_language("http://s", wav, timeout=5.0) == ("en", 0.9)
-    leftovers = [p for p in tmp_path.iterdir()] + [
-        q for d in tmp_path.iterdir() if d.is_dir() for q in d.iterdir()]
-    assert all("head" not in str(p) for p in leftovers)
+    # The head must be created inside the sandbox and removed afterwards:
+    # no WAV fragments may leak into the real system temp dir.
+    assert made and all(not __import__("pathlib").Path(d).exists() for d in made)

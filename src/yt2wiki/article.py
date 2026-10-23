@@ -23,13 +23,42 @@ def format_ts(seconds: float | None) -> str:
     return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
 
 
+def _without_t_param(url: str) -> str:
+    """Strip existing `t` query params so timestamp links never duplicate."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "t"]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment))
+
+
+def _timestamp_url_with(base_url: str | None, seconds: str) -> str | None:
+    if not base_url:
+        return None
+    if "youtu" in base_url:
+        from urllib.parse import urlsplit
+
+        stripped = _without_t_param(base_url)
+        sep = "&" if urlsplit(stripped).query else "?"
+        return f"{stripped}{sep}t={seconds}"
+    return base_url
+
+
 def timestamp_url(base_url: str | None, seconds: float | None) -> str | None:
     if not base_url or seconds is None:
         return None
-    if "youtu" in base_url:
-        sep = "&" if "?" in base_url else "?"
-        return f"{base_url}{sep}t={int(max(0, round(float(seconds))))}"
-    return base_url
+    return _timestamp_url_with(base_url, str(int(max(0, round(float(seconds))))))
+
+
+def timestamp_url_pattern(url: str) -> str:
+    """Prompt-text form of :func:`timestamp_url` with a SECONDS placeholder.
+
+    Shares the same stripping/joining logic, so the cited pattern can never
+    drift from the links the pipeline actually emits.
+    """
+    out = _timestamp_url_with(url, "SECONDS")
+    assert out is not None and "t=SECONDS" in out
+    return out
 
 
 @dataclass
