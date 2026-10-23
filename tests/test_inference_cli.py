@@ -474,11 +474,12 @@ def test_cli_test_exit_asr_unqualified(tmp_path, capsys, monkeypatch):
 
 
 def test_cli_test_exit_asr_protocol_ok_but_unassigned_ok(tmp_path, capsys, monkeypatch):
-    # Provider speaks /asr but is not assigned the asr role: reachable, exit 0.
+    # Provider speaks /asr but is not assigned any role: reachable, exit 0.
     data = tmp_path / "exit-asr-ok"
-    _save_provider(data, "mock", {"writer": "mock"}, capsys)
+    _save_provider(data, "mock", {}, capsys)
     _patch_mock_provider(monkeypatch, _mock_handler(models="unreachable", asr="ok"))
     rc, result = _run_test(data, capsys, "mock")
+    assert rc == 0
     assert result["ok"] is True and result["qualified_for_asr"] is True
 
 

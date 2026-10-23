@@ -88,10 +88,14 @@ class AsrHttpError(RuntimeError):
 # ----------------------------------------------------------------------
 # wire protocol
 def build_query(*, language: str, word_timestamps: bool, vad_filter: bool) -> str:
-    lang = (language or "en").strip() or "en"
+    from urllib.parse import quote
+
+    lang = (language or "").strip()
+    if not lang:
+        raise AsrHttpError("no language for the ASR request: refusing to silently fall back to 'en'")
     return (
         "output=json&task=transcribe"
-        f"&language={lang}"
+        f"&language={quote(lang, safe='')}"
         f"&word_timestamps={'true' if word_timestamps else 'false'}"
         f"&vad_filter={'true' if vad_filter else 'false'}"
     )

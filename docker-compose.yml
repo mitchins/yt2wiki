@@ -72,9 +72,11 @@ services:
     environment:
       - ASR_MODEL=large-v3        # server-side model (declare the same in YT2WIKI_ASR_MODEL)
       - ASR_ENGINE=faster_whisper
-      - ASR_DEVICE=cuda           # set to cpu on machines without NVIDIA
+      - ASR_DEVICE=cuda           # GPU build below; for CPU hosts use the -cpu
+        # image tag AND delete the deploy.reservations block (a GPU
+        # reservation prevents startup where no NVIDIA device exists).
     # GPU selection: `count: 1` takes the first visible card. On multi-GPU
-    # hosts pin the card explicitly instead, e.g. `device_ids: ['2']`
+    # hosts pin the card explicitly, e.g. `device_ids: ['2']`
     # (a bare 8 GB card OOMs on large-v3; the qualification machine needed
     # device 2, a 12 GB card, for the pinned weights).
     deploy:

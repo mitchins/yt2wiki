@@ -65,8 +65,9 @@ def _no_models(*a, **k):
 def test_build_query_drives_server_options():
     q = build_query(language="en", word_timestamps=True, vad_filter=True)
     assert "output=json" in q and "word_timestamps=true" in q and "vad_filter=true" in q
-    q2 = build_query(language="", word_timestamps=False, vad_filter=False)
-    assert "language=en" in q2 and "word_timestamps=false" in q2
+    assert "language=en" in build_query(language="en", word_timestamps=False, vad_filter=False)
+    with pytest.raises(AsrHttpError, match="no language"):
+        build_query(language="  ", word_timestamps=False, vad_filter=False)
 
 
 def test_sine_wav_is_valid_mono_16k(tmp_path):
@@ -712,3 +713,61 @@ def test_detect_language_cleanup_failure_ignored(tmp_path, monkeypatch):
         assert _m.detect_language("http://s", wav, timeout=5.0) == ("en", 0.9)
     finally:
         monkeypatch.setattr(__import__("pathlib").Path, "unlink", real_unlink)
+
+
+def test_llm_path_also_qualifies_dual_asr(monkeypatch):
+    from yt2wiki.web import inference as inf
+
+    class Models:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "m"}]}
+
+    class Shape:
+        status_code = 200
+
+        def json(self):
+            return {"language": "en", "text": "hi", "segments": []}
+
+
+    def _post(*a, **k):
+        # probe uploads a real sine wav; accept and report the shape
+        return Shape()
+
+    monkeypatch.setattr("httpx.get", lambda *a, **k: Models())
+    monkeypatch.setattr("httpx.post", _post)
+    out = inf.test_endpoint("http://dual:9000", timeout=5.0)
+    assert out["ok"] is True and out.get("kind") == "llm"
+    assert out.get("qualified_for_asr") is True
+
+
+def test_qualify_vision_list_content_and_retry_error(monkeypatch):
+    import httpx as _h
+
+    from yt2wiki.web import inference as inf
+
+    def _msg(content):
+        return {"choices": [{"message": {
+            "content": content, "reasoning_content": ""}}]}
+
+    def _list_resp(*a, **k):
+        return _h.Response(200, json=_msg(
+            [{"type": "text", "text": '{"broken": '}]))
+
+    def _flaky(*a, **k):
+        if not hasattr(_flaky, "n"):
+            _flaky.n = 0
+        _flaky.n += 1
+        if _flaky.n == 1:
+            raise _h.ConnectError("blip")
+        return _h.Response(200, json=_msg(
+            '{"scores": [{"idx": 1, "relevance": 2, "clarity": 2, '
+            '"instructional": 2, "payoff": 2, "weakness": "ok", '
+            '"veto": false, "context_ok": false}], '
+            '"decision": "KEEP", "winner": 1, "explanation": "fine"}'))
+
+    monkeypatch.setattr(_h, "post", _list_resp)
+    assert inf._qualify_vision("http://x", {}, "m", 5.0) is False
+    monkeypatch.setattr(_h, "post", _flaky)
+    assert inf._qualify_vision("http://x", {}, "m", 5.0) is True

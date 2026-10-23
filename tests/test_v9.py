@@ -500,3 +500,170 @@ def test_assemble_markdown_non_youtube_url_has_no_link_claim():
     assert "Source video" in md
     assert "no source URL" in md
     assert "link each section" not in md
+
+
+def test_recorded_asr_identity_modes(tmp_path):
+    import json as _json
+    import time as _time
+
+    from yt2wiki.config import Settings
+    from yt2wiki.db.schema import Database
+    from yt2wiki.v9 import run as v9run
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    db = Database(tmp_path / "db.sqlite3")
+    db.migrate()
+    sid = "yt-ident001"
+    db.execute("INSERT INTO sources(source_id, kind, origin_url, title, uploader, duration_s, created_at)"
+               " VALUES(?,?,?,?,?,?,?)",
+               (sid, "youtube", "https://youtu.be/x", "T", "u", 10.0, _time.time()))
+    assert v9run._recorded_asr_identity(db, "missing") is None
+    db.execute("INSERT INTO jobs(job_id, source_id, profile, fingerprint, state, config_json, created_at, updated_at)"
+               " VALUES(?,?,?,?,?,?,?,?)",
+               ("j1", sid, "compact", "x", "done", "{}", _time.time(), _time.time()))
+    db.execute("INSERT INTO stages(job_id, stage, state, started_at, finished_at, duration_s, metrics_json, error)"
+               " VALUES(?,?,?,?,?,?,?,?)",
+               ("j1", "transcribe", "done", _time.time(), _time.time(), 1.0, "not-json", None))
+    assert v9run._recorded_asr_identity(db, sid) is None
+    db.execute("INSERT INTO jobs(job_id, source_id, profile, fingerprint, state, config_json, created_at, updated_at)"
+               " VALUES(?,?,?,?,?,?,?,?)",
+               ("j2", sid, "compact", "x", "done", "{}", _time.time(), _time.time()))
+    assert v9run._live_snapshot(settings) is None or isinstance(v9run._live_snapshot(settings), dict)
+    from unittest import mock as _mock
+    with _mock.patch("yt2wiki.web.inference.load", side_effect=RuntimeError("down")):
+        assert v9run._live_snapshot(settings) is None
+    # captions mode reuses without an identity
+    db.execute("INSERT INTO stages(job_id, stage, state, started_at, finished_at, duration_s, metrics_json, error)"
+               " VALUES(?,?,?,?,?,?,?,?)",
+               ("j2", "transcribe", "done", _time.time() + 1, _time.time() + 1, 1.0,
+                _json.dumps({"mode": "captions"}), None))
+    assert v9run._recorded_asr_identity(db, sid) == {"mode": "captions"}
+
+
+def test_effective_asr_identity_snapshot_without_url(tmp_path, monkeypatch):
+    from yt2wiki.config import Settings
+    from yt2wiki.v9 import run as v9run
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    monkeypatch.setenv("YT2WIKI_ASR_URL", "http://env:9000")
+    monkeypatch.setenv("YT2WIKI_ASR_MODEL", "large-v3")
+    assert v9run._effective_asr_identity(settings, {"asr": {"provider": "x"}}) == {
+        "url": "http://env:9000", "model": "large-v3"}
+
+
+def test_recorded_asr_identity_db_error_returns_none():
+    from yt2wiki.v9 import run as v9run
+
+    class Broken:
+        def query(self, *a, **k):
+            raise RuntimeError("db gone")
+
+    assert v9run._recorded_asr_identity(Broken(), "s") is None
+
+
+def test_asr_identity_survives_inference_load_failure(tmp_path, monkeypatch):
+    from unittest import mock as _mock
+
+    from yt2wiki.config import Settings
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    monkeypatch.setenv("YT2WIKI_ASR_URL", "http://env:9000")
+    with _mock.patch("yt2wiki.web.inference.load", side_effect=RuntimeError("down")):
+        assert settings.asr_identity()["url"] == "http://env:9000"
+
+
+def test_run_source_threads_snapshot_to_transcribe(tmp_path, monkeypatch):
+    """The job snapshot must reach base transcription, not just V9 stages."""
+    import time as _time
+
+    from yt2wiki.config import Settings
+    from yt2wiki.db.schema import Database
+    from yt2wiki.services import Service
+    from yt2wiki.v9 import run as v9run
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    db = Database(tmp_path / "db.sqlite3")
+    db.migrate()
+    svc = Service(settings, db)
+    sid = "yt-snap-e2e"
+    db.execute("INSERT INTO sources(source_id, kind, origin_url, title, uploader, duration_s, created_at)"
+               " VALUES(?,?,?,?,?,?,?)",
+               (sid, "youtube", "https://youtu.be/x", "T", "u", 60.0, _time.time()))
+    snap = {"writer": {"provider": "h", "url": "http://h:8000/v1", "model": "m",
+                       "api_key_env": "", "reachable": True,
+                       "qualified_for_writer": True, "qualified_for_vision": False},
+            "asr": {"provider": "a", "url": "http://snap-asr:9000", "model": "large-v3",
+                    "api_key_env": "", "reachable": True, "qualified_for_asr": True}}
+    seen = {}
+    from .fixtures import make_test_video
+    make_test_video(settings.paths.source_video(sid), seconds=2.0)
+    real_ensure = v9run._ensure_base
+
+    def fake_ensure(settings_, db_, service_, source_id_, job_id=None, inference_snapshot=None):
+        seen["ensure_snapshot"] = inference_snapshot
+        return real_ensure(settings_, db_, service_, source_id_, job_id=job_id,
+                           inference_snapshot=inference_snapshot)
+
+    monkeypatch.setattr(v9run, "_ensure_base", fake_ensure)
+    monkeypatch.setattr("yt2wiki.v9.writer.write_article", lambda *a, **k: {
+        "title": "T", "summary": "S", "kind": "explainer",
+        "sections": [{"section_id": "sec-01-x", "heading": "X", "body": "B",
+                      "t_start": 0.0, "t_end": 60.0, "key_points": [], "warnings": []}],
+        "coverage": {"admitted_windows": [], "represented_windows": [],
+                     "n_sections": 1, "transcript_chars": 10}, "elapsed_s": 0.1})
+    monkeypatch.setattr("yt2wiki.v9.frames.discover", lambda *a, **k: {
+        "frames": [{"frame_id": "f-1", "t": 1.0, "path": "/tmp/f-1.jpg", "kind": "scene"}],
+        "coverage": {}})
+    def _fake_adjudicate(vb, sec, *a, **k):
+        return [], {"section_id": sec["section_id"], "decision": "OMIT",
+                    "judge_reason": "", "rank_reason": "", "chosen": [],
+                    "candidates": [], "vlm_calls": 0, "frames_inspected": 0,
+                    "elapsed_s": 0.0}
+
+    monkeypatch.setattr(v9run, "adjudicate_section_with_judge", _fake_adjudicate)
+    monkeypatch.setattr("yt2wiki.v9.publish.assemble_markdown",
+                        lambda *a, **k: ("# T\n", []))
+    monkeypatch.setattr("yt2wiki.v9.publish.persist", lambda *a, **k: {"ok": True})
+
+    class FakeBackend:
+        spec = type("S", (), {"key": "remote-h"})()
+        report = type("R", (), {"variant": {}})()
+        server = "http://snap-asr:9000 (model large-v3)"
+        last_unsupported = []
+        last_warnings = []
+
+        def __enter__(self): return self
+
+        def __exit__(self, *a): return False
+
+        def transcribe(self, *a, **k):
+            from yt2wiki.backends.asr import Transcript
+            return Transcript(language="en", language_probability=None,
+                              duration_s=1.0, segments=[])
+
+    class FakeManager:
+        def __init__(self, settings_, recorder=None, inference_snapshot=None):
+            seen.setdefault("snapshots", []).append(inference_snapshot)
+
+        def acquire(self, role):
+            from contextlib import contextmanager
+
+            @contextmanager
+            def _ctx():
+                yield FakeBackend()
+
+            return _ctx()
+
+    # NB: transcribe.py binds ModelManager at its own module level, while
+    # run_source imports it from the loader inside the function: patch both.
+    monkeypatch.setattr("yt2wiki.pipeline.stages.transcribe.ModelManager", FakeManager)
+    monkeypatch.setattr("yt2wiki.backends.loader.ModelManager", FakeManager)
+    out = v9run.run_source(settings, db, svc, sid, inference_snapshot=snap,
+                           enable_captions=False)
+    assert out["article_id"].startswith("art9-")
+    assert seen["ensure_snapshot"] == snap
+    assert any(s and s.get("asr", {}).get("url") == "http://snap-asr:9000"
+               for s in seen["snapshots"])
+    # No snapshot and no live config: the live-snapshot fallback runs.
+    out2 = v9run.run_source(settings, db, svc, sid, enable_captions=False)
+    assert out2["article_id"].startswith("art9-")

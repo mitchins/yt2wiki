@@ -198,7 +198,18 @@ def test_endpoint(url: str, api_key_env: str = "", *, timeout: float = 6.0,
         return _probe_asr(url, headers, model, timeout)
     base = {"ok": True, "kind": "llm", "models": models[:20], "latency_ms": latency,
             "checked_at": time.time(), "url": url,
-            "qualified_for_writer": False, "qualified_for_vision": False}
+            "qualified_for_writer": False, "qualified_for_vision": False,
+            "qualified_for_asr": False}
+    # A server may speak both contracts (e.g. OpenAI serves /models and
+    # /audio). Probe /asr too so a dual provider can qualify for
+    # transcription; a negative never clobbers the LLM result.
+    try:
+        asr_extra = _probe_asr(url, headers, model, min(timeout, 15.0))
+        if asr_extra.get("qualified_for_asr"):
+            base["qualified_for_asr"] = True
+            base["asr_note"] = asr_extra.get("note", "")
+    except Exception:  # noqa: BLE001 - LLM qualification stands on its own
+        pass
     # --- writer qualification: real JSON generation ---
     try:
         writer_ok = _qualify_writer(url, headers, model or (models[0] if models else ""), timeout)

@@ -347,3 +347,17 @@ def test_build_local_asr_engine(tmp_path):
                              model_overrides={"asr": "whisper-large-v3"})
     backend = ModelManager(settings).build("asr", settings.model("asr"))
     assert type(backend).__name__ == "WhisperBackend"
+
+
+def test_acquire_asr_http_failure_recorded_and_loud(tmp_path, monkeypatch):
+    from yt2wiki.backends.loader import ModelManager
+    from yt2wiki.config import Settings
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    monkeypatch.delenv("YT2WIKI_ASR_URL", raising=False)
+    seen = []
+    mgr = ModelManager(settings, recorder=seen.append)
+    with pytest.raises(RuntimeError, match="no ASR server configured"):
+        with mgr.acquire("asr"):
+            pass
+    assert any(r.get("model_key") == "asr-http" and r.get("ok") == 0 for r in seen)

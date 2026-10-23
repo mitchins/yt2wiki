@@ -260,8 +260,13 @@ every profile).
   image, persistent `asr-models` cache, no published ports — reachable only
   as `http://asr:9000`): `docker compose --profile asr up -d`. The service
   points at it via `YT2WIKI_ASR_URL=http://asr:9000`, or assign the
-  transcription role to a provider in Settings → Inference (tested with
-  `yt2wiki inference test --name <asr-provider>` → `qualified_for_asr`).
+  transcription role to a provider and test it. In Docker, browser sessions
+  cannot reach the operator console, so configure via the console instead —
+  from the host against the loopback UI, or headless:
+  `docker exec yt2wiki yt2wiki inference save --file /data/config/<payload>.json`
+  then `docker exec yt2wiki yt2wiki inference test --name <asr-provider>`
+  (`qualified_for_asr`). `test_endpoint` auto-detects transcription servers
+  (no `/models` → `/asr` probe); LLM-only servers stay unqualified for `asr`.
   On multi-GPU hosts pin the card (`device_ids`, not `count: 1`): large-v3
   OOMs on a bare 8 GB card.
 - Local faster-whisper remains for explicit use (`--model whisper-large-v3`

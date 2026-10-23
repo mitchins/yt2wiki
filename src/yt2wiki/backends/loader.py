@@ -260,8 +260,18 @@ class ModelManager:
         if chain and chain[0].engine == "asr-http":
             # HTTP transcription: no local load, no GPU headroom, no OOM
             # fallback (a failing server is a loud job error, not a retry).
-            backend = self.build(role, chain[0])
-            report = backend.load()
+            # Failures are recorded like local load failures, then re-raised.
+            try:
+                backend = self.build(role, chain[0])
+                report = backend.load()
+            except Exception as exc:  # noqa: BLE001 - record, then fail loud
+                self._record(
+                    role=role, model_key=chain[0].key, repo=chain[0].repo,
+                    revision=chain[0].revision, engine=chain[0].engine,
+                    ok=False, device="http", device_index=None,
+                    error=str(exc)[:600], fallback_of="",
+                )
+                raise
             self._record(
                 role=role, model_key=chain[0].key, repo=chain[0].repo,
                 revision=chain[0].revision, engine=chain[0].engine,
