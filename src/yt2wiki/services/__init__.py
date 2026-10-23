@@ -44,47 +44,143 @@ class Service:
             pass
         return sid
 
-    def _insert_upload_row(self, sid: str, stored: Path, name: str) -> None:
-        try:  # noqa: SIM105
-            self.db.execute(
-                """INSERT INTO sources(source_id, kind, upload_path, created_at, title, meta_json)
-                   VALUES(?,?,?,?,?,?)""",
-                (sid, "upload", str(stored), time.time(), name, json_dumps({})),
-            )
-        except sqlite3.IntegrityError:
-            pass
+    def _read_upload_row(self, sid: str) -> sqlite3.Row | None:
+        return self.db.query_one(
+            "SELECT source_id, upload_path, title FROM sources WHERE source_id=?", (sid,)
+        )
 
     def _is_valid_upload(self, path: Path, expected_hash: str) -> bool:
+        """A recorded path is authoritative only if the file exists and matches the hash."""
         try:
-            return path.is_file() and file_hash(path) == expected_hash
-        except OSError:  # pragma: no cover
-            return False  # pragma: no cover
+            candidate = Path(path)
+            return candidate.is_file() and file_hash(candidate) == expected_hash
+        except OSError:
+            return False
 
-    def _publish_tmp(self, tmp: Path, stored: Path) -> None:
-        if stored.exists():  # pragma: no cover
-            return  # pragma: no cover
+    def _canonical_for(self, sid: str, expected_hash: str) -> Path | None:
+        """Validated canonical path from the winning row, or None when repair is needed."""
+        row = self._read_upload_row(sid)
+        if row is None or not row["upload_path"]:
+            return None
+        candidate = Path(row["upload_path"])
+        if self._is_valid_upload(candidate, expected_hash):
+            return candidate
+        return None
+
+    def _retire_loser(self, path: Path, canonical: Path | None) -> None:
+        """Remove a staged file that is not the canonical media.
+
+        Only removes files no registered source references. Never touches the
+        canonical file or media owned by another registered source. A canonical
+        of None means registration failed: drop the staged file when it is
+        unreferenced so failures leave no orphans.
+        """
+        candidate = Path(path)
+        if canonical is not None and candidate == canonical:
+            return
+        if not candidate.exists():
+            return
+        ref = self.db.query_one(
+            "SELECT source_id FROM sources WHERE upload_path=?", (str(candidate),)
+        )
+        if ref is not None:
+            return
+        candidate.unlink(missing_ok=True)
+
+    def _exclusive_copy(self, tmp: Path, stored: Path) -> None:
+        """Cross-filesystem publish fallback that never replaces an existing file."""
+        try:
+            fd = os.open(stored, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return  # concurrent publication won; the caller validates the winner
+        try:
+            with os.fdopen(fd, "wb") as out, open(tmp, "rb") as src:
+                shutil.copyfileobj(src, out, 1 << 20)
+        except BaseException:
+            stored.unlink(missing_ok=True)
+            raise
+
+    def _publish_new(self, tmp: Path, stored: Path, sid: str, expected_hash: str) -> None:
+        """Publish staged bytes as `stored` without replacing valid existing media.
+
+        Uses an atomic hard link (never a replacing rename). A blocking file is
+        cleared only when no registered source claims it; otherwise the attempt
+        fails explicitly instead of deleting another source's media.
+        """
+        if self._is_valid_upload(stored, expected_hash):
+            return
+        if stored.exists():
+            owner = self.db.query_one(
+                "SELECT source_id FROM sources WHERE upload_path=?", (str(stored),)
+            )
+            if owner is not None and owner["source_id"] != sid:
+                raise OSError(f"upload destination {stored} is owned by {owner['source_id']}")
+            stored.unlink(missing_ok=True)
         try:
             os.link(tmp, stored)
-            return
-        except FileExistsError:  # pragma: no cover
-            return  # pragma: no cover
-        except OSError as exc:  # pragma: no cover
-            if exc.errno == errno.EEXIST:  # pragma: no cover
-                return  # pragma: no cover
-            if stored.exists():  # pragma: no cover
-                return  # pragma: no cover
-        if not stored.exists():
-            try:
-                tmp.rename(stored)
-            except FileExistsError:  # pragma: no cover
-                pass  # pragma: no cover
-            except OSError:  # pragma: no cover
-                if not stored.exists():  # pragma: no cover
-                    raise  # pragma: no cover
-        if not stored.exists():  # pragma: no cover
-            raise OSError(f"failed to publish upload {stored}")  # pragma: no cover
+        except FileExistsError:
+            pass  # concurrent publication won; validate the winner below
+        except OSError as exc:
+            if exc.errno == errno.EXDEV:
+                self._exclusive_copy(tmp, stored)
+            else:
+                raise
+        if not self._is_valid_upload(stored, expected_hash):
+            raise OSError(f"failed to publish upload {stored}")
+
+    def _register_upload(self, sid: str, staged: Path, name: str, expected_hash: str) -> Path:
+        """Insert the upload row; on conflict reconcile against the winning row.
+
+        Returns the validated canonical path. Raises instead of returning a
+        broken reference, and re-raises integrity errors that are not our own
+        primary-key conflict.
+        """
+        meta = json_dumps({"original_filename": name})
+        try:
+            self.db.execute(
+                """INSERT INTO sources(source_id, kind, upload_path, created_at, title,
+                                      meta_json, content_hash)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (sid, "upload", str(staged), time.time(), name, meta, expected_hash),
+            )
+            return staged
+        except sqlite3.IntegrityError as exc:
+            conflict = exc
+        winner = self._read_upload_row(sid)
+        if winner is None:
+            # Not our primary-key conflict — do not swallow it.
+            raise conflict
+        if winner["upload_path"]:
+            winner_path = Path(winner["upload_path"])
+            if self._is_valid_upload(winner_path, expected_hash):
+                return winner_path
+            # The winning row points at missing or corrupt media: repair it with
+            # our validated staged file, but only if nobody repaired it first.
+            updated = self.db.execute(
+                "UPDATE sources SET upload_path=?, content_hash=? WHERE source_id=? AND upload_path=?",
+                (str(staged), expected_hash, sid, winner["upload_path"]),
+            )
+        else:
+            # The winning row has no path at all: claim it only when it is
+            # still unclaimed, so a concurrent repair is never clobbered.
+            updated = self.db.execute(
+                """UPDATE sources SET upload_path=?, content_hash=? WHERE source_id=?
+                   AND (upload_path IS NULL OR upload_path='')""",
+                (str(staged), expected_hash, sid),
+            )
+        if updated.rowcount == 1:
+            return staged
+        winner = self._read_upload_row(sid)
+        if (
+            winner is not None
+            and winner["upload_path"]
+            and self._is_valid_upload(Path(winner["upload_path"]), expected_hash)
+        ):
+            return Path(winner["upload_path"])
+        raise OSError(f"upload registration for {sid} points to missing or corrupt media")
 
     def create_upload_source(self, path: Path) -> str:
+        """Register an uploaded file idempotently; never return a broken reference."""
         p = Path(path)
         if not p.is_file():
             raise FileNotFoundError(f"upload source not found or not a file: {p}")
@@ -93,50 +189,32 @@ class Service:
         stored = self.paths.upload_path(sid, p.name)
         stored.parent.mkdir(parents=True, exist_ok=True)
 
-        existing = self.db.query_one("SELECT source_id, upload_path FROM sources WHERE source_id=?", (sid,))
-        if (
-            existing
-            and existing["upload_path"]
-            and self._is_valid_upload(Path(existing["upload_path"]), expected_hash)
-        ):
+        canonical = self._canonical_for(sid, expected_hash)
+        if canonical is not None:
+            # Deduplication: our computed path may be unreferenced crash garbage
+            # from an earlier attempt with a different filename — drop it.
+            self._retire_loser(stored, canonical)
             return sid
-
-        if stored.is_file():
-            if self._is_valid_upload(stored, expected_hash):
-                self._insert_upload_row(sid, stored, p.name)
-                return sid
-            try:
-                stored.unlink(missing_ok=True)
-            except OSError:  # pragma: no cover
-                pass  # pragma: no cover
 
         tmp = stored.with_name(f".tmp.{uuid.uuid4().hex}.{stored.name}")
         try:
             shutil.copyfile(p, tmp)
             if not self._is_valid_upload(tmp, expected_hash):
-                try:
-                    tmp.unlink(missing_ok=True)
-                except OSError:  # pragma: no cover
-                    pass  # pragma: no cover
                 raise OSError(f"temp file hash mismatch for {sid}")
-            self._publish_tmp(tmp, stored)
-            if not stored.is_file() and tmp.is_file():
-                try:
-                    tmp.rename(stored)
-                except FileExistsError:  # pragma: no cover
-                    pass  # pragma: no cover
-                except OSError:  # pragma: no cover
-                    pass  # pragma: no cover
-            if not stored.is_file():  # pragma: no cover
-                raise OSError(f"failed to publish upload {stored}")  # pragma: no cover
-            self._insert_upload_row(sid, stored, p.name)
-            return sid
+            self._publish_new(tmp, stored, sid, expected_hash)
+            try:
+                final = self._register_upload(sid, stored, p.name, expected_hash)
+            except Exception:
+                # Registration failed after staging: drop our staged file when
+                # no row references it so failures leave no orphans.
+                self._retire_loser(stored, None)
+                raise
         finally:
-            if tmp.exists():
-                try:
-                    tmp.unlink(missing_ok=True)
-                except OSError:  # pragma: no cover
-                    pass  # pragma: no cover
+            tmp.unlink(missing_ok=True)
+        # Remove only files this attempt staged that are not canonical.
+        self._retire_loser(tmp, final)
+        self._retire_loser(stored, final)
+        return sid
 
     def get_source(self, source_id: str) -> dict[str, Any] | None:
         row = self.db.query_one("SELECT * FROM sources WHERE source_id=?", (source_id,))

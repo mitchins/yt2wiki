@@ -176,7 +176,6 @@ def test_upload_directory_persists_after_success_and_failure(tmp_path, monkeypat
     r = _upload(client, "first.mp4", b"first")
     assert r.status_code == 200
     assert uploads_dir.is_dir()
-    mtime_before = uploads_dir.stat().st_mtime
 
     r2 = _upload(client, "second.mp4", b"second")
     assert r2.status_code == 200

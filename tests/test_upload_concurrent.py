@@ -53,12 +53,18 @@ def test_concurrent_duplicate_via_service(tmp_path):
     results: dict[str, str | Exception] = {}
     errors: list[Exception] = []
 
+    def assert_exact():
+        registered = {r["upload_path"] for r in db.query("SELECT upload_path FROM sources")}
+        on_disk = {str(p) for p in settings.paths.uploads_dir.iterdir() if p.is_file()}
+        assert list(settings.paths.uploads_dir.glob(".tmp.*")) == []
+        assert on_disk == registered, f"dir must hold exactly canonical files: {on_disk} vs {registered}"
+
     def worker(name: str, path: Path):
         try:
             barrier.wait(timeout=5)
             sid = svc.create_upload_source(path)
             results[name] = sid
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             errors.append(exc)
             results[name] = exc  # type: ignore[assignment]
 
@@ -91,6 +97,7 @@ def test_concurrent_duplicate_via_service(tmp_path):
     assert Path(row3["upload_path"]).is_file()
     assert Path(row3["upload_path"]).read_bytes() == b"different-content-" + b"q" * 100
     assert stored.is_file(), "original not deleted by different-content upload"
+    assert_exact()
 
 
 def test_concurrent_duplicate_via_api(tmp_path, monkeypatch):
@@ -119,7 +126,7 @@ def test_concurrent_duplicate_via_api(tmp_path, monkeypatch):
             )
             statuses[name] = r.status_code
             results[name] = r.json() if r.status_code == 200 else r.text
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             statuses[name] = 999
             results[name] = str(exc)
 
@@ -155,11 +162,14 @@ def test_concurrent_duplicate_via_api(tmp_path, monkeypatch):
     # Different-content concurrent: ensure independence
     content2 = b"api-different-" + b"y" * 100
     c1 = TestClient(app)
-    c2 = TestClient(app)
     r1 = c1.post("/api/sources/upload", files={"file": ("a.mp4", content2, "video/mp4")}, data={"profile": "compact"})
     assert r1.status_code == 200
     assert r1.json()["source_id"] != sid1
     assert stored.is_file(), "original must not be deleted by different-content upload"
+    registered = {r["upload_path"] for r in db.query("SELECT upload_path FROM sources")}
+    on_disk = {str(p) for p in settings.paths.uploads_dir.iterdir() if p.is_file()}
+    assert list(settings.paths.uploads_dir.glob(".tmp.*")) == []
+    assert on_disk == registered, f"dir must hold exactly canonical files: {on_disk} vs {registered}"
 
 
 def test_concurrent_different_content_independent(tmp_path):
@@ -203,3 +213,6 @@ def test_concurrent_different_content_independent(tmp_path):
     assert Path(ra["upload_path"]).is_file()
     assert Path(rb["upload_path"]).is_file()
     assert list(settings.paths.uploads_dir.glob(".tmp.*")) == []
+    registered = {r["upload_path"] for r in db.query("SELECT upload_path FROM sources")}
+    on_disk = {str(p) for p in settings.paths.uploads_dir.iterdir() if p.is_file()}
+    assert on_disk == registered, f"dir must hold exactly canonical files: {on_disk} vs {registered}"
