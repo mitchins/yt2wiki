@@ -14,6 +14,7 @@ from .config import PROFILE_NAMES, ConfigError, Settings
 from .db.schema import Database
 from .paths import Paths
 from .services import Service
+from .web import inference as inf
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_export(args)
         if args.command == "schemas":
             return _cmd_schemas(args)
+        if args.command == "inference":
+            return _cmd_inference(args)
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
@@ -96,6 +99,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("article_id")
 
     p = sub.add_parser("schemas", help="print the JSON schemas used between stages")
+
+    p = sub.add_parser("inference", help="manage inference providers (operator console)",
+                       parents=[common])
+    isub = p.add_subparsers(dest="inference_command")
+    q = isub.add_parser("show", help="print saved providers, roles and last test status",
+                        parents=[common])
+    q = isub.add_parser("save", help="validate and save providers/roles from a JSON file",
+                        parents=[common])
+    q.add_argument("--file", required=True,
+                   help="JSON file with {providers: [...], roles: {...}} (same schema as the settings API)")
+    q = isub.add_parser("test", help="qualify a saved provider and record the result",
+                        parents=[common])
+    q.add_argument("--name", required=True, help="provider name as saved")
+    q.add_argument("--timeout", type=float, default=6.0, help="seconds for the /models probe")
     return parser
 
 
@@ -285,6 +302,55 @@ def _cmd_export(args) -> int:
     print(f"markdown : {settings.paths.article_markdown(args.article_id)}")
     print(f"standalone: {settings.paths.article_dir(args.article_id) / 'article.standalone.html'}")
     return 0
+
+
+def _cmd_inference(args) -> int:
+    """Operator-console inference management (works inside the container).
+
+    The settings web API refuses non-localhost peers (Docker gateway, SSH
+    tunnels, LAN), so Docker deployments configure inference here via
+    `docker exec <container> yt2wiki inference ...`. Secrets are never stored:
+    providers reference environment variables by name, injected with an
+    `env_file` (Compose) or stack variables (Portainer).
+    """
+    settings = _settings(args)
+    cmd = getattr(args, "inference_command", None)
+    if cmd == "show":
+        cfg = inf.load(settings.paths)
+        status = inf.load_status(settings.paths)
+        print(json.dumps({"providers": cfg.get("providers", {}),
+                          "roles": cfg.get("roles", {}),
+                          "status": status}, indent=1, default=str))
+        return 0
+    if cmd == "save":
+        try:
+            payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"cannot read payload file: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(payload, dict):
+            print("payload must be a JSON object with providers/roles", file=sys.stderr)
+            return 2
+        try:
+            cfg = inf.save(settings.paths, payload)
+        except inf.InferenceConfigError as exc:
+            print(f"invalid inference configuration: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(cfg, indent=1, default=str))
+        return 0
+    if cmd == "test":
+        cfg = inf.load(settings.paths)
+        prov = (cfg.get("providers") or {}).get(args.name)
+        if not prov:
+            print(f"no such provider: {args.name}", file=sys.stderr)
+            return 2
+        result = inf.test_endpoint(prov.get("url") or "", prov.get("api_key_env") or "",
+                                   timeout=args.timeout, model=prov.get("model") or "")
+        inf.record_test(settings.paths, args.name, result)
+        print(json.dumps(result, indent=1, default=str))
+        return 0 if result.get("ok") else 1
+    print("usage: yt2wiki inference {show|save|test}", file=sys.stderr)
+    return 2
 
 
 def _cmd_schemas(args) -> int:

@@ -9,6 +9,15 @@
   const tpl = $("[data-provider-tpl]", root);
   const msg = $("[data-msg]", root);
 
+  // Operator-only deployments (Docker published port, SSH tunnel, LAN):
+  // the server refuses save/test for non-localhost peers, so the form is
+  // disabled here instead of failing silently. Use the operator console.
+  if (root.hasAttribute("data-remote")) {
+    $$("button, input, select", root).forEach((el) => { el.disabled = true; });
+    if (msg) msg.textContent = "Read-only here — use `yt2wiki inference …` via docker exec.";
+    return;
+  }
+
   const read = (p) => Object.fromEntries($$("[data-k]", p).map((i) => [i.dataset.k, i.value.trim()]));
   const names = () => $$("[data-provider]", list).map((p) => read(p).name.toLowerCase()).filter(Boolean);
 
