@@ -53,7 +53,8 @@ def test_persistent_storage_and_restart_recovery(tmp_path, monkeypatch):
     # migrate is idempotent, should not lower schema_version
     db2.migrate()
     row = db2.query_one("SELECT title FROM articles WHERE article_id=?", (article_id,))
-    assert row and row["title"] == "Persist Test"
+    assert row
+    assert row["title"] == "Persist Test"
     row2 = db2.query_one("SELECT source_id FROM sources WHERE source_id=?", (sid,))
     assert row2
     # Config persists
