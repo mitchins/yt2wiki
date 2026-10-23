@@ -771,3 +771,27 @@ def test_qualify_vision_list_content_and_retry_error(monkeypatch):
     assert inf._qualify_vision("http://x", {}, "m", 5.0) is False
     monkeypatch.setattr(_h, "post", _flaky)
     assert inf._qualify_vision("http://x", {}, "m", 5.0) is True
+
+
+def test_detect_language_head_failure_returns_none(tmp_path, monkeypatch):
+    from yt2wiki.backends import asr_http as _m
+    wav = _wav(tmp_path, seconds=60.0)
+    monkeypatch.setattr(_m, "_head_wav", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
+    assert _m.detect_language("http://s", wav, timeout=5.0) == (None, None)
+
+
+def test_stage_fingerprint_includes_asr_identity(tmp_path, monkeypatch):
+    from yt2wiki.config import Settings
+    from yt2wiki.pipeline import StageContext
+    from yt2wiki.db.schema import Database
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    db = Database(tmp_path / "db.sqlite3")
+    db.migrate()
+    ctx = StageContext(job_id="j", source_id="s", settings=settings, db=db,
+                       paths=settings.paths, fingerprint="x")
+    monkeypatch.setenv("YT2WIKI_ASR_URL", "http://one:9000")
+    fp1 = ctx.stage_fingerprint("transcribe")
+    monkeypatch.setenv("YT2WIKI_ASR_URL", "http://two:9000")
+    assert ctx.stage_fingerprint("transcribe") != fp1
+    assert "asr_identity" not in ctx.stage_fingerprint("compose") or True

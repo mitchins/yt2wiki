@@ -174,8 +174,11 @@ def detect_language(
     import httpx
 
     server = base_url.rstrip("/")
-    head = _head_wav(Path(wav_path), seconds=35.0)
+    head = Path(wav_path)
+    made_temp = False
     try:
+        head = _head_wav(head, seconds=35.0)
+        made_temp = head != Path(wav_path)
         with open(head, "rb") as fh:
             files = {"audio_file": (head.name, fh, "audio/wav")}
             with httpx.Client(timeout=timeout, headers=headers or {}) as client:
@@ -186,10 +189,11 @@ def detect_language(
     except Exception:
         return None, None
     finally:
-        if head != Path(wav_path):
+        if made_temp:
             try:
                 head.unlink()
-            except OSError:  # noqa: BLE001
+                head.parent.rmdir()
+            except OSError:  # noqa: BLE001 - best-effort probe cleanup
                 pass
     if not isinstance(data, dict):
         return None, None
