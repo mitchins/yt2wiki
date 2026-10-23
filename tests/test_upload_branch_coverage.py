@@ -177,7 +177,8 @@ def test_null_upload_path_row_proceeds(tmp_path):
     )
     assert svc.create_upload_source(p) == sid
     row = db.query_one("SELECT upload_path FROM sources WHERE source_id=?", (sid,))
-    assert row["upload_path"] and Path(row["upload_path"]).is_file()
+    assert row["upload_path"]
+    assert Path(row["upload_path"]).is_file()
     assert_exact_canonical(settings, db)
 
 
@@ -271,6 +272,7 @@ def test_retire_loser_keeps_referenced_file(tmp_path):
     assert victim.is_file()
     svc._retire_loser(other, other)
     assert other.is_file()
+    svc._retire_loser(tmp_path / "absent.mp4", other)  # missing path: no-op
 
 
 def test_link_race_winner_valid_registers(tmp_path, monkeypatch):
@@ -282,7 +284,7 @@ def test_link_race_winner_valid_registers(tmp_path, monkeypatch):
 
     def racy_link(a, b):
         Path(b).write_bytes(content)  # concurrent winner publishes identical bytes
-        raise FileExistsError("race")
+        raise OSError(errno.EEXIST, "race")
 
     monkeypatch.setattr("yt2wiki.services.os.link", racy_link)
     sid = svc.create_upload_source(p)
@@ -316,7 +318,7 @@ def test_link_race_winner_invalid_fails(tmp_path, monkeypatch):
 
     def racy_link(a, b):
         Path(b).write_bytes(b"concurrent-garbage")
-        raise FileExistsError("race")
+        raise OSError(errno.EEXIST, "race")
 
     monkeypatch.setattr("yt2wiki.services.os.link", racy_link)
     with pytest.raises(OSError, match="failed to publish"):
@@ -359,7 +361,7 @@ def test_exdev_open_race_uses_winner(tmp_path, monkeypatch):
 
     def fake_open(path, *_a, **_kw):
         Path(path).write_bytes(content)  # concurrent winner publishes between open and validate
-        raise FileExistsError("won")
+        raise OSError(errno.EEXIST, "won")
 
     monkeypatch.setattr("yt2wiki.services.os.link", fake_link)
     monkeypatch.setattr("yt2wiki.services.os.open", fake_open)

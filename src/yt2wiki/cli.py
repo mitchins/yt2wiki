@@ -103,8 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("inference", help="manage inference providers (operator console)",
                        parents=[common])
     isub = p.add_subparsers(dest="inference_command")
-    q = isub.add_parser("show", help="print saved providers, roles and last test status",
-                        parents=[common])
+    isub.add_parser("show", help="print saved providers, roles and last test status",
+                    parents=[common])
     q = isub.add_parser("save", help="validate and save providers/roles from a JSON file",
                         parents=[common])
     q.add_argument("--file", required=True,
@@ -316,41 +316,58 @@ def _cmd_inference(args) -> int:
     settings = _settings(args)
     cmd = getattr(args, "inference_command", None)
     if cmd == "show":
-        cfg = inf.load(settings.paths)
-        status = inf.load_status(settings.paths)
-        print(json.dumps({"providers": cfg.get("providers", {}),
-                          "roles": cfg.get("roles", {}),
-                          "status": status}, indent=1, default=str))
-        return 0
+        return _cmd_inference_show(settings)
     if cmd == "save":
-        try:
-            payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            print(f"cannot read payload file: {exc}", file=sys.stderr)
-            return 2
-        if not isinstance(payload, dict):
-            print("payload must be a JSON object with providers/roles", file=sys.stderr)
-            return 2
-        try:
-            cfg = inf.save(settings.paths, payload)
-        except inf.InferenceConfigError as exc:
-            print(f"invalid inference configuration: {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps(cfg, indent=1, default=str))
-        return 0
+        return _cmd_inference_save(settings, args)
     if cmd == "test":
-        cfg = inf.load(settings.paths)
-        prov = (cfg.get("providers") or {}).get(args.name)
-        if not prov:
-            print(f"no such provider: {args.name}", file=sys.stderr)
-            return 2
-        result = inf.test_endpoint(prov.get("url") or "", prov.get("api_key_env") or "",
-                                   timeout=args.timeout, model=prov.get("model") or "")
-        inf.record_test(settings.paths, args.name, result)
-        print(json.dumps(result, indent=1, default=str))
-        return 0 if result.get("ok") else 1
+        return _cmd_inference_test(settings, args)
     print("usage: yt2wiki inference {show|save|test}", file=sys.stderr)
     return 2
+
+
+def _cmd_inference_show(settings: Settings) -> int:
+    cfg = inf.load(settings.paths)
+    status = inf.load_status(settings.paths)
+    print(json.dumps({"providers": cfg.get("providers", {}),
+                      "roles": cfg.get("roles", {}),
+                      "status": status}, indent=1, default=str))
+    return 0
+
+
+def _cmd_inference_save(settings: Settings, args) -> int:
+    # S8707: validate the operator-supplied payload path before opening it.
+    payload_path = Path(args.file)
+    if not payload_path.is_file():
+        print(f"no such payload file: {payload_path}", file=sys.stderr)
+        return 2
+    try:
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"cannot read payload file: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(payload, dict):
+        print("payload must be a JSON object with providers/roles", file=sys.stderr)
+        return 2
+    try:
+        cfg = inf.save(settings.paths, payload)
+    except inf.InferenceConfigError as exc:
+        print(f"invalid inference configuration: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(cfg, indent=1, default=str))
+    return 0
+
+
+def _cmd_inference_test(settings: Settings, args) -> int:
+    cfg = inf.load(settings.paths)
+    prov = (cfg.get("providers") or {}).get(args.name)
+    if not prov:
+        print(f"no such provider: {args.name}", file=sys.stderr)
+        return 2
+    result = inf.test_endpoint(prov.get("url") or "", prov.get("api_key_env") or "",
+                               timeout=args.timeout, model=prov.get("model") or "")
+    inf.record_test(settings.paths, args.name, result)
+    print(json.dumps(result, indent=1, default=str))
+    return 0 if result.get("ok") else 1
 
 
 def _cmd_schemas(args) -> int:

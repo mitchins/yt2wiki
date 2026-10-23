@@ -91,7 +91,9 @@ class Service:
         """Cross-filesystem publish fallback that never replaces an existing file."""
         try:
             fd = os.open(stored, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
             return  # concurrent publication won; the caller validates the winner
         try:
             with os.fdopen(fd, "wb") as out, open(tmp, "rb") as src:
@@ -99,6 +101,15 @@ class Service:
         except BaseException:
             stored.unlink(missing_ok=True)
             raise
+
+    def _clear_blocking_file(self, stored: Path, sid: str) -> None:
+        """Remove the file blocking `stored` when no registered source claims it."""
+        owner = self.db.query_one(
+            "SELECT source_id FROM sources WHERE upload_path=?", (str(stored),)
+        )
+        if owner is not None and owner["source_id"] != sid:
+            raise OSError(f"upload destination {stored} is owned by {owner['source_id']}")
+        stored.unlink(missing_ok=True)
 
     def _publish_new(self, tmp: Path, stored: Path, sid: str, expected_hash: str) -> None:
         """Publish staged bytes as `stored` without replacing valid existing media.
@@ -110,21 +121,15 @@ class Service:
         if self._is_valid_upload(stored, expected_hash):
             return
         if stored.exists():
-            owner = self.db.query_one(
-                "SELECT source_id FROM sources WHERE upload_path=?", (str(stored),)
-            )
-            if owner is not None and owner["source_id"] != sid:
-                raise OSError(f"upload destination {stored} is owned by {owner['source_id']}")
-            stored.unlink(missing_ok=True)
+            self._clear_blocking_file(stored, sid)
         try:
             os.link(tmp, stored)
-        except FileExistsError:
-            pass  # concurrent publication won; validate the winner below
         except OSError as exc:
             if exc.errno == errno.EXDEV:
                 self._exclusive_copy(tmp, stored)
-            else:
+            elif exc.errno != errno.EEXIST:
                 raise
+            # EEXIST: concurrent publication won; validate the winner below.
         if not self._is_valid_upload(stored, expected_hash):
             raise OSError(f"failed to publish upload {stored}")
 
@@ -154,15 +159,30 @@ class Service:
             winner_path = Path(winner["upload_path"])
             if self._is_valid_upload(winner_path, expected_hash):
                 return winner_path
-            # The winning row points at missing or corrupt media: repair it with
-            # our validated staged file, but only if nobody repaired it first.
+            repaired = self._repair_upload_row(sid, winner_path, staged, expected_hash)
+        else:
+            repaired = self._repair_upload_row(sid, None, staged, expected_hash)
+        if repaired is not None:
+            return repaired
+        raise OSError(f"upload registration for {sid} points to missing or corrupt media")
+
+    def _repair_upload_row(
+        self, sid: str, winner_path: Path | None, staged: Path, expected_hash: str
+    ) -> Path | None:
+        """Point a stale row at our validated staged file, or reconcile to a rival fix.
+
+        The conditional UPDATE only fires when the row still holds the stale
+        value we saw, so a concurrent repair is never clobbered. Returns the
+        validated canonical path, or None when the row cannot be repaired.
+        """
+        if winner_path is not None:
             updated = self.db.execute(
                 "UPDATE sources SET upload_path=?, content_hash=? WHERE source_id=? AND upload_path=?",
-                (str(staged), expected_hash, sid, winner["upload_path"]),
+                (str(staged), expected_hash, sid, str(winner_path)),
             )
         else:
             # The winning row has no path at all: claim it only when it is
-            # still unclaimed, so a concurrent repair is never clobbered.
+            # still unclaimed.
             updated = self.db.execute(
                 """UPDATE sources SET upload_path=?, content_hash=? WHERE source_id=?
                    AND (upload_path IS NULL OR upload_path='')""",
@@ -177,7 +197,7 @@ class Service:
             and self._is_valid_upload(Path(winner["upload_path"]), expected_hash)
         ):
             return Path(winner["upload_path"])
-        raise OSError(f"upload registration for {sid} points to missing or corrupt media")
+        return None
 
     def create_upload_source(self, path: Path) -> str:
         """Register an uploaded file idempotently; never return a broken reference."""
@@ -196,6 +216,13 @@ class Service:
             self._retire_loser(stored, canonical)
             return sid
 
+        final = self._stage_upload(p, stored, sid, expected_hash)
+        # Remove only files this attempt staged that are not canonical.
+        self._retire_loser(stored, final)
+        return sid
+
+    def _stage_upload(self, p: Path, stored: Path, sid: str, expected_hash: str) -> Path:
+        """Copy, validate, publish and register; returns the validated canonical path."""
         tmp = stored.with_name(f".tmp.{uuid.uuid4().hex}.{stored.name}")
         try:
             shutil.copyfile(p, tmp)
@@ -203,7 +230,7 @@ class Service:
                 raise OSError(f"temp file hash mismatch for {sid}")
             self._publish_new(tmp, stored, sid, expected_hash)
             try:
-                final = self._register_upload(sid, stored, p.name, expected_hash)
+                return self._register_upload(sid, stored, p.name, expected_hash)
             except Exception:
                 # Registration failed after staging: drop our staged file when
                 # no row references it so failures leave no orphans.
@@ -211,10 +238,6 @@ class Service:
                 raise
         finally:
             tmp.unlink(missing_ok=True)
-        # Remove only files this attempt staged that are not canonical.
-        self._retire_loser(tmp, final)
-        self._retire_loser(stored, final)
-        return sid
 
     def get_source(self, source_id: str) -> dict[str, Any] | None:
         row = self.db.query_one("SELECT * FROM sources WHERE source_id=?", (source_id,))

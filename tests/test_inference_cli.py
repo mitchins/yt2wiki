@@ -104,7 +104,8 @@ def test_inference_cli_show_save_roundtrip(tmp_path, capsys):
     data = tmp_path / "cli-inf"
     assert _run_cli("--data-dir", str(data), "inference", "show") == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["providers"] == {} and out["roles"] == {}
+    assert out["providers"] == {}
+    assert out["roles"] == {}
 
     payload = {
         "providers": [
