@@ -169,6 +169,38 @@ def test_read_payload_file_validates(tmp_path):
             inf2.read_payload_file(settings.paths, link)
 
 
+def test_validate_rejects_malformed_shapes():
+    from yt2wiki.web import inference as inf2
+
+    for bad in (["providers"], "providers", 42, None):
+        with pytest.raises(Exception, match="[Cc]onfiguration|providers"):
+            inf2.validate(bad)  # type: ignore[arg-type]
+    for providers in ("nope", 42):
+        with pytest.raises(Exception, match="providers"):
+            inf2.validate({"providers": providers, "roles": {}})
+    with pytest.raises(Exception, match="[Ee]ntry|object"):
+        inf2.validate({"providers": [["name"]], "roles": {}})
+    with pytest.raises(Exception, match="[Ee]ntry|object"):
+        inf2.validate({"providers": {"a": "not-a-dict"}, "roles": {}})
+    for entry in ("name-only", None, 42, ["n"]):
+        with pytest.raises(Exception, match="[Ee]ntry|object"):
+            inf2.validate({"providers": [entry], "roles": {}})
+    for roles in (["writer"], "mock", 42):
+        with pytest.raises(Exception, match="[Rr]oles"):
+            inf2.validate({"providers": [], "roles": roles})
+    # Valid shapes still normalise (list and dict provider forms)
+    good = inf2.validate({
+        "providers": [{"name": "a", "url": "http://a.test/v1"}],
+        "roles": {"writer": "a"},
+    })
+    assert good["roles"]["writer"] == "a"
+    good = inf2.validate({
+        "providers": {"b": {"url": "http://b.test/v1"}},
+        "roles": {},
+    })
+    assert good["providers"]["b"]["url"] == "http://b.test/v1"
+
+
 def test_inference_cli_save_rejects_invalid(tmp_path, capsys):
     data = tmp_path / "cli-bad"
     (data / "config").mkdir(parents=True, exist_ok=True)
@@ -218,14 +250,11 @@ def test_inference_cli_test_qualifies_and_records(tmp_path, capsys, monkeypatch)
         content = json.dumps({"ok": True, "text": "hello"})
         return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
+    # NOTE: only httpx.get/post are patched. Patching httpx.Client too would
+    # nest wrappers on a second patch within one test, pinning the first
+    # transport (the CLI path under test uses get/post only).
     transport = httpx.MockTransport(handler)
     orig_client = httpx.Client
-
-    def patched_client(*args, **kwargs):
-        kwargs["transport"] = transport
-        return orig_client(*args, **kwargs)
-
-    monkeypatch.setattr("httpx.Client", patched_client)
 
     def patched_get(url, **kwargs):
         with orig_client(transport=transport) as client:
@@ -251,3 +280,172 @@ def test_inference_cli_test_qualifies_and_records(tmp_path, capsys, monkeypatch)
 
     # Unknown provider is a usage error, not a qualification failure
     assert _run_cli("--data-dir", str(data), "inference", "test", "--name", "nope") == 2
+
+
+def _patch_mock_provider(monkeypatch, handler):
+    import httpx
+
+    # NOTE: only httpx.get/post are patched. Patching httpx.Client too would
+    # nest wrappers on a second patch within one test, pinning the first
+    # transport (the CLI path under test uses get/post only).
+    transport = httpx.MockTransport(handler)
+    orig_client = httpx.Client
+
+    def patched_get(url, **kwargs):
+        with orig_client(transport=transport) as client:
+            return client.get(url, **kwargs)
+
+    monkeypatch.setattr("httpx.get", patched_get)
+
+    def patched_post(url, **kwargs):
+        with orig_client(transport=transport) as client:
+            return client.post(url, **kwargs)
+
+    monkeypatch.setattr("httpx.post", patched_post)
+
+
+def _save_provider(data, name, roles, capsys):
+    (data / "config").mkdir(parents=True, exist_ok=True)
+    payload_file = data / "config" / f"{name}.json"
+    payload_file.write_text(json.dumps({
+        "providers": [{"name": name, "url": "http://mock.test/v1",
+                       "model": "m", "api_key_env": ""}],
+        "roles": roles,
+    }))
+    assert _run_cli("--data-dir", str(data), "inference", "save",
+                    "--file", str(payload_file)) == 0
+    capsys.readouterr()
+
+
+def _valid_rubric():
+    return json.dumps(
+        {"scores": [{"idx": 1, "relevance": 2, "clarity": 2,
+                     "instructional": 2, "payoff": 2},
+                    {"idx": 2, "relevance": 1, "clarity": 1,
+                     "instructional": 0, "payoff": 0}],
+         "decision": "KEEP", "winner": 1, "explanation": "first frame is clearer"})
+
+
+def _mock_handler(*, models=200, writer="json", vision="rubric"):
+    """Configurable OpenAI-compatible mock: models status, writer/vision bodies.
+
+    writer: "json" (valid {"ok": true}), "prose" (non-JSON generation failure),
+        "error" (HTTP 500).
+    vision: "rubric" (valid strict V9 rubric), "invalid" (wrong schema),
+        "error" (HTTP 500).
+    """
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            if models == "unreachable":
+                raise httpx.ConnectError("refused")
+            return httpx.Response(models, json={"data": [{"id": "m"}]})
+        body = json.loads(request.content.decode()) if request.content else {}
+        if "image_url" in json.dumps(body):
+            if vision == "rubric":
+                content = _valid_rubric()
+            elif vision == "invalid":
+                content = json.dumps({"nope": True})
+            else:
+                return httpx.Response(500, json={"error": "vision boom"})
+            return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+        if writer == "json":
+            content = json.dumps({"ok": True, "text": "hello"})
+        elif writer == "prose":
+            content = "Here is my essay about the topic at length."
+        else:
+            return httpx.Response(500, json={"error": "writer boom"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    return handler
+
+
+def _run_test(data, capsys, name):
+    rc = _run_cli("--data-dir", str(data), "inference", "test", "--name", name)
+    return rc, json.loads(capsys.readouterr().out)
+
+
+def test_cli_test_exit_unreachable(tmp_path, capsys, monkeypatch):
+    data = tmp_path / "exit-unreachable"
+    _save_provider(data, "mock", {"writer": "mock"}, capsys)
+    _patch_mock_provider(monkeypatch, _mock_handler(models="unreachable"))
+    rc, result = _run_test(data, capsys, "mock")
+    assert rc == 1
+    assert result["ok"] is False
+
+
+def test_cli_test_exit_unauthorized(tmp_path, capsys, monkeypatch):
+    data = tmp_path / "exit-401"
+    _save_provider(data, "mock", {"writer": "mock"}, capsys)
+    _patch_mock_provider(monkeypatch, _mock_handler(models=401))
+    rc, result = _run_test(data, capsys, "mock")
+    assert rc == 1
+    assert result["ok"] is False
+
+
+def test_cli_test_exit_writer_probe_fails(tmp_path, capsys, monkeypatch):
+    """/models 200 but the writer generation probe fails → nonzero for writer role."""
+    data = tmp_path / "exit-writer"
+    _save_provider(data, "mock", {"writer": "mock"}, capsys)
+    _patch_mock_provider(monkeypatch, _mock_handler(models=200, writer="prose"))
+    rc, result = _run_test(data, capsys, "mock")
+    assert rc == 1, result
+    assert result["ok"] is True  # reachable, but not writer-qualified
+    assert result["qualified_for_writer"] is False
+
+
+def test_cli_test_exit_vision_probe_fails(tmp_path, capsys, monkeypatch):
+    """/models 200 but the vision rubric probe fails → nonzero for vision role."""
+    data = tmp_path / "exit-vision"
+    _save_provider(data, "mock", {"vision": "mock"}, capsys)
+    _patch_mock_provider(monkeypatch, _mock_handler(models=200, vision="invalid"))
+    rc, result = _run_test(data, capsys, "mock")
+    assert rc == 1, result
+    assert result["ok"] is True
+    assert result["qualified_for_vision"] is False
+
+
+def test_cli_test_exit_both_roles_require_both(tmp_path, capsys, monkeypatch):
+    data = tmp_path / "exit-both"
+    _save_provider(data, "mock", {"writer": "mock", "vision": "mock"}, capsys)
+    _patch_mock_provider(monkeypatch, _mock_handler(models=200, writer="json", vision="rubric"))
+    rc, result = _run_test(data, capsys, "mock")
+    assert rc == 0, result
+    assert result["qualified_for_writer"] is True
+    assert result["qualified_for_vision"] is True
+    _patch_mock_provider(monkeypatch, _mock_handler(models=200, writer="json", vision="invalid"))
+    rc, result = _run_test(data, capsys, "mock")
+    assert rc == 1, result  # vision assigned but failing → nonzero
+
+
+def test_cli_test_exit_writer_only_ignores_vision(tmp_path, capsys, monkeypatch):
+    """A writer-only endpoint succeeds even when the vision probe would fail."""
+    data = tmp_path / "exit-writer-only"
+    _save_provider(data, "mock", {"writer": "mock"}, capsys)
+    _patch_mock_provider(monkeypatch, _mock_handler(models=200, writer="json", vision="invalid"))
+    rc, result = _run_test(data, capsys, "mock")
+    assert rc == 0, result
+    assert result["qualified_for_writer"] is True
+
+
+def test_cli_test_exit_vision_only_ignores_writer(tmp_path, capsys, monkeypatch):
+    data = tmp_path / "exit-vision-only"
+    _save_provider(data, "mock", {"vision": "mock"}, capsys)
+    _patch_mock_provider(monkeypatch, _mock_handler(models=200, writer="prose", vision="rubric"))
+    rc, result = _run_test(data, capsys, "mock")
+    assert rc == 0, result
+    assert result["qualified_for_vision"] is True
+
+
+def test_cli_test_exit_unassigned_is_connectivity_only(tmp_path, capsys, monkeypatch):
+    """An unassigned provider's reachable test exits 0 without claiming a role."""
+    data = tmp_path / "exit-unassigned"
+    _save_provider(data, "mock", {}, capsys)
+    _patch_mock_provider(monkeypatch, _mock_handler(models=200, writer="json", vision="rubric"))
+    rc, result = _run_test(data, capsys, "mock")
+    assert rc == 0, result
+    assert result["ok"] is True
+    assert _run_cli("--data-dir", str(data), "inference", "show") == 0
+    show = json.loads(capsys.readouterr().out)
+    assert "mock" not in (show["roles"] or {}).values()

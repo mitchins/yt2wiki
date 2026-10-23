@@ -117,6 +117,15 @@ class Service:
         Uses an atomic hard link (never a replacing rename). A blocking file is
         cleared only when no registered source claims it; otherwise the attempt
         fails explicitly instead of deleting another source's media.
+
+        Only EXDEV (cross-device) falls back to an exclusive create-and-copy;
+        every other link error fails explicitly. In particular there is no
+        generic copy fallback: a failed link never leaves a partially
+        published canonical file, and `stored` is only ever created atomically
+        (hard link or O_CREAT|O_EXCL), never replaced while valid.
+        Supported filesystems are those providing atomic hard links within a
+        directory. `tmp` and `stored` always share a directory, so EXDEV cannot
+        occur in practice and the fallback is purely defensive.
         """
         if self._is_valid_upload(stored, expected_hash):
             return

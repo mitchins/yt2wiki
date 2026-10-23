@@ -69,12 +69,25 @@ def load_status(paths) -> dict[str, Any]:
 
 
 def validate(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalise a submitted configuration or raise InferenceConfigError."""
+    """Normalise a submitted configuration or raise InferenceConfigError.
+
+    Every structural shape is checked before iterating or calling dictionary
+    methods, so malformed JSON yields a controlled error, never an unexpected
+    AttributeError/TypeError from the web layer.
+    """
+    if not isinstance(payload, dict):
+        raise InferenceConfigError("Configuration must be a JSON object with providers/roles.")
     providers_in = payload.get("providers") or []
     if isinstance(providers_in, dict):
+        if not all(isinstance(v, dict) for v in providers_in.values()):
+            raise InferenceConfigError("Each provider entry must be an object.")
         providers_in = [{"name": k, **v} for k, v in providers_in.items()]
+    if not isinstance(providers_in, list):
+        raise InferenceConfigError("“providers” must be a list of endpoint objects.")
     providers: dict[str, dict[str, str]] = {}
     for p in providers_in:
+        if not isinstance(p, dict):
+            raise InferenceConfigError("Each provider entry must be an object.")
         name = str(p.get("name") or "").strip().lower()
         url = str(p.get("url") or "").strip().rstrip("/")
         model = str(p.get("model") or "").strip()
@@ -87,9 +100,12 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
         if not re.match(r"^https?://[^\s/]+", url):
             raise InferenceConfigError(f"“{name}” needs an http:// or https:// base URL.")
         providers[name] = {"url": url, "model": model[:200], "api_key_env": key_env}
+    roles_in = payload.get("roles") or {}
+    if not isinstance(roles_in, dict):
+        raise InferenceConfigError("“roles” must map role names to endpoint names.")
     roles = {}
     for role, _label in ROLES:
-        target = str((payload.get("roles") or {}).get(role) or "").strip().lower()
+        target = str(roles_in.get(role) or "").strip().lower()
         if target and target not in providers:
             raise InferenceConfigError(f"{_label} is assigned to an endpoint that is not listed.")
         roles[role] = target

@@ -346,6 +346,13 @@ def _cmd_inference_save(settings: Settings, args) -> int:
 
 
 def _cmd_inference_test(settings: Settings, args) -> int:
+    """Qualify one saved provider; exit nonzero unless its assigned roles qualify.
+
+    Reachability (`/models`) alone is connectivity, not production role
+    qualification: every role assigned to this provider must pass its real
+    generation probe. Roles assigned to other providers — or to none — do not
+    affect this provider's exit code.
+    """
     cfg = inf.load(settings.paths)
     prov = (cfg.get("providers") or {}).get(args.name)
     if not prov:
@@ -355,7 +362,19 @@ def _cmd_inference_test(settings: Settings, args) -> int:
                                timeout=args.timeout, model=prov.get("model") or "")
     inf.record_test(settings.paths, args.name, result)
     print(json.dumps(result, indent=1, default=str))
-    return 0 if result.get("ok") else 1
+    if not result.get("ok"):
+        return 1
+    roles = cfg.get("roles") or {}
+    required = [role for role in ("writer", "vision") if roles.get(role) == args.name]
+    if "writer" in required and not result.get("qualified_for_writer"):
+        print(f"provider {args.name!r} is assigned the writer role but failed writer qualification",
+              file=sys.stderr)
+        return 1
+    if "vision" in required and not result.get("qualified_for_vision"):
+        print(f"provider {args.name!r} is assigned the vision role but failed vision qualification",
+              file=sys.stderr)
+        return 1
+    return 0
 
 
 def _cmd_schemas(args) -> int:

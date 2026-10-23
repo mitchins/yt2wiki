@@ -293,19 +293,26 @@ def test_link_race_winner_valid_registers(tmp_path, monkeypatch):
     assert_exact_canonical(settings, db)
 
 
-def test_link_other_error_propagates(tmp_path, monkeypatch):
-    """A non-race link failure propagates with no row and no orphan."""
-    svc, settings, db = _svc(tmp_path, "link-err")
+@pytest.mark.parametrize("err", [errno.EACCES, errno.EROFS, errno.EPERM])
+def test_link_other_error_propagates(tmp_path, monkeypatch, err):
+    """Only EXDEV falls back to exclusive copy; other link errors fail explicitly.
+
+    No partial canonical file is left behind, no row is inserted, and the
+    directory holds exactly the registered canonical files.
+    """
+    svc, settings, db = _svc(tmp_path, f"link-err-{err}")
     p = tmp_path / "le.mp4"
     p.write_bytes(b"link-err-content")
 
     def fake_link(a, b):
-        raise OSError(errno.EACCES, "perm")
+        raise OSError(err, "no generic copy fallback")
 
     monkeypatch.setattr("yt2wiki.services.os.link", fake_link)
     with pytest.raises(OSError):
         svc.create_upload_source(p)
     sid = source_id_for_file(p)
+    stored = settings.paths.upload_path(sid, p.name)
+    assert not stored.exists(), "failed publish must not leave a partial file"
     assert db.query_one("SELECT 1 FROM sources WHERE source_id=?", (sid,)) is None
     assert_exact_canonical(settings, db)
 

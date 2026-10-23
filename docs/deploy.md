@@ -252,7 +252,7 @@ from external OpenAI-compatible endpoints (§3).
 
 The web app has editing (`POST /api/articles/{id}`), uploads (`POST /api/sources/upload`), job execution (`POST /api/jobs/{id}/reprocess`) and inference config (`POST /api/settings/inference`) — all unauthenticated.
 
-- Default `docker-compose.yml` binds `127.0.0.1:8080:8000` so the admin UI is only reachable from the host's loopback. Reach it from your laptop with `ssh -L 8080:localhost:8080 user@host` then `http://localhost:8080`, or via a VPN — but understand what that does **not** do: an SSH tunnel does **not** make the settings API accept your browser. The app sees the Docker gateway address (e.g. `172.18.0.1`), not your browser's loopback, so `/api/settings/inference` still returns `403` through a tunnel. Do not change the host binding to `0.0.0.0:8080:8000` without an authenticated proxy, and do not tell users a tunnel fixes the guard — it does not.
+- Default `docker-compose.yml` binds `127.0.0.1:8080:8000` so the admin UI is only reachable from the host's loopback. Reach it from your laptop with `ssh -L 8080:localhost:8080 user@host` then `http://localhost:8080`, or via a VPN — but understand what that does **not** do: an SSH tunnel does **not** make the settings API accept your browser. The app sees the Docker gateway address (e.g. `172.18.0.1`), not your browser's loopback, so `/api/settings/inference` still returns `403` through a tunnel. Never change the host binding to `0.0.0.0:8080:8000` — that publishes the unauthenticated UI directly and bypasses any proxy in front of it — and do not tell users a tunnel fixes the guard — it does not.
 - `src/yt2wiki/web/app.py` (`LOCAL_PEERS`, `peer_host`, `is_local_peer`) allows inference configuration only from a localhost peer (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`, `testclient`, `localhost`). It does **not** trust `X-Forwarded-For` or `X-Real-IP` — arbitrary client-supplied headers cannot grant admin access, and whitelisting the Docker gateway is explicitly not done. The 403 message points at the operator console instead. For Docker deployments the working management path is `docker exec yt2wiki yt2wiki inference …` (see §3), which the `/settings` page also states in its **Operator only** notice for every non-localhost viewer (with its mutation form disabled).
 - For broader LAN operation, put an authenticated boundary in front, e.g. Caddy/Traefik with `basic_auth` or Authelia. Keep the yt2wiki container itself on host loopback or an isolated Docker network — never publish the unauthenticated app port broadly. Example `Caddyfile` (proxy on the host network, upstream via loopback):
   ```
@@ -312,41 +312,57 @@ Migration-free installation for an already existing article library:
 
 After switching the mount, `GET /library` shows the existing guides, and `GET /articles/{id}` renders them without loading a model.
 
-WAL-safe backup. Never copy the bare live `.sqlite3` file while `-wal`/`-shm`
-sidecars exist — use SQLite's online backup, which checkpoints the WAL into a
-consistent snapshot. These commands need a **running** container
-(`docker exec`/`docker cp` do not operate on host paths directly):
+WAL-safe backup — one tested procedure. Never copy the bare `.sqlite3` file while
+`-wal`/`-shm` sidecars may exist; use SQLite's online `.backup`, which reads
+through the WAL into a consistent snapshot. `docker exec`/`docker cp` need a
+container (running or stopped) — they do not operate on host paths directly.
+Stop writers first so the database snapshot and the article files pair exactly;
+copying either store while jobs or edits continue cannot be point-in-time
+consistent.
 
 ```bash
-docker exec yt2wiki sqlite3 /data/db/yt2wiki.sqlite3 ".backup '/tmp/yt2wiki-backup.sqlite3'"
-docker cp yt2wiki:/tmp/yt2wiki-backup.sqlite3 ./yt2wiki-backup.sqlite3
-docker exec yt2wiki rm /tmp/yt2wiki-backup.sqlite3
-docker cp yt2wiki:/data/articles ./yt2wiki-articles-backup   # markdown/assets (read-only copy)
+TAG=$(date +%F)
+docker stop yt2wiki   # quiesce writers; JobRunner recovers cleanly on next start
+# Online backup of the stopped volume (writers quiet, WAL read handled by .backup):
+docker run --rm -v yt2wiki-data:/data -v "$PWD":/out yt2wiki:0.1.0 \
+  sqlite3 /data/db/yt2wiki.sqlite3 ".backup '/out/yt2wiki-backup-$TAG.sqlite3'"
+# Article files from the stopped container (no writes can interleave now):
+docker cp yt2wiki:/data/articles "./yt2wiki-articles-backup-$TAG"
+docker start yt2wiki
+# Verify the snapshot (host sqlite3 is fine — the backup is a plain file):
+sqlite3 "yt2wiki-backup-$TAG.sqlite3" "PRAGMA integrity_check;"
+# → ok
 ```
 
-Consistency note: the `.backup` itself is a crash-consistent DB snapshot, but it
-and the articles copy are two separate operations — an edit landing between them
-pairs a newer DB row with older article files (or vice versa). For an exact
-point-in-time snapshot, stop the service first so no writes can interleave:
+Restore into the same volume (or a fresh one — same steps):
 
 ```bash
-docker stop yt2wiki   # JobRunner recovers cleanly on next start; queued jobs resume
-docker cp yt2wiki:/data/db/yt2wiki.sqlite3 ./yt2wiki-backup.sqlite3   # -wal/-shm are quiet now
-docker cp yt2wiki:/data/articles ./yt2wiki-articles-backup
+docker stop yt2wiki
+docker run --rm -v yt2wiki-data:/data -v "$PWD":/out yt2wiki:0.1.0 \
+  sh -c "rm -f /data/db/yt2wiki.sqlite3-wal /data/db/yt2wiki.sqlite3-shm \
+         && cp '/out/yt2wiki-backup-$TAG.sqlite3' /data/db/yt2wiki.sqlite3 \
+         && sqlite3 /data/db/yt2wiki.sqlite3 'PRAGMA integrity_check;'"
+# → ok
+docker cp "./yt2wiki-articles-backup-$TAG/." yt2wiki:/data/articles/
 docker start yt2wiki
 ```
 
-Host-native equivalent (pip install, no container — same WAL rule applies):
+Host-native equivalent (pip install — stop the service first, same WAL rule):
 
 ```bash
-sqlite3 "$YT2WIKI_HOME/db/yt2wiki.sqlite3" ".backup 'yt2wiki-backup.sqlite3'"
-cp -a "$YT2WIKI_HOME/articles" yt2wiki-articles-backup
+# stop yt2wiki serve (Ctrl-C / systemctl), then:
+sqlite3 "$YT2WIKI_HOME/db/yt2wiki.sqlite3" ".backup 'yt2wiki-backup-$(date +%F).sqlite3'"
+cp -a "$YT2WIKI_HOME/articles" "yt2wiki-articles-backup-$(date +%F)"
+sqlite3 "yt2wiki-backup-$(date +%F).sqlite3" "PRAGMA integrity_check;"
+# → ok
 ```
 
 (The Settings → Library panel shows the data folder, DB path/size and revision
 count for the same purpose. Article bodies are also re-exportable from the DB,
 so a DB-only backup already preserves the text; the articles copy adds the
-rendered files and assets.)
+rendered files and assets. This exact container procedure — stop, backup,
+articles copy, integrity check, restart, library still serving — is exercised in
+§7 item 10.)
 
 ---
 

@@ -6,7 +6,11 @@ services:
     # For Portainer: use prebuilt image if you prefer: image: ghcr.io/mitchins/yt2wiki:0.1.0
     image: yt2wiki:0.1.0
     container_name: yt2wiki
-    # Default: bind to host loopback only. For LAN behind an authenticated proxy, change to "0.0.0.0:8080:8000" and put a proxy in front.
+    # Bind to host loopback only. LAN access goes through an authenticated
+    # reverse proxy (see docs/deploy.md): either a host proxy with this
+    # loopback binding kept, or a container proxy on an isolated internal
+    # network with no published application port. Never publish 0.0.0.0:8080:
+    # that exposes the unauthenticated UI around the proxy.
     ports:
       - "127.0.0.1:8080:8000"
     volumes:
