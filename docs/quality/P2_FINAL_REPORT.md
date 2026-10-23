@@ -4,7 +4,8 @@
 **Remote:** https://github.com/mitchins/yt2wiki
 **Authoritative `origin/main`:** `edb56f9df053b306e130febdf58ea69eeeb79a9b` (PR #9 squash merge)
 **Worktrees:** `main` `496aed8` (pre-GitHub, preserved), `.worktrees/p1` `6105ee5`,
-`.worktrees/p2a` `p2a/sonar-baseline` `bcc404a`, `.worktrees/p2b` `p2b/deploy` `053b8aa`
+`.worktrees/p2a` `p2a/sonar-baseline` `bcc404a`, `.worktrees/p2b` `p2b/deploy` `1ddcda7`
+(rebased onto `origin/main` `facf3da`; pre-rebase backup branch `p2b-backup-fd7e7e3` kept until merge)
 **Stashes:** `stash@{0}` `fix/sonar-initial-findings`, `stash@{1,2}` V8 dirt (preserved, not applied)
 **Data:** `~/.local/share/yt2wiki` intact, `HF_HOME=/usbpool/yt-to-wiki/.cache/huggingface` preserved,
 `UV_CACHE_DIR=/usbpool/yt-to-wiki/.cache/uv` preserved
@@ -31,24 +32,23 @@ and its now-redundant `sonar.projectVersion=0.1.0` hunk removed for a clean diff
 
 ## PR B — Safe uploads and qualified deployment (evidence below, unmerged)
 
-**PR:** https://github.com/mitchins/yt2wiki/pull/12 `p2b/deploy` `053b8aa` → `main` (`edb56f9`)
-**Chain:** `ea0473c` base → `f6d9db3` docs → `c0d5590` coverage refactor → `210646f` retrigger →
-`d2b3c31` ruff → `d8fb776`/`97af25f` genuine idempotency → `371ae18` operator console →
-`3204262` CPU ASR → `247ee0a` compose/secrets → `9aa90eb` docs → `1cf16b7` retrigger →
-`f36034b` gate fixes → `ab691cb` taint scope → `7316ec8` containment → `053b8aa` S7761 →
-`3b5d70a` report → `071dc31` CodeRabbit batch (sqlite3, backup, 8-image) → `a11954e` retrigger →
-`a495089` S9073 split
-**CI:** `39887119549` `4m15s` `success` (head `071dc31`; `39886533928` cancelled on apt-mirror
-stall; earlier `39884390012` success on `7316ec8`, `39882861645` failed only on the then-open
-S8707). Docs/test-only pushes re-run the full suite green.
-**Sonar PR 12:** `projectStatus OK` — `new_security_rating 1`, `new_reliability_rating 1`,
-`new_maintainability_rating 1`, `new_coverage 94.5` (≥80), `new_duplicated_lines_density 0.0`,
-`new_security_hotspots_reviewed 100.0`. Open issues after the gate batch: **zero**
-(the last, pre-existing `S9073 test_persistence.py:56`, split in `a495089`; prior S8707 /
-complexity / S108 / S5713 / S1857-class findings all closed by the refactor + containment).
-**CodeRabbit:** incremental `@coderabbitai review` + `full review` both rate-limited on the
-final heads (`26 min` cooldown message); all earlier actionable findings addressed
-(PR #11 timestamp; PR #12 S8707/complexity/blocks via the Sonar gate, which is now green).
+**PR:** https://github.com/mitchins/yt2wiki/pull/12 `p2b/deploy` `1ddcda7` → `main` (`facf3da`,
+PR #11 merged; redundant `sonar.projectVersion` hunk removed — the diff holds only P2 files)
+**Chain (rebased, 21 commits replayed cleanly):** `ea0473c` base → `f6d9db3` docs → `c0d5590`
+coverage refactor → `210646f` retrigger → `d2b3c31` ruff → genuine idempotency →
+operator console → CPU ASR → compose/secrets → deploy docs → gate fixes (S8707, complexity,
+S108/S5713) → containment → S7761 → report → CodeRabbit batch (sqlite3, backup, 8-image) →
+S9073 split → report → **Phase 2:** role-aware CLI exits, validate shapes, EXDEV docs,
+errno parametrize, no-`0.0.0.0` proxy, stop-first backup procedure.
+**CI:** `39893077481` `2m26s` `success` on rebased head `1ddcda7` (force-with-lease after clean
+rebase; earlier `39887119549` success on `071dc31`, `39884390012` success on `7316ec8`,
+`39882861645` failed only on the then-open S8707; apt-mirror stalls cancelled + retriggered).
+**Sonar PR 12:** `projectStatus OK` — all six conditions green, `new_coverage 95.2%` (≥80,
+verified `new_lines_to_cover 217`), `new_duplicated_lines_density 0.0`. **Zero open issues.**
+**CodeRabbit:** 19 inline threads across three reviews, all addressed or explicitly deferred
+with rationale (see “CodeRabbit findings” below); final `full review` requests rate-limited,
+but the Sonar new-code gate (security/reliability/maintainability/coverage) is green with
+zero open findings, which enforces the same bars automatically.
 
 ### B1 — Upload registration is genuinely idempotent (issue #10)
 
@@ -68,29 +68,39 @@ in the upload path; dead portable-spelling branches were deleted, not exempted.
   destinations raise instead of deleting another source's media.
 - Loser cleanup (`_retire_loser`) deletes only files no row references; first-seen filename/title
   is preserved (`title`, `meta_json.original_filename`, `content_hash` recorded on insert).
-- Tests (`tests/test_upload_branch_coverage.py` 22, `test_upload_concurrent.py` 3,
+- Tests (`tests/test_upload_branch_coverage.py` 27, `test_upload_concurrent.py` 3,
   `test_upload_isolation.py` 3): barrier-gated INSERT collisions (not just racing threads),
   identical bytes with different filenames → single canonical file, stale/missing/corrupt/NULL rows
-  repaired, hostile foreign-owned destination refused and kept, link/EXDEV races both spellings,
-  repair races (concurrent fix wins / row deleted fails), unrelated-IntegrityError propagation,
-  hash-mismatch/failure recovery. **Every test asserts the directory holds exactly the registered
+  repaired, hostile foreign-owned destination refused and kept, link/EXDEV races, repair races
+  (concurrent fix wins / row deleted fails), unrelated-IntegrityError propagation,
+  hash-mismatch/failure recovery, and non-EXDEV link errors (`EACCES`/`EROFS`/`EPERM`) failing
+  explicitly with no partial file. **Every test asserts the directory holds exactly the registered
   canonical files** (`_dir_files == {_canonical_set}` + no `.tmp.*`), not merely absence of temps.
-- Full suite `241 passed, 5 skipped, 1 deselected`; upload section 100% line+branch covered
+  Filesystem support is explicitly restricted to hard-link-capable mounts (tmp and stored always
+  share a directory, so EXDEV is defensive-only); anything else fails loudly instead of
+  half-publishing.
+- Full suite `253 passed, 5 skipped, 1 deselected` (incl. 8 CLI exit-code tests + validate-shape
+  tests + 8-image structural assertion); upload section 100% line+branch covered
   (remaining services misses are pre-existing job/listing code).
 
 ### B2 — Pip wheel (re-qualified on final code)
 
-`/tmp/p2b-dist2/yt2wiki-0.1.0-py3-none-any.whl` (`225,730` bytes, `uv build`): clean
-`uv venv --python 3.12` install, `pip list` shows `yt2wiki 0.1.0` with no `torch`/`transformers`,
-`yt2wiki inference show` works (`{"providers": {}, "roles": {}, "status": {}}`).
+`/tmp/p2b-dist3/yt2wiki-0.1.0-py3-none-any.whl` (`uv build` from the rebased tree): clean
+`uv venv --python 3.12` install, `pip list` shows `yt2wiki 0.1.0` + `fastapi`/`starlette` with no
+`torch`/`transformers`, `yt2wiki inference show` works.
+(`starlette>=0.44` pinned in `dev` deps — verified the gateway-peer tests' `TestClient(app,
+client=...)` needs it: absent in 0.37.2, present in 0.44.0. CI installs `.[dev]`, so the floor
+is effective.)
 
 ### B3/B4 — Container, operator console, credential routing (demonstrated live)
 
-Image `yt2wiki:0.1.0` `1998be43f853` (`1.16 GB`, pinned slim-bookworm base + `sqlite3` CLI,
-unprivileged `yt2wiki`, no torch/transformers/weights). Container `yt2wiki-demo`,
-host `18080→8000` (host `8080` occupied by open-webui; same loopback binding),
-`--env-file` with `YT2WIKI_MOCK_KEY=test-secret-xyz` (demo volume `yt2wiki-demo-data`,
-mock at `http://172.17.0.1:8931`, since torn down after evidence capture):
+Image `yt2wiki:0.1.0` `eeede26b6a82` (`1.16 GB`, pinned slim-bookworm base + `sqlite3` CLI,
+unprivileged `yt2wiki`, no torch/transformers/weights; rebuilt from the rebased tree — earlier
+IDs `655c3ecf8af1`/`1998be43f853` were superseded builds of the same tag, all measurements below
+are from `eeede26b6a82`). Containers `yt2wiki-q`/`yt2wiki-restore`, host `18081/18082→8000`
+(host `8080` occupied; same loopback binding), `--env-file` with
+`YT2WIKI_MOCK_KEY=test-secret-xyz` (bind-mounted seed library `/tmp/q-data`, mock at
+`http://172.17.0.1:8931`; demo containers/volumes torn down after evidence capture):
 
 - `GET /settings` from the host (gateway peer) renders the **Operator only** notice with
   `data-remote` and the exact `docker exec` commands; mutation form disabled via JS.
@@ -101,9 +111,20 @@ mock at `http://172.17.0.1:8931`, since torn down after evidence capture):
 - `docker exec … curl … 127.0.0.1:8000/api/settings/inference` (localhost peer) → `200`.
 - `yt2wiki inference save --file /data/config/inference-payload.json` + `test --name mock`
   against a mock at `http://172.17.0.1:8931/v1` → `ok: true`,
-  `qualified_for_writer/qualified_for_vision: true`; the mock logged
+  `qualified_for_writer/qualified_for_vision: true`, exit `0`; the mock logged
   `Authorization: Bearer test-secret-xyz` on `/models` and `/chat/completions`;
   `/data/config/inference.json` contains only the variable name (`grep -c` secret → `0`).
+  Unreachable provider with assigned roles → exit `1`; `/models`-200 with failed generation
+  probe and the role assigned → exit `1`; writer-only success despite failing vision probe
+  → exit `0` (and vice versa); unassigned-but-reachable provider → exit `0` without claiming
+  a role (8 deterministic CLI tests).
+- Concurrent API uploads of identical bytes dedup to one `source_id`; post-ingest the pipeline
+  deliberately `shutil.move`s the staging file into `media/<sid>/video.mp4` (durable copy;
+  registration-time exact-canonical invariant proven by the 33 upload tests).
+- Backup procedure run verbatim: stop → temp-container `.backup` (245,760 bytes) + articles
+  copy → `integrity_check ok` (1 article, 2 sources) → restore into a fresh volume
+  (wal/shm removed, backup copied in, `integrity_check ok`, articles copied) → fresh container
+  serves the library; original restarted healthy.
 - Payload reads are contained to `<data>/config/` (symlinks resolved, `../` refused —
   demonstrated: `/tmp/p.json` → `rc=2` with a clear error), satisfying S8707.
 - Compose: untracked `chmod 600 .env` via `env_file` (+ tracked `.env.example`);
@@ -137,43 +158,64 @@ Fixture `jfk.flac` (11 s speech, sha256 `63a4b1e4…9a4a`) → ffmpeg to 16 kHz 
   `transcribe` outputs once by design (documented).
 - Consequence: new-video ASR **works** on the GPU-free service. No external ASR capability required.
 
-### Remaining Sonar/CodeRabbit state
+### CodeRabbit findings — all addressed or explicitly deferred
 
-- Gate `OK` on head `7316ec8` (94.5% new coverage). Post-gate commit `053b8aa` is a one-line JS
-  equivalent (`"remote" in root.dataset`, syntax-checked) addressing the last own finding S7761;
-  CI re-ran on it. Only pre-existing `S9073 test_persistence.py:56` (untouched file) may remain open.
-- `pyproject.toml` still ignores `SIM105`/`SIM102` from the earlier iteration — no longer exercised
-  by the rewritten code; left untouched as pre-existing config (ruff is not CI-gated).
-- `src/yt2wiki/backends/asr.py` has pre-existing findings (`F821 Sequence`, `UP035`, `SIM113`,
-  `I001` on lines not touched here) — noted, not in scope.
-- `src/yt2wiki/cli.py` F401/SIM108/I001 and `app.py:995` E741 are pre-existing base-code findings
-  on lines outside this PR's hunks.
+19 inline threads, verified against the rebased tree:
+- Upload idempotency heavy lift (winner inspection, stale repair, no orphans, no replace,
+  no swallowed conflicts) → the full `_read/_canonical/_retire/_publish/_register/_repair/_stage`
+  rewrite + 33 exact-canonical tests. Supersedes the outdated thread on the old implementation.
+- CLI exit codes for assigned-role qualification → `_cmd_inference_test` requires `ok` plus each
+  assigned role's probe; 8 deterministic tests (unreachable/401/failed generation/both roles/
+  writer-only/vision-only/unassigned).
+- `validate()` shape hardening (`InferenceConfigError`, never `AttributeError`/`TypeError`) +
+  malformed-shape tests — matches the suggested fix.
+- EXDEV-only fallback kept deliberately: extending to `EPERM`/`ENOTSUP` would need retry
+  coordination for the EEXIST-while-copying edge (spurious 500s on legitimate duplicates);
+  failure today is explicit with no partial/corrupt state, so unsupported filesystems are
+  documented as restricted instead (docstring + `EACCES`/`EROFS`/`EPERM` propagation tests).
+  Deferred with rationale, not silently dropped.
+- Portainer env mappings added; mounted-secret wording removed (files unsupported).
+- `0.0.0.0:8080` suggestion removed everywhere; only host-loopback upstream or isolated
+  internal network remain.
+- Sidecar weights staging via `docker run --rm -v yt2wiki-models:/models … cp` documented;
+  sidecar stays experimental, digest explicitly unpinned.
+- `sqlite3` added to the image (verified 3.40.1 + `.backup` in-container); single stop-first
+  backup procedure with restore + `integrity_check`, tested end-to-end (see B3/B4).
+- Host-backup claim corrected with host-native commands; separate DB/articles copies while
+  writers run are no longer presented as consistent.
+- 8-image request asserted structurally (exactly 8 `image_url` parts).
+- `starlette>=0.44` dev floor (verified needed); S7761 fixed; stale `S9073` split; report
+  CI-mapping and image-identity corrected here (single identity `eeede26b6a82` for all
+  current measurements; earlier tag builds labelled superseded).
+- Remaining ruff notes (`cli.py` F401/SIM108/I001, `app.py:995`, `inference.py` lazy imports,
+  `asr.py` dead helpers) are pre-existing base lines outside this PR's hunks; `pyproject`
+  `SIM105/SIM102` ignore likewise predates the rewrite (ruff not CI-gated).
 
 ## Completion status vs the task
 
-PR #11 is ready for operator merge (timestamp corrected, gate green, six conditions confirmed,
-version matched). After it merges, PR #12 needs a rebase dropping the redundant
-`sonar.projectVersion` hunk. PR #12 provides: genuinely idempotent upload registration with
-DB-boundary tests and exact-canonical assertions; a working operator-console management path with
-the Docker settings UI honestly marked read-only; env_file/Portainer credential routing proven
-against the running container with bearer capture; CPU ASR qualified with numbers; an explicitly
-experimental (not production-claimed) sidecar; honest Portainer/image docs with WAL-safe backup.
+PR #11 is merged (`facf3da`); PR #12 is rebased onto it with a clean P2-only diff (redundant
+`sonar.projectVersion` hunk gone). PR #12 provides: genuinely idempotent upload registration
+with DB-boundary tests and exact-canonical assertions; role-aware operator-console management
+with the Docker settings UI honestly marked read-only; env_file/Portainer credential routing
+proven against the running container with bearer capture; CPU ASR qualified with numbers; an
+explicitly experimental sidecar; honest Portainer/image docs with a tested WAL-safe backup.
 No merges performed. Blockers for #3 (Gemma) / #4 (Halogen) remain separate follow-ups.
 
 ## Evidence index
 
-- PRs: #11 `bcc404a` (CI `39878142654` success), #12 `053b8aa` (CI `39884390012` success,
-  Sonar `projectStatus OK` `new_coverage 94.5` `new_security_rating 1`)
-- Code: `services/__init__.py` upload block (no pragmas), `cli.py` `inference …`,
-  `web/app.py` `LOCAL_PEERS/peer_host/is_local_peer` + `remote_viewer`, `settings.html` notice,
-  `settings.js` dataset guard, `web/inference.py` `read_payload_file` containment,
-  `backends/asr.py` CPU compute mapping, `config/models.yaml` `cpu_compute_type`
-- Tests: 241 passed; `test_upload_branch_coverage` 22 DB-boundary tests, `test_inference_cli` 7
-  (incl. gateway 403/banner, bearer routing, containment, symlink escape)
-- Artifacts: wheel `/tmp/p2b-dist2/*.whl`, image `yt2wiki:0.1.0` `655c3ecf8af1`,
-  fixture `/tmp/asr-qual/{jfk.flac,jfk_16k.wav,cpu_asr_qual.py,large-v3.log}`, mock `/tmp/p2b-demo/`
-- Docs: `docs/deploy.md` (§3 secrets+console, §4 experimental, §5 honest proxy/guard, §6 Portainer
-  honesty+backup, §7 measured qualification), `.env.example`, both compose files validated by yaml parse
+- PRs: #11 merged as `facf3da`; #12 `1ddcda7` (CI `39893077481` success,
+  Sonar `projectStatus OK`, `new_coverage 95.2%` on verified `new_lines_to_cover 217`,
+  zero open issues)
+- Code: `services/__init__.py` upload block (no pragmas, EXDEV-only documented),
+  `cli.py` `inference …` (role-aware exits), `web/app.py` peer guard + `remote_viewer`,
+  `settings.html` notice, `settings.js` dataset guard, `web/inference.py` containment +
+  shape validation, `backends/asr.py` CPU mapping, `config/models.yaml` `cpu_compute_type`
+- Tests: 253 passed, 5 skipped; `test_upload_branch_coverage` 27, `test_inference_cli` 16
+  (exit codes, shapes, containment, gateway, bearer), 8-image structural assert
+- Artifacts: wheel `/tmp/p2b-dist3/*.whl`, image `yt2wiki:0.1.0` `eeede26b6a82`,
+  fixture `/tmp/asr-qual/{jfk.flac,jfk_16k.wav,cpu_asr_qual.py,large-v3.log}`, mock `/tmp/q-demo-mock.log`
+- Docs: `docs/deploy.md` (single stop-first backup + restore/verify, no `0.0.0.0` publish,
+  isolated-network proxy), `.env.example`, both compose files yaml-validated
 
 *Preserved: `~/.local/share/yt2wiki`, all three worktrees, stashes, `HF_HOME`, `UV_CACHE_DIR`,
 `build/`, `uv.lock`. Demo container `yt2wiki-demo` + mock stopped after evidence capture.*
