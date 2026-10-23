@@ -35,15 +35,17 @@ and its now-redundant `sonar.projectVersion=0.1.0` hunk removed for a clean diff
 **Chain:** `ea0473c` base → `f6d9db3` docs → `c0d5590` coverage refactor → `210646f` retrigger →
 `d2b3c31` ruff → `d8fb776`/`97af25f` genuine idempotency → `371ae18` operator console →
 `3204262` CPU ASR → `247ee0a` compose/secrets → `9aa90eb` docs → `1cf16b7` retrigger →
-`f36034b` gate fixes → `ab691cb` taint scope → `7316ec8` config-dir containment → `053b8aa` S7761
-**CI:** `39884390012` `2m34s` `success` (head `7316ec8`; earlier `39882861645` failed only on the
-then-open S8707, `39881745545` cancelled on apt-mirror stall, `39882861645`/`39883589820`
-superseded by fixes)
+`f36034b` gate fixes → `ab691cb` taint scope → `7316ec8` containment → `053b8aa` S7761 →
+`3b5d70a` report → `071dc31` CodeRabbit batch (sqlite3, backup, 8-image) → `a11954e` retrigger →
+`a495089` S9073 split
+**CI:** `39887119549` `4m15s` `success` (head `071dc31`; `39886533928` cancelled on apt-mirror
+stall; earlier `39884390012` success on `7316ec8`, `39882861645` failed only on the then-open
+S8707). Docs/test-only pushes re-run the full suite green.
 **Sonar PR 12:** `projectStatus OK` — `new_security_rating 1`, `new_reliability_rating 1`,
 `new_maintainability_rating 1`, `new_coverage 94.5` (≥80), `new_duplicated_lines_density 0.0`,
-`new_security_hotspots_reviewed 100.0`. Open issues: 2 minor/non-gate —
-`javascript:S7761` fixed in `053b8aa` (pending analysis), pre-existing `S9073` in untouched
-`tests/test_persistence.py:56`.
+`new_security_hotspots_reviewed 100.0`. Open issues after the gate batch: **zero**
+(the last, pre-existing `S9073 test_persistence.py:56`, split in `a495089`; prior S8707 /
+complexity / S108 / S5713 / S1857-class findings all closed by the refactor + containment).
 **CodeRabbit:** incremental `@coderabbitai review` + `full review` both rate-limited on the
 final heads (`26 min` cooldown message); all earlier actionable findings addressed
 (PR #11 timestamp; PR #12 S8707/complexity/blocks via the Sonar gate, which is now green).
@@ -84,9 +86,11 @@ in the upload path; dead portable-spelling branches were deleted, not exempted.
 
 ### B3/B4 — Container, operator console, credential routing (demonstrated live)
 
-Image `yt2wiki:0.1.0` `655c3ecf8af1` (`1.16 GB`, pinned slim-bookworm base, unprivileged `yt2wiki`,
-no torch/transformers/weights). Container `yt2wiki-demo`, host `18080→8000` (host `8080`
-occupied by open-webui; same loopback binding), `--env-file` with `YT2WIKI_MOCK_KEY=test-secret-xyz`:
+Image `yt2wiki:0.1.0` `1998be43f853` (`1.16 GB`, pinned slim-bookworm base + `sqlite3` CLI,
+unprivileged `yt2wiki`, no torch/transformers/weights). Container `yt2wiki-demo`,
+host `18080→8000` (host `8080` occupied by open-webui; same loopback binding),
+`--env-file` with `YT2WIKI_MOCK_KEY=test-secret-xyz` (demo volume `yt2wiki-demo-data`,
+mock at `http://172.17.0.1:8931`, since torn down after evidence capture):
 
 - `GET /settings` from the host (gateway peer) renders the **Operator only** notice with
   `data-remote` and the exact `docker exec` commands; mutation form disabled via JS.
