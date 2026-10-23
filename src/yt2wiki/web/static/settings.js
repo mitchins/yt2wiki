@@ -12,7 +12,7 @@
   // Operator-only deployments (Docker published port, SSH tunnel, LAN):
   // the server refuses save/test for non-localhost peers, so the form is
   // disabled here instead of failing silently. Use the operator console.
-  if (root.hasAttribute("data-remote")) {
+  if ("remote" in root.dataset) {
     $$("button, input, select", root).forEach((el) => { el.disabled = true; });
     if (msg) msg.textContent = "Read-only here — use `yt2wiki inference …` via docker exec.";
     return;
