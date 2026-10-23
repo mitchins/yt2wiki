@@ -105,5 +105,34 @@ If the API had been inaccessible we would note it; it was accessible and returne
 
 **Gate A:** cause established — gate not-computed due to missing new-code baseline (`previous_version` + `not provided`), not an overall 80% coverage failure. Evidence preserved above.
 
+## Post-merge verification — `edb56f9` (`2026-10-22T22:09:01+0000`)
+
+**PR #9 merged:** `edb56f9df053b306e130febdf58ea69eeeb79a9b` — `fix/sonar: harden upload path, async file, frame_out, test stability (#9)` squash merge `2026-10-23T09:07:34+1100`.
+**Second analysis:** `d42c4ef8-6979-4251-9cf4-47baadfc593a` `2026-10-22T22:09:01+0000` `revision edb56f9` (previous `f2255b38` `625aa2e` `2026-10-22T10:53:05+0000`).
+**Project version still `not provided`** (`sonar-project.properties` had no `sonar.projectVersion`).
+
+Current live Sonar main status (`2026-10-22T22:29Z`, `api/qualitygates/project_status?projectKey=mitchins_yt2wiki&branch=main`):
+
+- `status: OK` (was `NONE` on first analysis)
+- 6 conditions all `OK`: `new_reliability_rating 1`, `new_security_rating 1`, `new_maintainability_rating 1`, `new_coverage 90.0 LT 80 OK`, `new_duplicated_lines_density 0.0 GT 3 OK`, `new_security_hotspots_reviewed 100.0 LT 100 OK`
+- `periods: [{index:1, mode:"previous_version", date:"2026-10-22T10:53:05+0000"}]` — new-code window now defined against first analysis even with `not provided` versions; `measures/component` `coverage 59.3%` `new_coverage 90.0%` `new_lines_to_cover 32` `bugs 0` `vulnerabilities 4` `code_smells 306`.
+- Gate remains `Sonar way` id 9 `isCleanAsYouCode:true` — the six `new_*` conditions unchanged (thresholds `1/1/1/80/3/100`), no overall condition.
+- `project_branches/list` `main` `qualityGateStatus OK` `analysisDate 2026-10-22T22:09:01+0000`.
+- `measures/search_history` still shows empty `new_coverage` history values (SonarCloud internal), but `project_status` period is authoritative and proves evaluation.
+
+This confirms the earlier `NONE` was due to a single-analysis `previous_version` with no predecessor to diff against, not a persistent misconfiguration. However relying on `not provided` versioning is not reproducible — the next version event would otherwise inherit `not provided` and make history fragile.
+
+### Baseline now established (tracked and reproducible)
+
+To make the baseline reproducible and align with package versioning:
+
+- `sonar-project.properties:8` now sets `sonar.projectVersion=0.1.0` — matching `pyproject.toml:3` `version = "0.1.0"`. Prefer existing package version over inventing `0.2.0`; no documented release-version reason to diverge.
+- Existing `previous_version` new-code policy retained (`api/settings/values` `sonar.leak.period.type=previous_version` `INSTANCE` origin, no project override). No threshold lowering, no coverage exclusions, no historical-issue suppression.
+- **Effective version:** `0.1.0` from this PR onward. The first analysis after merge will carry `projectVersion 0.1.0` and establish the version baseline; it may report `NONE`/empty new-code until a subsequent changed-code analysis provides `new_lines_to_cover` to evaluate — a later analysis with changes is required to verify `new_coverage LT 80` etc. Do not suppress scanner `qualitygate.wait` failure to obtain green; keep wait semantics.
+- **Baseline commits/analyses:** `625aa2e`/`f2255b38` (initial), `edb56f9`/`d42c4ef8` (PR #9 merge) as historical; next `p2a`+`p2b` PRs will validate against `0.1.0`.
+- Overall coverage and historical issues remain visible: `59.3%` overall, `306` smells etc. are not excluded; `80%` applies only to new code as per Clean as You Code.
+
+Acceptance per P2 PR A: sonar config tracked (`sonar-project.properties`), baseline identifiable (`edb56f9`/`d42c4ef8` + `0.1.0`), subsequent changed-code gate verifies conditions, `80%` new-code intact, overall visible.
+
 ---
-*Generated from live SonarCloud APIs 2026-10-22T10:5xZ; dashboard remains at https://sonarcloud.io/dashboard?id=mitchins_yt2wiki&branch=main .*
+*Generated from live SonarCloud APIs 2026-10-22T10:53:05Z and 2026-10-22T22:29Z; dashboard remains at https://sonarcloud.io/dashboard?id=mitchins_yt2wiki&branch=main .*
