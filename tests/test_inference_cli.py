@@ -114,7 +114,8 @@ def test_inference_cli_show_save_roundtrip(tmp_path, capsys):
         ],
         "roles": {"writer": "lan"},
     }
-    payload_file = tmp_path / "payload.json"
+    (data / "config").mkdir(parents=True, exist_ok=True)
+    payload_file = data / "config" / "payload.json"
     payload_file.write_text(json.dumps(payload))
     assert _run_cli("--data-dir", str(data), "inference", "save",
                     "--file", str(payload_file)) == 0
@@ -132,34 +133,56 @@ def test_inference_cli_show_save_roundtrip(tmp_path, capsys):
 
 
 def test_read_payload_file_validates(tmp_path):
+    from yt2wiki.config import Settings as _Settings
+
     from yt2wiki.web import inference as inf2
 
-    good = tmp_path / "good.json"
+    settings = _Settings.load(data_dir=tmp_path / "payload-home", profile="compact",
+                              device_index=None)
+    cfgdir = settings.paths.root / "config"
+    cfgdir.mkdir(parents=True, exist_ok=True)
+    good = cfgdir / "good.json"
     good.write_text(json.dumps({"providers": [], "roles": {}}))
-    assert inf2.read_payload_file(good) == {"providers": [], "roles": {}}
-    with pytest.raises(Exception, match="no such payload file"):
-        inf2.read_payload_file(tmp_path / "absent.json")
-    bad = tmp_path / "bad.json"
+    assert inf2.read_payload_file(settings.paths, good) == {"providers": [], "roles": {}}
+    with pytest.raises(Exception, match="regular file inside"):
+        inf2.read_payload_file(settings.paths, cfgdir / "absent.json")
+    bad = cfgdir / "bad.json"
     bad.write_text("not json{")
     with pytest.raises(Exception, match="cannot read payload file"):
-        inf2.read_payload_file(bad)
-    lst = tmp_path / "list.json"
+        inf2.read_payload_file(settings.paths, bad)
+    lst = cfgdir / "list.json"
     lst.write_text("[1, 2]")
     with pytest.raises(Exception, match="must be a JSON object"):
-        inf2.read_payload_file(lst)
-    with pytest.raises(Exception, match="no such payload file"):
-        inf2.read_payload_file(tmp_path)  # a directory is not a payload file
+        inf2.read_payload_file(settings.paths, lst)
+    with pytest.raises(Exception, match="regular file inside"):
+        inf2.read_payload_file(settings.paths, tmp_path)  # outside the config dir
+    # Symlink escapes are resolved and refused
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"providers": [], "roles": {}}))
+    link = cfgdir / "link.json"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pass
+    else:
+        with pytest.raises(Exception, match="regular file inside"):
+            inf2.read_payload_file(settings.paths, link)
 
 
 def test_inference_cli_save_rejects_invalid(tmp_path, capsys):
     data = tmp_path / "cli-bad"
-    bad = tmp_path / "bad.json"
+    (data / "config").mkdir(parents=True, exist_ok=True)
+    bad = data / "config" / "bad.json"
     bad.write_text(json.dumps({"providers": [{"name": "x", "url": "not-a-url"}], "roles": {}}))
     assert _run_cli("--data-dir", str(data), "inference", "save",
                     "--file", str(bad)) == 2
-    missing = tmp_path / "missing.json"
+    missing = data / "config" / "missing.json"
     assert _run_cli("--data-dir", str(data), "inference", "save",
                     "--file", str(missing)) == 2
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"providers": [], "roles": {}}))
+    assert _run_cli("--data-dir", str(data), "inference", "save",
+                    "--file", str(outside)) == 2
     assert _run_cli("--data-dir", str(data), "inference") == 2
 
 
@@ -167,7 +190,8 @@ def test_inference_cli_test_qualifies_and_records(tmp_path, capsys, monkeypatch)
     import httpx
 
     data = tmp_path / "cli-test"
-    payload_file = tmp_path / "p.json"
+    (data / "config").mkdir(parents=True, exist_ok=True)
+    payload_file = data / "config" / "p.json"
     payload_file.write_text(json.dumps({
         "providers": [{"name": "mock", "url": "http://mock.test/v1",
                        "model": "m", "api_key_env": "YT2WIKI_MOCK_KEY"}],

@@ -336,7 +336,7 @@ def _cmd_inference_show(settings: Settings) -> int:
 
 def _cmd_inference_save(settings: Settings, args) -> int:
     try:
-        payload = inf.read_payload_file(args.file)
+        payload = inf.read_payload_file(settings.paths, args.file)
         cfg = inf.save(settings.paths, payload)
     except inf.InferenceConfigError as exc:
         print(f"invalid inference configuration: {exc}", file=sys.stderr)

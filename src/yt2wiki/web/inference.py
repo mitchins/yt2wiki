@@ -107,18 +107,26 @@ def save(paths, payload: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
-def read_payload_file(path: str | Path) -> dict[str, Any]:
+def read_payload_file(paths, path: str | Path) -> dict[str, Any]:
     """Read an operator-supplied inference payload file for the console CLI.
 
-    The path is validated as a regular file before opening (never a directory
-    or device), and the content must parse as a JSON object. Failures raise
-    InferenceConfigError so the CLI can report them without a traceback.
+    The path must resolve inside the library's config directory (symlinks are
+    resolved, so `../` and link escapes are refused) and be a regular file —
+    never a directory or device. The content must parse as a JSON object.
+    Failures raise InferenceConfigError so the CLI can report them without a
+    traceback. Keep payloads next to the file they produce, e.g.
+    `<data>/config/inference-payload.json`.
     """
-    candidate = Path(path)
-    if not candidate.is_file():
-        raise InferenceConfigError(f"no such payload file: {candidate}")
+    config_dir = (Path(paths.root) / "config").resolve()
     try:
-        data = json.loads(candidate.read_text(encoding="utf-8"))
+        resolved = Path(path).expanduser().resolve()
+    except OSError as exc:
+        raise InferenceConfigError(f"cannot resolve payload file: {exc}") from exc
+    if config_dir not in resolved.parents or not resolved.is_file():
+        raise InferenceConfigError(
+            f"payload file must be a regular file inside {config_dir}: {path}")
+    try:
+        data = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise InferenceConfigError(f"cannot read payload file: {exc}") from exc
     if not isinstance(data, dict):
