@@ -85,6 +85,10 @@ class StageContext:
     fingerprint: str
     artifacts: dict[str, Any] = field(default_factory=dict)
     _cancelled: Callable[[], bool] | None = None
+    # Job-captured inference provider identities (writer/vision/asr). When
+    # present, remote backends use these instead of the live config, so later
+    # settings changes cannot rewrite a running job's backend choice.
+    inference_snapshot: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------
     @property
@@ -141,6 +145,10 @@ class StageContext:
                        + ":" + json.dumps(self.settings.model(r).variant(self.settings.profile),
                                           sort_keys=True, default=str)
                        for r in roles},
+            # The asr-http registry variant holds env names, not values: hash
+            # the resolved server too, or a URL/model change reuses a stale
+            # transcript.
+            "asr_identity": self.settings.asr_identity() if "asr" in roles else {},
             "tuning": relevant,
             "extra": extra or {},
             "inputs": self.artifacts.get("_input_hashes", {}),

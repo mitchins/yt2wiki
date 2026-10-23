@@ -15,18 +15,21 @@ BASE_STAGES = ("acquisition", "inspect", "transcribe", "frame_candidates")
 
 
 def _record(db, job_id: str, stage: str, state: str, metrics: dict | None = None,
-            error: str | None = None, started: float | None = None) -> None:
+            error: str | None = None, started: float | None = None,
+            artifacts: dict | None = None) -> None:
     now = time.time()
     db.execute(
         """INSERT INTO stages(job_id, stage, state, started_at, finished_at, duration_s,
-                              metrics_json, error)
-           VALUES(?,?,?,?,?,?,?,?)
+                              metrics_json, error, artifacts_json)
+           VALUES(?,?,?,?,?,?,?,?,?)
            ON CONFLICT(job_id, stage) DO UPDATE SET state=excluded.state,
              finished_at=excluded.finished_at, duration_s=excluded.duration_s,
-             metrics_json=excluded.metrics_json, error=excluded.error""",
+             metrics_json=excluded.metrics_json, error=excluded.error,
+             artifacts_json=COALESCE(excluded.artifacts_json, stages.artifacts_json)""",
         (job_id, stage, state, started or now, now,
          (now - started) if started else 0.0,
-         json.dumps(metrics or {}), error))
+         json.dumps(metrics or {}), error,
+         json.dumps(artifacts) if artifacts is not None else None))
 
 
 def _set_stage(db, job_id: str, stage: str) -> None:
@@ -110,8 +113,39 @@ def adjudicate_section_with_judge(vb, sec: dict[str, Any],
     return chosen, record
 
 
+def _effective_asr_identity(settings, inference_snapshot: dict | None) -> dict[str, str]:
+    """The ASR server a new job would actually use (snapshot wins)."""
+    entry = (inference_snapshot or {}).get("asr") or {}
+    if entry.get("url"):
+        return {"url": str(entry["url"]).rstrip("/"), "model": str(entry.get("model") or "")}
+    return settings.asr_identity()
+
+
+def _recorded_asr_identity(db, source_id: str) -> dict | None:
+    """The ASR identity behind the stored transcript, if it was recorded."""
+    try:
+        rows = db.query(
+            """SELECT s.metrics_json FROM stages s JOIN jobs j ON j.job_id = s.job_id
+               WHERE j.source_id = ? AND s.stage = 'transcribe' AND s.state = 'done'
+               ORDER BY s.finished_at DESC LIMIT 5""",
+            (source_id,))
+    except Exception:  # noqa: BLE001
+        return None
+    for row in rows:
+        try:
+            metrics = json.loads(row["metrics_json"] or "{}")
+        except ValueError:
+            continue
+        if metrics.get("mode") == "asr" and isinstance(metrics.get("asr_identity"), dict):
+            return metrics["asr_identity"]
+        if metrics.get("mode") == "captions":
+            return {"mode": "captions"}
+    return None
+
+
 def _ensure_base(settings, db, service, source_id: str,
-                 job_id: str | None = None) -> dict[str, Any]:
+                 job_id: str | None = None,
+                 inference_snapshot: dict | None = None) -> dict[str, Any]:
     """Run acquisition/inspect/transcribe/frame_candidates only where missing.
 
     With `job_id`, the base stages are recorded under that job (so one job
@@ -127,6 +161,24 @@ def _ensure_base(settings, db, service, source_id: str,
     n_frames = db.query_one(
         "SELECT COUNT(*) c FROM frames WHERE source_id=?", (source_id,))["c"]
     counts["frames"] = n_frames
+    # Staleness check: a stored transcript made by a different ASR server
+    # must not be reused. Captions-mode transcripts carry no ASR identity
+    # and stay reusable; unrecorded (pre-feature) ones are trusted once.
+    if n_trans > 0:
+        recorded = _recorded_asr_identity(db, source_id)
+        if isinstance(recorded, dict) and recorded.get("url"):
+            effective = _effective_asr_identity(settings, inference_snapshot)
+            if recorded.get("url") != effective.get("url") or \
+                    recorded.get("model") != effective.get("model"):
+                log.info("asr identity changed (%s -> %s); retranscribing %s",
+                         recorded, effective, source_id)
+                db.execute("DELETE FROM transcript_segments WHERE source_id=?", (source_id,))
+                db.execute("DELETE FROM transcript_words WHERE source_id=?", (source_id,))
+                db.execute("DELETE FROM transcript_fts WHERE source_id=?", (source_id,))
+                # The per-job transcript.jsonl is rewritten by _persist; the
+                # stale job dir keeps its own copy, keyed by job id.
+                n_trans = 0
+                counts["transcript_segments"] = 0
     if n_trans > 0 and n_frames > 0:
         if job_id:
             for name in BASE_STAGES:
@@ -137,7 +189,8 @@ def _ensure_base(settings, db, service, source_id: str,
     from ..services import Service  # noqa: F401
     job = job_id or service.create_job(source_id, profile=settings.profile)
     ctx = StageContext(job_id=job, source_id=source_id, settings=settings, db=db,
-                       paths=settings.paths, fingerprint=settings.fingerprint())
+                       paths=settings.paths, fingerprint=settings.fingerprint(),
+                       inference_snapshot=inference_snapshot)
     for name, mod in (("acquisition", acquisition), ("inspect", inspect),
                       ("transcribe", transcribe), ("frame_candidates", frame_candidates)):
         if ((name == "acquisition" and n_trans > 0 and video_ok)
@@ -151,14 +204,47 @@ def _ensure_base(settings, db, service, source_id: str,
         if job_id:
             _set_stage(db, job_id, name)
             _record(db, job_id, name, "running")
-        mod.run(ctx)
+        # The returned metrics and stage artifacts carry per-job provenance
+        # (e.g. transcribe's asr_server / asr_unsupported_options / asr_warnings);
+        # record them instead of dropping them.
+        out = mod.run(ctx) or {}
         if job_id:
-            _record(db, job_id, name, "done", started=t)
+            _record(db, job_id, name, "done",
+                    out if isinstance(out, dict) else {},
+                    started=t, artifacts=dict(ctx.artifacts))
     return {"reused": False, "job": job,
             "transcript_segments": db.query_one(
                 "SELECT COUNT(*) c FROM transcript_segments WHERE source_id=?", (source_id,))["c"],
             "frames": db.query_one(
                 "SELECT COUNT(*) c FROM frames WHERE source_id=?", (source_id,))["c"]}
+
+
+def _live_snapshot(settings) -> dict[str, Any] | None:
+    """Build an inference snapshot from the live operator config (CLI jobs).
+
+    Separated for testability; `run_source` prefers a job-captured snapshot.
+    """
+    try:
+        from ..web import inference as _inf
+        snap = {}
+        cfg = _inf.load(settings.paths)
+        st = _inf.load_status(settings.paths)
+        for role in ("writer", "vision", "asr"):
+            name = (cfg.get("roles") or {}).get(role)
+            if name:
+                prov = (cfg.get("providers") or {}).get(name, {})
+                status = st.get(name, {})
+                snap[role] = {
+                    "provider": name, "url": prov.get("url"), "model": prov.get("model"),
+                    "api_key_env": prov.get("api_key_env"),
+                    "reachable": bool(status.get("ok")),
+                    "qualified_for_writer": bool(status.get("qualified_for_writer")),
+                    "qualified_for_vision": bool(status.get("qualified_for_vision")),
+                    "qualified_for_asr": bool(status.get("qualified_for_asr")),
+                }
+        return snap or None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def run_source(settings, db, service, source_id: str, *,
@@ -187,26 +273,7 @@ def run_source(settings, db, service, source_id: str, *,
             inference_snapshot = None
     # Fallback: live config for CLI jobs that have no snapshot
     if inference_snapshot is None:
-        try:
-            from ..web import inference as _inf
-            snap = {}
-            cfg = _inf.load(settings.paths)
-            st = _inf.load_status(settings.paths)
-            for role in ("writer", "vision"):
-                name = (cfg.get("roles") or {}).get(role)
-                if name:
-                    prov = (cfg.get("providers") or {}).get(name, {})
-                    status = st.get(name, {})
-                    snap[role] = {
-                        "provider": name, "url": prov.get("url"), "model": prov.get("model"),
-                        "api_key_env": prov.get("api_key_env"),
-                        "reachable": bool(status.get("ok")),
-                        "qualified_for_writer": bool(status.get("qualified_for_writer")),
-                        "qualified_for_vision": bool(status.get("qualified_for_vision")),
-                    }
-            inference_snapshot = snap or None
-        except Exception:  # noqa: BLE001
-            inference_snapshot = None
+        inference_snapshot = _live_snapshot(settings)
 
     t0 = time.time()
     result: dict[str, Any] = {"source_id": source_id, "stages": {}}
@@ -222,7 +289,8 @@ def run_source(settings, db, service, source_id: str, *,
 
     try:
         # --- base media/ASR ---
-        base = _ensure_base(settings, db, service, source_id, job_id=v9job)
+        base = _ensure_base(settings, db, service, source_id, job_id=v9job,
+                            inference_snapshot=inference_snapshot)
         result["base"] = base
 
         # --- write ---

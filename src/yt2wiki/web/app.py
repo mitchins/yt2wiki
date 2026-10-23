@@ -312,7 +312,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         cfg = inference.load(settings.paths)
         st = inference.load_status(settings.paths)
         snap: dict[str, Any] = {}
-        for role in ("writer", "vision"):
+        for role in ("writer", "vision", "asr"):
             name = (cfg.get("roles") or {}).get(role)
             if not name:
                 continue
@@ -326,6 +326,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "reachable": bool(status.get("ok")),
                 "qualified_for_writer": bool(status.get("qualified_for_writer")),
                 "qualified_for_vision": bool(status.get("qualified_for_vision")),
+                "qualified_for_asr": bool(status.get("qualified_for_asr")),
                 "models": status.get("models", [])[:5] if status.get("models") else [],
             }
         return snap

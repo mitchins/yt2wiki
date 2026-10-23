@@ -371,7 +371,7 @@ def _cmd_inference_test(settings: Settings, args) -> int:
     if not result.get("ok"):
         return 1
     roles = cfg.get("roles") or {}
-    required = [role for role in ("writer", "vision") if roles.get(role) == args.name]
+    required = [role for role in ("writer", "vision", "asr") if roles.get(role) == args.name]
     if "writer" in required and not result.get("qualified_for_writer"):
         print(f"provider {args.name!r} is assigned the writer role but failed writer qualification",
               file=sys.stderr)
@@ -379,6 +379,10 @@ def _cmd_inference_test(settings: Settings, args) -> int:
     if "vision" in required and not result.get("qualified_for_vision"):
         print(f"provider {args.name!r} is assigned the vision role but failed vision qualification",
               file=sys.stderr)
+        return 1
+    if "asr" in required and not result.get("qualified_for_asr"):
+        print(f"provider {args.name!r} is assigned the transcription role but failed "
+              f"transcription qualification", file=sys.stderr)
         return 1
     return 0
 

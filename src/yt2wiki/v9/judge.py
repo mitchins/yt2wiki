@@ -160,8 +160,11 @@ def classify_frame(backend, path: str) -> str:
         im = Image.open(path).convert("RGB")
     except Exception:  # noqa: BLE001
         return "unreadable"
+    # Reasoning models spend completion tokens thinking before answering
+    # (Halogen uses ~26 reasoning tokens on this prompt); a 20-token budget
+    # starves the answer to empty, which vetoes every frame as unreadable.
     try:
-        raw = backend.rank_images([im], CLASSIFY_PROMPT, max_new_tokens=20,
+        raw = backend.rank_images([im], CLASSIFY_PROMPT, max_new_tokens=150,
                                   temperature=0.0,
                                   system="Reply with only the label.")
     except Exception as exc:  # noqa: BLE001
@@ -421,8 +424,10 @@ def classify_many(backend, paths: Sequence[str], *,
         good = [(k, im) for k, im in enumerate(images) if im is not None]
         if good:
             try:
+                # See classify_frame: reasoning models need headroom
+                # beyond the label itself or the answer comes back empty.
                 out = backend.describe_batch(
-                    [im for _, im in good], CLASSIFY_PROMPT, max_new_tokens=20,
+                    [im for _, im in good], CLASSIFY_PROMPT, max_new_tokens=150,
                     temperature=0.0, system="Reply with only the label.",
                     batch_size=4)
                 calls += 1

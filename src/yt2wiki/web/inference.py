@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-ROLES = (("writer", "Writing"), ("vision", "Image judging"))
+ROLES = (("writer", "Writing"), ("vision", "Image judging"), ("asr", "Transcription"))
 _NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 _ENV = re.compile(r"^YT2WIKI_[A-Z0-9_]{1,56}$")
 
@@ -105,7 +105,7 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
         raise InferenceConfigError("“roles” must map role names to endpoint names.")
     roles = {}
     for role, _label in ROLES:
-        target = str(roles_in.get(role) or "").strip().lower()
+        target = str((payload.get("roles") or {}).get(role) or "").strip().lower()
         if target and target not in providers:
             raise InferenceConfigError(f"{_label} is assigned to an endpoint that is not listed.")
         roles[role] = target
@@ -171,30 +171,45 @@ def test_endpoint(url: str, api_key_env: str = "", *, timeout: float = 6.0,
                     "checked_at": time.time(), "url": url}
         headers["Authorization"] = f"Bearer {key}"
     t0 = time.time()
+    models: list[str] = []
+    llm_like = False
     try:
         r = httpx.get(f"{url}/models", headers=headers, timeout=timeout)
-    except httpx.HTTPError as exc:
-        return {"ok": False, "error": _short_error(exc), "checked_at": time.time(), "url": url,
-                "qualified_for_writer": False, "qualified_for_vision": False}
-    latency = round((time.time() - t0) * 1000)
-    if r.status_code in (401, 403):
-        return {"ok": False, "error": "The endpoint refused the API key.",
-                "status": r.status_code, "checked_at": time.time(), "url": url,
-                "qualified_for_writer": False, "qualified_for_vision": False}
-    if r.status_code != 200:
-        return {"ok": False, "error": f"HTTP {r.status_code} from {url}/models",
-                "status": r.status_code, "checked_at": time.time(), "url": url,
-                "qualified_for_writer": False, "qualified_for_vision": False}
-    try:
-        data = r.json()
-        models = [str(m.get("id")) for m in (data.get("data") or []) if m.get("id")]
-    except (ValueError, AttributeError):
-        return {"ok": False, "error": "The response was not an OpenAI-compatible model list.",
-                "checked_at": time.time(), "url": url,
-                "qualified_for_writer": False, "qualified_for_vision": False}
-    base = {"ok": True, "models": models[:20], "latency_ms": latency,
+    except httpx.HTTPError:
+        r = None  # connection failed; fall through to the ASR probe
+    else:
+        latency = round((time.time() - t0) * 1000)
+        if r.status_code in (401, 403):
+            return {"ok": False, "error": "The endpoint refused the API key.",
+                    "status": r.status_code, "checked_at": time.time(), "url": url,
+                    "qualified_for_writer": False, "qualified_for_vision": False}
+        if r.status_code == 200:
+            try:
+                data = r.json()
+                models = [str(m.get("id")) for m in (data.get("data") or []) if m.get("id")]
+                llm_like = True
+            except (ValueError, AttributeError):
+                llm_like = False
+    if not llm_like:
+        # Not an LLM-style /models endpoint — maybe a transcription server.
+        # Probe the /asr contract with a synthetic tone (proves the protocol,
+        # not word timestamps: a sine has no speech, so per-job validation
+        # still hard-fails a text-only server).
+        return _probe_asr(url, headers, model, timeout)
+    base = {"ok": True, "kind": "llm", "models": models[:20], "latency_ms": latency,
             "checked_at": time.time(), "url": url,
-            "qualified_for_writer": False, "qualified_for_vision": False}
+            "qualified_for_writer": False, "qualified_for_vision": False,
+            "qualified_for_asr": False}
+    # A server may speak both contracts (e.g. OpenAI serves /models and
+    # /audio). Probe /asr too so a dual provider can qualify for
+    # transcription; a negative never clobbers the LLM result.
+    try:
+        asr_extra = _probe_asr(url, headers, model, min(timeout, 15.0))
+        if asr_extra.get("qualified_for_asr"):
+            base["qualified_for_asr"] = True
+            base["asr_note"] = asr_extra.get("note", "")
+    except Exception:  # noqa: BLE001 - LLM qualification stands on its own
+        pass
     # --- writer qualification: real JSON generation ---
     try:
         writer_ok = _qualify_writer(url, headers, model or (models[0] if models else ""), timeout)
@@ -309,6 +324,61 @@ def _qualify_vision(url: str, headers: dict[str, str], model: str, timeout: floa
         except Exception:
             continue
     return False
+
+
+def _probe_asr(url: str, headers: dict[str, str], model: str, timeout: float) -> dict[str, Any]:
+    """Transcription-protocol probe: POST a synthetic tone to /asr.
+
+    Success (HTTP 200 + an object with text/segments/language) means the
+    server speaks the transcription contract — ``qualified_for_asr``. It
+    does NOT prove word timestamps (a sine tone carries no speech); the
+    adapter hard-fails per job when words are required but missing, so a
+    text-only server can never qualify silently.
+    """
+    import tempfile
+
+    import httpx
+
+    from ..backends.asr_http import write_sine_wav
+
+    base: dict[str, Any] = {"url": url, "checked_at": time.time(), "kind": "asr",
+                            "qualified_for_writer": False, "qualified_for_vision": False,
+                            "qualified_for_asr": False}
+    tmp = Path(tempfile.mkdtemp(prefix="yt2wiki-asr-probe-")) / "probe.wav"
+    try:
+        write_sine_wav(tmp)
+        with open(tmp, "rb") as fh:
+            files = {"audio_file": ("probe.wav", fh, "audio/wav")}
+            r = httpx.post(f"{url}/asr?output=json&word_timestamps=true",
+                           files=files, headers=headers, timeout=timeout + 60)
+    except httpx.HTTPError as exc:
+        base.update(ok=False, error=_short_error(exc))
+        return base
+    finally:
+        try:
+            tmp.unlink()
+            tmp.parent.rmdir()
+        except OSError:
+            pass
+    if r.status_code != 200:
+        base.update(ok=False, error=f"HTTP {r.status_code} from {url}/asr",
+                    status=r.status_code)
+        return base
+    try:
+        data = r.json()
+    except ValueError:
+        base.update(ok=False, error="The endpoint did not return transcription JSON.")
+        return base
+    if not isinstance(data, dict) or not isinstance(data.get("segments"), list) \
+            or not isinstance(data.get("text"), str) or not data.get("language"):
+        base.update(ok=False,
+                    error="The response is not transcription JSON "
+                          "(need language/segments/text).")
+        return base
+    base.update(ok=True, qualified_for_asr=True,
+                note="Speaks the transcription protocol; word timestamps are "
+                     "enforced per transcription, not by this probe.")
+    return base
 
 
 def record_test(paths, name: str, result: dict[str, Any]) -> None:

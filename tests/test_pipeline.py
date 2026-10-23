@@ -321,7 +321,14 @@ def test_headroom_prefers_a_card_that_fits(tmp_path, monkeypatch):
 
     settings_compact = Settings.load(data_dir=tmp_path, profile="compact")
     tiny = plan(settings_compact, "asr")
-    assert tiny.device_index == 0
+    # Default transcription is HTTP (zero local footprint), so headroom is
+    # moot for it — the loader bypasses planning for asr-http entirely.
+    assert tiny.device_index == 1
+    # The explicit local model still prefers the card that fits.
+    settings_local = Settings.load(data_dir=tmp_path, profile="compact",
+                                   model_overrides={"asr": "whisper-large-v3"})
+    local = plan(settings_local, "asr")
+    assert local.device_index == 0
 
 
 def test_headroom_caps_when_nothing_fits(tmp_path, monkeypatch):

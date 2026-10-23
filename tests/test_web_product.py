@@ -356,7 +356,7 @@ def test_inference_settings_validate_and_never_store_keys(env):
     assert ok.status_code == 200
     saved = json.loads((settings.paths.root / "config" / "inference.json").read_text())
     assert saved["providers"]["lan"]["url"] == "http://10.0.0.2:8000/v1"
-    assert saved["roles"] == {"writer": "lan", "vision": "lan"}
+    assert saved["roles"] == {"writer": "lan", "vision": "lan", "asr": ""}
     unknown = client.post("/api/settings/inference", json={"providers": [], "roles": {"writer": "x"}})
     assert unknown.status_code == 400
     page = client.get("/settings").text

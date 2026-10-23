@@ -78,7 +78,9 @@ Do not publish to PyPI without a separate licence decision — the project has n
 **Base image:** `python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70`
 (pinned digest, `124 MB` base). The `yt2wiki:0.1.0` image is `~1.16 GB` including
 `ffmpeg`/`tesseract` and the Python deps (`fastapi`, `uvicorn`, `jinja2`, `pillow`,
-`httpx`, `yt-dlp`, `onnxruntime`, `ctranslate2`, `av`, `numpy`, `faster-whisper` without `torch`).
+`httpx`, `yt-dlp`, `pytesseract`, `numpy` — and, since P3, **no**
+`faster-whisper`/`ctranslate2`/`av`/`torch`: transcription and inference are
+external HTTP services, see §3/§3.1).
 
 Contents verified:
 
@@ -130,12 +132,20 @@ authenticated proxy (see §4).
 
 ## 3. Service / model separation
 
-Default inference is **external OpenAI-compatible providers** (`src/yt2wiki/web/inference.py`).
+Default inference is **external providers** (`src/yt2wiki/web/inference.py`):
+LLM/vision roles speak OpenAI-compatible `/chat/completions`; transcription
+speaks the Whisper service `/asr` contract (see §3.1). yt2wiki owns no
+weights and performs no local inference on the default path.
 
-- Configuration lives in `/data/config/inference.json` (`providers: {name: {url, model, api_key_env}}`, `roles: {writer, vision}`) and status in `inference_status.json`. Secrets are never stored: `api_key_env` is the *name* of an env var (`^YT2WIKI_[A-Z0-9_]{1,56}$`), validated by `validate_api_key_env`, not the key itself. Compose files never hardcode keys.
+- Configuration lives in `/data/config/inference.json` (`providers: {name: {url, model, api_key_env}}`, `roles: {writer, vision, asr}`) and status in `inference_status.json`. Secrets are never stored: `api_key_env` is the *name* of an env var (`^YT2WIKI_[A-Z0-9_]{1,56}$`), validated by `validate_api_key_env`, not the key itself. Compose files never hardcode keys.
+- Role mapping: the pipeline asks for `text` (writing), `vision` (image
+  judging) and `asr` (transcription); the operator console names these
+  assignments `writer`, `vision` and `asr` (`loader._remote_spec` maps
+  `text → writer`). One provider entry may serve both writing and vision —
+  assign the same provider to both roles.
 - `yt2wiki serve` does not require `LLAMA_SERVER_DIR` when providers are remote. `LlamaServerVLM` is only instantiated when `config/models.yaml` assigns `engine: llamacpp-server` and the pipeline requests that role; the web app never silently loads a local Transformers model when `inference.json` points to a remote URL. `backends/loader.py` selects `RemoteOpenAIBackend` when the job's snapshotted `inference` config contains a provider URL.
-- The complete web workflow honours the snapshotted provider endpoints: `submit_upload` → `enqueue` captures `_inference_snapshot()` (`writer.url/model`, `vision.url/model`, `reachable/qualified_for_*`) into the job's `config_json`; later `run_job` uses that snapshot, not live settings, so changing providers does not rewrite running jobs.
-- A hosted model may qualify for writer only, vision only, or both — `test_endpoint` qualifies each role via real generation (JSON writer probe and 2-image rubric judge) and writes `qualified_for_writer`/`qualified_for_vision` to `inference_status.json`. Do not infer capability from a successful `/models` connection.
+- The complete web workflow honours the snapshotted provider endpoints: `submit_upload` → `enqueue` captures `_inference_snapshot()` (`writer/vision/asr url/model`, `reachable/qualified_for_*`) into the job's `config_json`; later `run_job` uses that snapshot, not live settings, so changing providers does not rewrite running jobs.
+- A hosted model may qualify for writer only, vision only, or both — `test_endpoint` qualifies each role via real generation (JSON writer probe and 2-image rubric judge) and writes `qualified_for_writer`/`qualified_for_vision` to `inference_status.json`. A transcription server is recognised by the absence of `/models` and probed against `/asr` (`qualified_for_asr`); per-job validation still hard-fails a text-only server when words are required. Do not infer capability from a successful `/models` connection.
 - The service starts and serves the library when all providers are offline. `yt2wiki info` prints `cuda available : False` without importing torch, and `GET /library`/`/articles` work. Submitting a job that needs an unavailable model yields an explicit `failed` state with `error` and `findings` (e.g. `model_loads` row with `ok=0`), not a silent fallback or a hanging queue. The job can be retried after the provider returns.
 
 Verification:
@@ -195,6 +205,26 @@ docker cp /tmp/inference-payload.json yt2wiki:/data/config/inference-payload.jso
 docker exec yt2wiki yt2wiki inference save --file /data/config/inference-payload.json
 ```
 
+Transcription uses a separate provider entry pointing at the Whisper
+service (no `/v1` suffix — the adapter drives its `/asr` contract) and the
+`asr` role. Do not reuse the LLM `/v1` example for ASR:
+
+```bash
+cat > /tmp/inference-asr-payload.json <<'EOF'
+{"providers": [{"name": "whisper-svc", "url": "http://asr:9000",
+               "model": "large-v3", "api_key_env": ""}],
+ "roles": {"asr": "whisper-svc"}}
+EOF
+docker cp /tmp/inference-asr-payload.json yt2wiki:/data/config/inference-asr-payload.json
+docker exec yt2wiki yt2wiki inference save --file /data/config/inference-asr-payload.json
+docker exec yt2wiki yt2wiki inference test --name whisper-svc
+```
+
+`test` reports `qualified_for_asr` only when the server speaks the
+transcription protocol; per-transcription validation still hard-fails a
+text-only server when words are required. `model` is the operator-declared
+server-side model (recorded for provenance — `/asr` echoes no model id).
+
 - `save` accepts the same `{providers, roles}` JSON schema as the web API and
   validates it before writing (`YT2WIKI_…` names only, `http(s)://` URLs;
   malformed shapes fail with a controlled error, never a traceback).
@@ -210,6 +240,58 @@ provider (`http://172.17.0.1:8931/v1`, key `YT2WIKI_MOCK_KEY=test-secret-xyz` vi
 `/models` and `/chat/completions`, `inference test` reported
 `qualified_for_writer/…_vision: true`, and `/data/config/inference.json`
 contained only the variable name (see §7).
+
+### 3.1 Default transcription backend (HTTP, no bundled ASR runtime)
+
+The default install ships **no** ASR inference runtime: `faster-whisper` moved
+to the `asr-local` extra (`pip install yt2wiki[asr-local]`, explicitly
+selected per override, never an implicit fallback). Transcription goes over
+HTTP to a separately operated Whisper service
+(`src/yt2wiki/backends/asr_http.py`, engine `asr-http`, registry default for
+every profile).
+
+- Selected service: **ahmetoner/whisper-asr-webservice** (community go-to:
+  3.3k stars, maintained — v1.10.0, faster-whisper v1.2.1 engine). The adapter
+  speaks its `/asr?output=json` contract (multipart `audio_file`, query
+  `task/language/word_timestamps/vad_filter`) and validates the response into
+  the existing transcript schema (segments, word timestamps, language,
+  duration, per-segment confidence metadata, model provenance).
+- **Protocol note (explicitly non-OAI):** this service does NOT implement
+  OpenAI `POST /v1/audio/transcriptions` (verified 404). An OAI-compatible
+  server (e.g. speaches-ai/speaches) could attach via its `verbose_json`
+  shape, but ghcr.io was unreachable from the qualification network, so no
+  OAI-protocol server was run here. Users who BYO an OAI server get the same
+  per-job validation; the pinned example below is the qualified path.
+- What is preserved: timestamped segments, word-level timestamps
+  (**required** — a wordless response while `word_timestamps` is requested is
+  a hard `AsrHttpError`, never a silent downgrade), language (confidence
+  from `/detect-language`, `None` when unavailable — never invented),
+  duration (WAV header), server identity (`YT2WIKI_ASR_MODEL` declares the
+  server-side model for provenance; `/asr` echoes no model id), HTTP
+  failures/timeouts/malformed responses with server + status + body excerpt.
+- Explicitly unsupported by `/asr` and **recorded per job**
+  (`asr_unsupported_options`), never emulated: vocabulary hints / initial
+  prompt, beam size, condition-on-previous-text, temperature, translation.
+  Structural validation is bidirectional (monotonic finite timestamps,
+  bounds, text, word/segment containment and ordering); zero-duration words
+  the server emits at audio boundaries are accepted with an `asr_warnings`
+  entry, not treated as precise timings.
+- Compose example (`docker-compose.yml`, profile `asr`, digest-pinned GPU
+  image, persistent `asr-models` cache, no published ports — reachable only
+  as `http://asr:9000`): `docker compose --profile asr up -d`. The service
+  points at it via `YT2WIKI_ASR_URL=http://asr:9000`, or assign the
+  transcription role to a provider and test it. In Docker, browser sessions
+  cannot reach the operator console, so configure via the console instead —
+  from the host against the loopback UI, or headless:
+  `docker exec yt2wiki yt2wiki inference save --file /data/config/<payload>.json`
+  then `docker exec yt2wiki yt2wiki inference test --name <asr-provider>`
+  (`qualified_for_asr`). `test_endpoint` auto-detects transcription servers
+  (no `/models` → `/asr` probe); LLM-only servers stay unqualified for `asr`.
+  On multi-GPU hosts pin the card (`device_ids`, not `count: 1`): large-v3
+  OOMs on a bare 8 GB card.
+- Local faster-whisper remains for explicit use (`--model whisper-large-v3`
+  override); without the `asr-local` extra its `load()` fails with an
+  actionable error (install the extra or configure the HTTP provider).
 
 ---
 
