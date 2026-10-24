@@ -86,7 +86,7 @@ def _read_sessions(paths) -> dict[str, Any]:
 
 
 @contextmanager
-def _session_lock(paths):
+def _session_lock(paths) -> Iterator[None]:
     """Process-shared lock for session read-modify-write cycles.
 
     Login and logout overlap otherwise: the loser’s write can resurrect a
