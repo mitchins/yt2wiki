@@ -419,10 +419,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
     if current < 4 and current > 0:
         conn.executescript(MIGRATION_V4)
-        _ensure_generation_pointer(conn)
-    elif current == 0:
-        # Fresh database: SCHEMA already created the v4 tables above.
-        _ensure_generation_pointer(conn)
+    # The generation pointer is ensured on every supported open, not just
+    # during the 3→4 upgrade: a stamp alone never proves the column exists
+    # (a library can reach stamp 4 through a path that skipped the ALTER).
+    _ensure_generation_pointer(conn)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),

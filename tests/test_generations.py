@@ -94,6 +94,33 @@ def test_v3_fixture_migrates_without_data_loss(tmp_path):
     assert again.query_one("SELECT COUNT(*) c FROM article_revisions")["c"] == 2
 
 
+def test_v4_stamp_without_pointer_column_is_healed(tmp_path):
+    """A v4-stamped library missing current_generation_id gains it on open.
+
+    Regression: the stamp alone must never be trusted — the pointer ensure
+    runs on every supported open, preserving all existing rows.
+    """
+    import sqlite3 as _s3
+
+    p = tmp_path / "heal.sqlite3"
+    conn = _s3.connect(str(p))
+    conn.execute("CREATE TABLE articles(article_id TEXT PRIMARY KEY, source_id TEXT NOT NULL,"
+                 " title TEXT NOT NULL, markdown TEXT NOT NULL, html TEXT,"
+                 " version INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',"
+                 " created_at REAL NOT NULL, updated_at REAL NOT NULL)")
+    conn.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', '4')")
+    conn.execute("INSERT INTO articles(article_id, source_id, title, markdown, version,"
+                 " status, created_at, updated_at) VALUES('a','s','T','# T',1,'published',1.0,2.0)")
+    conn.commit()
+    conn.close()
+    db = Database(p)
+    cols = {r["name"] for r in db.query("PRAGMA table_info(articles)")}
+    assert "current_generation_id" in cols
+    assert db.query_one("SELECT title FROM articles WHERE article_id='a'")["title"] == "T"
+    assert db.query_one("SELECT value FROM meta WHERE key='schema_version'")["value"] == str(SCHEMA_VERSION)
+
+
 def test_future_schema_is_refused(tmp_path):
     db = Database(tmp_path / "f.sqlite3")
     db.execute("UPDATE meta SET value='999' WHERE key='schema_version'")

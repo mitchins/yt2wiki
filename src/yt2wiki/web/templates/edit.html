@@ -2,6 +2,7 @@
 {% from "_icons.html" import icon %}
 {% block title %}Editing {{ article.title }} — yt2wiki{% endblock %}
 {% block main %}
+{% if operator %}
 <div class="editbar" data-editor="{{ article.article_id }}" data-source="{{ article.source_id }}" data-version="{{ article.version }}">
   <div class="wrap">
     <a class="btn btn-ghost btn-sm" href="/articles/{{ article.article_id }}" aria-label="Back to the guide">{{ icon("arrow-left") }}</a>
@@ -85,5 +86,23 @@
   </div>
 </main>
 <div class="toast" data-toast role="status"></div>
+{% else %}
+<main class="wrap page">
+  <div class="add-wrap">
+    <div class="section-head"><h2>Editing {{ article.title }}</h2></div>
+    <section class="panel form-panel">
+      <h3>Operator login</h3>
+      <p class="muted">Log in to edit this guide.</p>
+      <form data-login>
+        <label class="field"><span>Operator password</span>
+          <input class="input" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <p class="notice" data-login-error role="alert" hidden></p>
+        <div><button class="btn" type="submit">Log in</button></div>
+      </form>
+    </section>
+  </div>
+</main>
+{% endif %}
 {% endblock %}
-{% block scripts %}<script src="/static/app.js" defer></script><script src="/static/editor.js" defer></script>{% endblock %}
+{% block scripts %}<script src="/static/app.js" defer></script><script src="/static/auth.js" defer></script><script src="/static/editor.js" defer></script>{% endblock %}

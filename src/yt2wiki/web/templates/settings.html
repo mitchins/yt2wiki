@@ -6,38 +6,100 @@
   <div class="section-head"><h2>Settings</h2></div>
   <div class="settings">
 
-    <section class="panel set-panel" aria-labelledby="inf-h" data-inference{% if remote_viewer %} data-remote{% endif %}>
-      <h2 id="inf-h">Inference</h2>
-      <p class="lede">yt2wiki sends writing and image-judging requests to an OpenAI-compatible endpoint — a
-        vLLM or llama.cpp server on this machine or your network. Add one, test the connection, then choose what
-        it’s used for.</p>
-      {% if remote_viewer %}
-      <p class="notice" data-remote-notice><span><strong>Operator only.</strong> You are viewing Settings through a
-        non-localhost connection (Docker published port, SSH tunnel or LAN), so saving and testing endpoints is
-        disabled for this session — an SSH tunnel does not make this a localhost peer. Configure inference from the
-        operator console instead:<br>
-        <code>docker exec yt2wiki yt2wiki inference save --file /data/config/inference-payload.json</code><br>
-        <code>docker exec yt2wiki yt2wiki inference test --name &lt;endpoint&gt;</code><br>
-        See <code>docs/deploy.md</code> (“Operator console”).</span></p>
+    <section class="panel set-panel" aria-labelledby="op-h">
+      <h2 id="op-h">Operator</h2>
+      {% if not auth_configured %}
+      <p class="muted" style="margin:0">Mutations are disabled: no operator password is configured. Set
+        <code>YT2WIKI_OPERATOR_PASSWORD</code> in the container environment and restart yt2wiki, then log in here.</p>
+      {% elif not operator %}
+      <h3>Operator login</h3>
+      <form data-login>
+        <label class="field"><span>Operator password</span>
+          <input class="input" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <p class="notice" data-login-error role="alert" hidden></p>
+        <div class="set-actions"><button class="btn" type="submit">Log in</button></div>
+      </form>
+      {% else %}
+      <p class="muted" style="margin:0">Logged in as operator. <button class="btn btn-quiet btn-sm" type="button" data-logout>Log out</button></p>
       {% endif %}
+    </section>
 
+    <section class="panel set-panel" aria-labelledby="ready-h">
+      <h2 id="ready-h">Readiness</h2>
+      <dl class="kv" data-readiness>
+        {% for role, label in roles %}
+        {% set r = readiness.get(role) %}
+        <dt>{{ r.label if r else label }}</dt>
+        <dd><span class="pill {{ 'ok' if r and r.state == 'Ready' else 'warn' if r and r.state == 'Needs setup' else 'bad' }}">{{ r.state if r else '—' }}</span>
+          <span class="muted">{{ r.detail if r else '' }}</span></dd>
+        {% endfor %}
+      </dl>
+      <p class="muted" style="font-size:.85rem">Guides need writing plus transcription before the Make guide button will queue a job.</p>
+    </section>
+
+    {% if operator %}
+    <section class="panel set-panel" aria-labelledby="llm-h" data-guided-llm>
+      <h2 id="llm-h">Writing &amp; images — one multimodal LLM</h2>
+      <p class="lede">One OpenAI-compatible endpoint does both jobs: it writes the guide and judges the images.
+        Enter it once below — saving tests the real server and assigns both roles when both pass.
+        Addresses must be reachable <em>from inside the publisher container</em> (container network, not your laptop).</p>
+      {% set llm_name = inference.roles.get('writer') or '' %}
+      <div class="grid">
+        <label class="field"><span>Name</span><input class="input" data-g="name" value="{{ llm_name or 'llm' }}" required></label>
+        <label class="field"><span>Model</span><input class="input" data-g="model" value="{{ guided_llm.get('model', '') }}" placeholder="Server default model"></label>
+        <label class="field wide"><span>Base URL</span><input class="input" data-g="url" type="url" value="{{ guided_llm.get('url', '') }}" placeholder="http://host:port/v1" required></label>
+        <label class="field wide"><span>API key variable <span class="muted" style="font-weight:400">— optional</span></span>
+          <input class="input" data-g="api_key_env" value="" placeholder="YT2WIKI_HAL_KEY" autocomplete="off" spellcheck="false">
+          <small>The name of an environment variable holding the key (<code>YT2WIKI_…</code> prefix required). The key itself is never stored.</small></label>
+      </div>
+      <div class="set-actions">
+        <button class="btn" type="button" data-guided-save>{{ icon("check") }}Save &amp; test</button>
+        <span class="muted" data-guided-msg role="status" style="font-size:.88rem"></span>
+      </div>
+      <p class="test-result" data-guided-result></p>
+    </section>
+
+    <section class="panel set-panel" aria-labelledby="asr-h" data-guided-asr>
+      <h2 id="asr-h">Transcription — Whisper HTTP</h2>
+      <p class="lede">yt2wiki speaks the Whisper <code>/asr</code> contract (multipart <code>audio_file</code>,
+        structured JSON with word timestamps) — not the OpenAI transcription API. Enter the server root below
+        (no <code>/v1</code> suffix); saving tests the real protocol and assigns transcription when it passes.
+        Addresses must be reachable <em>from inside the publisher container</em>.</p>
+      {% set asr_name = inference.roles.get('asr') or '' %}
+      <div class="grid">
+        <label class="field"><span>Name</span><input class="input" data-g="name" value="{{ asr_name or 'whisper' }}" required></label>
+        <label class="field"><span>Model (server-side)</span><input class="input" data-g="model" value="{{ guided_asr.get('model', '') }}" placeholder="large-v3"></label>
+        <label class="field wide"><span>Server URL</span><input class="input" data-g="url" type="url" value="{{ guided_asr.get('url', '') }}" placeholder="http://host:9000" required></label>
+      </div>
+      <div class="set-actions">
+        <button class="btn" type="button" data-guided-save>{{ icon("check") }}Save &amp; test</button>
+        <span class="muted" data-guided-msg role="status" style="font-size:.88rem"></span>
+      </div>
+      <p class="test-result" data-guided-result></p>
+    </section>
+
+    <details class="panel set-panel" data-inference>
+      <summary><strong>Advanced: providers &amp; roles</strong> <span class="muted">— separate writer/vision/asr assignment</span></summary>
+      <p class="lede">The guided cards above cover normal use. Assign roles individually here only if you run
+        separate writing, judging and transcription servers.</p>
       <div data-providers>
         {% for name, p in inference.providers.items() %}
         {% set st = status.get(name) %}
         <div class="provider" data-provider>
           <div class="grid">
-            <label class="field"><span>Name</span><input class="input" data-k="name" value="{{ name }}" placeholder="gemma-lan" required></label>
+            <label class="field"><span>Name</span><input class="input" data-k="name" value="{{ name }}" placeholder="my-llm" required></label>
             <label class="field"><span>Model</span><input class="input" data-k="model" value="{{ p.model }}" placeholder="Leave empty to use the server’s default"></label>
-            <label class="field wide"><span>Base URL</span><input class="input" data-k="url" type="url" value="{{ p.url }}" placeholder="http://192.168.1.14:8000/v1" required></label>
+            <label class="field wide"><span>Base URL</span><input class="input" data-k="url" type="url" value="{{ p.url }}" placeholder="http://host:port/v1" required></label>
             <label class="field wide"><span>API key variable <span class="muted" style="font-weight:400">— optional</span></span>
-              <input class="input" data-k="api_key_env" value="{{ p.api_key_env }}" placeholder="GEMMA_API_KEY" autocomplete="off" spellcheck="false">
-              <small>The name of an environment variable holding the key. The key itself is never stored.</small></label>
+              <input class="input" data-k="api_key_env" value="{{ p.api_key_env }}" placeholder="YT2WIKI_PROVIDER_KEY" autocomplete="off" spellcheck="false">
+              <small>The name of an environment variable holding the key (<code>YT2WIKI_…</code> prefix required). The key itself is never stored.</small></label>
           </div>
           <div class="foot">
             <button class="btn btn-quiet btn-sm" type="button" data-test>{{ icon("server") }}Test connection</button>
             <button class="btn btn-ghost btn-sm" type="button" data-remove>{{ icon("trash") }}Remove</button>
             <span class="test-result {{ 'ok' if st and st.ok else 'bad' if st else '' }}" data-result>
-              {%- if st and st.ok %}Reachable · {{ st.latency_ms }} ms{% if st.models %} · {{ st.models|join(', ') }}{% endif %} · checked {{ st.checked_at|ago }}
+              {%- if st and st.ok %}Reachable{% if st.qualified_for_writer %} · writes{% endif %}{% if st.qualified_for_vision %} · judges images{% endif %}{% if st.qualified_for_asr %} · transcribes{% endif %} · checked {{ st.checked_at|ago }}
               {%- elif st %}{{ st.error }} · checked {{ st.checked_at|ago }}
               {%- else %}Not tested yet{% endif -%}
             </span>
@@ -48,12 +110,12 @@
       <template data-provider-tpl>
         <div class="provider" data-provider>
           <div class="grid">
-            <label class="field"><span>Name</span><input class="input" data-k="name" placeholder="gemma-lan" required></label>
+            <label class="field"><span>Name</span><input class="input" data-k="name" placeholder="my-llm" required></label>
             <label class="field"><span>Model</span><input class="input" data-k="model" placeholder="Leave empty to use the server’s default"></label>
-            <label class="field wide"><span>Base URL</span><input class="input" data-k="url" type="url" placeholder="http://192.168.1.14:8000/v1" required></label>
+            <label class="field wide"><span>Base URL</span><input class="input" data-k="url" type="url" placeholder="http://host:port/v1" required></label>
             <label class="field wide"><span>API key variable <span class="muted" style="font-weight:400">— optional</span></span>
-              <input class="input" data-k="api_key_env" placeholder="GEMMA_API_KEY" autocomplete="off" spellcheck="false">
-              <small>The name of an environment variable holding the key. The key itself is never stored.</small></label>
+              <input class="input" data-k="api_key_env" placeholder="YT2WIKI_PROVIDER_KEY" autocomplete="off" spellcheck="false">
+              <small>The name of an environment variable holding the key (<code>YT2WIKI_…</code> prefix required). The key itself is never stored.</small></label>
           </div>
           <div class="foot">
             <button class="btn btn-quiet btn-sm" type="button" data-test>{{ icon("server") }}Test connection</button>
@@ -74,7 +136,7 @@
             <option value="">Not assigned</option>
             {% for name in inference.providers %}<option value="{{ name }}" {% if inference.roles.get(role) == name %}selected{% endif %}>{{ name }}</option>{% endfor %}
           </select>
-          <small>{% if role == 'writer' %}Writes the guide from the transcript.{% elif role == 'vision' %}Compares frames and picks the images. Needs a model that accepts images.{% else %}Transcribes audio over HTTP. Needs a transcription server (test probes its /asr contract).{% endif %}</small>
+          <small>{% if role == 'writer' %}Writes the guide from the transcript.{% elif role == 'vision' %}Compares frames and picks the images. Needs a model that accepts images.{% else %}Transcribes audio over HTTP. Needs a Whisper /asr server.{% endif %}</small>
         </label>
         {% endfor %}
       </div>
@@ -82,7 +144,18 @@
         <button class="btn" type="button" data-save>{{ icon("check") }}Save</button>
         <span class="muted" data-msg role="status" style="font-size:.88rem"></span>
       </div>
+    </details>
+    {% else %}
+    <section class="panel set-panel" aria-labelledby="inf-h">
+      <h2 id="inf-h">Inference</h2>
+      {% if not auth_configured %}
+      <p class="muted" style="margin:0">Endpoint configuration is disabled until an operator password is set
+        (<code>YT2WIKI_OPERATOR_PASSWORD</code>) and you log in above. Read-only library pages stay available.</p>
+      {% else %}
+      <p class="muted" style="margin:0">Log in above to configure endpoints. Read-only library pages stay available.</p>
+      {% endif %}
     </section>
+    {% endif %}
 
     <section class="panel set-panel" aria-labelledby="lib-h">
       <h2 id="lib-h">Library</h2>
@@ -92,11 +165,11 @@
         <dt>Database</dt><dd><code>{{ db_path }}</code> · {{ (db_size / 1048576)|round(1) }} MB</dd>
         <dt>Guides</dt><dd>{{ n_articles }} article versions</dd>
       </dl>
-      <p style="margin:18px 0 0;font-size:.9rem;color:var(--ink-2)">To back up while the service is running, use SQLite’s online backup (safe with WAL), then copy the articles folder:</p>
-      <code class="codeline">sqlite3 "{{ db_path }}" ".backup 'yt2wiki-backup.sqlite3'"
-cp -a "{{ data_dir }}/articles" yt2wiki-articles-backup</code>
+      <p style="margin:18px 0 0;font-size:.9rem">Back up with the tested procedure in
+        <a href="https://github.com/mitchins/yt2wiki/blob/main/docs/deploy.md">docs/deploy.md (backup)</a> —
+        online SQLite backup plus the media, frames, articles, assets and config directories.</p>
     </section>
   </div>
 </main>
 {% endblock %}
-{% block scripts %}<script src="/static/app.js" defer></script><script src="/static/settings.js" defer></script>{% endblock %}
+{% block scripts %}<script src="/static/app.js" defer></script><script src="/static/auth.js" defer></script><script src="/static/settings.js" defer></script>{% endblock %}

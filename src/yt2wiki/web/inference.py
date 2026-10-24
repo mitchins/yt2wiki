@@ -117,10 +117,154 @@ def save(paths, payload: dict[str, Any]) -> dict[str, Any]:
     cfg["updated_at"] = time.time()
     _write_json(config_path(paths), cfg)
     status = load_status(paths)
-    pruned = {k: v for k, v in status.items() if k in cfg["providers"]}
+    pruned = {}
+    for name, entry in status.items():
+        if name not in cfg["providers"]:
+            continue  # removed endpoint: drop its result
+        if _identity(entry) != _identity({**entry, **cfg["providers"][name]}):
+            continue  # URL/model/key changed: the old PASS no longer applies
+        pruned[name] = entry
     if pruned != status:
         _write_json(status_path(paths), pruned)
     return cfg
+
+
+def _identity(entry: dict[str, Any]) -> tuple[str, str, str]:
+    """The material endpoint identity a test result is bound to."""
+    return (str(entry.get("url") or "").rstrip("/"),
+            str(entry.get("model") or ""),
+            str(entry.get("api_key_env") or ""))
+
+
+def save_one(paths, payload: dict[str, Any]) -> dict[str, str]:
+    """Save (upsert) a single endpoint from guided setup. Returns its identity."""
+    if not isinstance(payload, dict):
+        raise InferenceConfigError("Endpoint must be a JSON object.")
+    cfg = load(paths)
+    providers = dict(cfg.get("providers") or {})
+    name = str(payload.get("name") or "").strip().lower()
+    url = str(payload.get("url") or "").strip().rstrip("/")
+    model = str(payload.get("model") or "").strip()
+    key_env = validate_api_key_env(payload.get("api_key_env"))
+    if not _NAME.match(name):
+        raise InferenceConfigError(
+            "Endpoint names use lowercase letters, digits, dots, dashes or underscores.")
+    if not re.match(r"^https?://[^\s/]+", url):
+        raise InferenceConfigError("The endpoint needs an http:// or https:// base URL.")
+    providers[name] = {"url": url, "model": model[:200], "api_key_env": key_env}
+    cfg["providers"] = providers
+    cfg["updated_at"] = time.time()
+    _write_json(config_path(paths), cfg)
+    # A changed URL/model/key invalidates the previous qualification.
+    status = load_status(paths)
+    if name in status and _identity(status[name]) != (url, model[:200], key_env):
+        del status[name]
+        _write_json(status_path(paths), status)
+    return {"name": name, "url": url, "model": model[:200], "api_key_env": key_env}
+
+
+def record_qualified(paths, name: str, result: dict[str, Any]) -> dict[str, str]:
+    """Record a save-test result and assign roles whose qualification passed.
+
+    Roles are only ever assigned from a fresh test of the saved endpoint —
+    never from a stale result or by guessing. Returns the assigned roles.
+    """
+    name = str(name or "").strip().lower()
+    provider = (load(paths).get("providers") or {}).get(name, {})
+    result = dict(result)
+    result["url"] = provider.get("url", result.get("url"))
+    result["model"] = provider.get("model", "")
+    result["api_key_env"] = provider.get("api_key_env", "")
+    record_test(paths, name, result)
+    if not result.get("ok"):
+        return {}
+    cfg = load(paths)
+    roles = dict(cfg.get("roles") or {})
+    assigned: dict[str, str] = {}
+    for role, flag in (("writer", "qualified_for_writer"),
+                       ("vision", "qualified_for_vision"),
+                       ("asr", "qualified_for_asr")):
+        if result.get(flag):
+            roles[role] = name
+            assigned[role] = name
+    cfg["roles"] = roles
+    cfg["updated_at"] = time.time()
+    _write_json(config_path(paths), cfg)
+    return assigned
+
+
+def provider_status(paths, name: str) -> dict[str, Any]:
+    """The stored test result, but only when it matches the saved endpoint.
+
+    A changed URL/model/key invalidates the old PASS: the caller sees no
+    result (needs retest) instead of a stale qualification.
+    """
+    cfg = load(paths)
+    provider = (cfg.get("providers") or {}).get(name)
+    if not provider:
+        return {}
+    status = load_status(paths).get(name)
+    if not isinstance(status, dict):
+        return {}
+    if _identity(status) != _identity(provider):
+        return {}
+    return status
+
+
+def readiness(paths, role: str, label: str) -> dict[str, Any]:
+    """Small understandable status: Ready / Needs setup / Failed + reason."""
+    cfg = load(paths)
+    name = (cfg.get("roles") or {}).get(role)
+    if role == "asr" and not name:
+        # An ASR server supplied through the environment counts even with no
+        # explicit role assignment (see YT2WIKI_ASR_URL).
+        from ..config import Settings as _Settings
+        try:
+            env_url = (_Settings.load(data_dir=paths.root).asr_identity() or {}).get("url")
+        except Exception:  # noqa: BLE001 - readiness must never raise
+            env_url = ""
+        if env_url:
+            return {"state": "Ready", "detail": f"Server URL from environment ({env_url}).",
+                    "provider": "", "role": role, "label": label}
+        return {"state": "Needs setup",
+                "detail": "No transcription endpoint assigned. Add a Whisper HTTP server below.",
+                "provider": "", "role": role, "label": label}
+    if not name:
+        return {"state": "Needs setup",
+                "detail": f"No endpoint assigned for {label.lower()}. Save and test one below.",
+                "provider": "", "role": role, "label": label}
+    st = provider_status(paths, name)
+    if not st:
+        return {"state": "Needs setup",
+                "detail": f"“{name}” was never tested (or changed since its test). Save and test it below.",
+                "provider": name, "role": role, "label": label}
+    if not st.get("ok"):
+        return {"state": "Failed",
+                "detail": str(st.get("error") or "The last test failed."),
+                "provider": name, "role": role, "label": label}
+    flag = {"writer": "qualified_for_writer", "vision": "qualified_for_vision",
+            "asr": "qualified_for_asr"}.get(role, "")
+    if flag and not st.get(flag):
+        return {"state": "Failed",
+                "detail": f"“{name}” is reachable but not qualified for {label.lower()}.",
+                "provider": name, "role": role, "label": label}
+    return {"state": "Ready",
+            "detail": f"“{name}” qualified {checked_ago(st)}.",
+            "provider": name, "role": role, "label": label}
+
+
+def checked_ago(status: dict[str, Any]) -> str:
+    try:
+        age = time.time() - float(status.get("checked_at", 0))
+    except (TypeError, ValueError):
+        return "recently"
+    if age < 90:
+        return "just now"
+    if age < 3600:
+        return f"{int(age // 60)} min ago"
+    if age < 86400:
+        return f"{int(age // 3600)} h ago"
+    return f"{int(age // 86400)} d ago"
 
 
 def read_payload_file(paths, path: str | Path) -> dict[str, Any]:
@@ -228,10 +372,13 @@ def test_endpoint(url: str, api_key_env: str = "", *, timeout: float = 6.0,
 
 
 def _qualify_writer(url: str, headers: dict[str, str], model: str, timeout: float) -> bool:
-    import httpx, json as _json
+    import httpx
+
     payload: dict[str, Any] = {
         "messages": [{"role": "user", "content": "Return JSON only: {\"ok\": true, \"text\": \"hello\"}"}],
-        "max_tokens": 60,
+        # Generous budget for reasoning models: thinking traces must not push
+        # the JSON answer out of the completion window and cause a false fail.
+        "max_tokens": 200,
         "temperature": 0.0,
     }
     if model:
@@ -246,13 +393,13 @@ def _qualify_writer(url: str, headers: dict[str, str], model: str, timeout: floa
         content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
         if isinstance(content, list):
             content = " ".join(p.get("text","") for p in content if isinstance(p, dict))
-        obj = _json.loads(content) if content.strip().startswith("{") else None
+        obj = json.loads(content) if content.strip().startswith("{") else None
         if obj is None:
             # Try to extract json from prose
             import re
             m = re.search(r"\{.*ok.*\}", content, re.S)
             if m:
-                obj = _json.loads(m.group(0))
+                obj = json.loads(m.group(0))
         return isinstance(obj, dict) and obj.get("ok") is True
     except Exception:
         return False
@@ -266,8 +413,12 @@ def _qualify_vision(url: str, headers: dict[str, str], model: str, timeout: floa
     endpoints that are reachable but cannot produce the required structured
     output (e.g. Gemma 4 26B's 68% invalid rate observed in V9-Z2).
     """
-    import httpx, base64, io, json as _json
-    from PIL import Image
+    import base64
+    import io
+
+    import httpx
+    from PIL import Image, ImageDraw
+
     try:
         from ..v9.judge import RUBRIC_PROMPT, _parse_rubric
     except Exception:
@@ -277,13 +428,8 @@ def _qualify_vision(url: str, headers: dict[str, str], model: str, timeout: floa
     # Add a tiny label so the model has something to ground
     def b64(im):
         buf = io.BytesIO()
-        # Draw a simple marker
-        try:
-            from PIL import ImageDraw
-            d = ImageDraw.Draw(im)
-            d.text((4, 4), "V9", fill=(0, 0, 0))
-        except Exception:
-            pass
+        d = ImageDraw.Draw(im)
+        d.text((4, 4), "V9", fill=(0, 0, 0))
         im.save(buf, format="JPEG", quality=85)
         return base64.b64encode(buf.getvalue()).decode()
     # Build the same prompt the publisher sends, with 2 images

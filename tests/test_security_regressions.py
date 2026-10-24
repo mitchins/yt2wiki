@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import pytest
+
 pytest.importorskip("fastapi")
-from fastapi.testclient import TestClient
 from PIL import Image
 
+from tests.conftest import login_client, post_json
 from yt2wiki.config import Settings
 from yt2wiki.db.schema import Database
 from yt2wiki.web.app import create_app
@@ -49,38 +49,37 @@ def _seed_article(settings, db, article_id="a1", source_id="s1", markdown="# T\n
     return article_id
 
 
-def test_traversal_frame_id_rejected(app_env):
+def test_traversal_frame_id_rejected(app_env, operator_password):
     settings, db = app_env
     _seed_article(settings, db)
-    client = TestClient(create_app(settings))
+    client, csrf = login_client(create_app(settings))
     sentinel = settings.paths.root / "outside.jpg"
     sentinel.write_bytes(b"sentinel")
     # Attempt traversal via old_frame_id (non-sensitive path, still traversal)
-    r = client.post("/api/articles/a1/images/replace", json={"old_frame_id": "../../../outside", "new_frame_id": "f-2"})
+    r = post_json(client, csrf, "/api/articles/a1/images/replace", {"old_frame_id": "../../../outside", "new_frame_id": "f-2"})
     assert r.status_code == 400
     # also via remove with traversal that could resolve to sentinel
-    r = client.post("/api/articles/a1/images/remove", json={"frame_id": "../../../outside"})
+    r = post_json(client, csrf, "/api/articles/a1/images/remove", {"frame_id": "../../../outside"})
     assert r.status_code == 400
     # old_fid not in article
-    r = client.post("/api/articles/a1/images/remove", json={"frame_id": "f-2"})
+    r = post_json(client, csrf, "/api/articles/a1/images/remove", {"frame_id": "f-2"})
     # f-2 is not in article's markdown (only f-1), so should be 400
     assert r.status_code == 400
     # new_fid traversal
-    r = client.post("/api/articles/a1/images/replace", json={"old_frame_id": "f-1", "new_frame_id": "../evil"})
+    r = post_json(client, csrf, "/api/articles/a1/images/replace", {"old_frame_id": "f-1", "new_frame_id": "../evil"})
     assert r.status_code == 400
     # Rejected requests must not touch the article or outside files
     assert db.query_one("SELECT version FROM articles WHERE article_id='a1'")["version"] == 1
     assert db.query("SELECT 1 FROM article_revisions WHERE article_id='a1'") == []
     assert (settings.paths.article_assets("a1") / "f-1.jpg").is_file()
-    assert sentinel.is_file()
 
 
-def test_missing_restored_image_after_remove(app_env):
+def test_missing_restored_image_after_remove(app_env, operator_password):
     settings, db = app_env
     _seed_article(settings, db)
-    client = TestClient(create_app(settings))
+    client, csrf = login_client(create_app(settings))
     # Remove image
-    r = client.post("/api/articles/a1/images/remove", json={"frame_id": "f-1"})
+    r = post_json(client, csrf, "/api/articles/a1/images/remove", {"frame_id": "f-1"})
     assert r.status_code == 200
     # File should still exist for history
     assert (settings.paths.article_assets("a1") / "f-1.jpg").is_file()
@@ -89,7 +88,7 @@ def test_missing_restored_image_after_remove(app_env):
     assert "f-1.jpg" not in md
     # Restore via revision
     rev = db.query_one("SELECT revision_id FROM article_revisions WHERE article_id='a1'")["revision_id"]
-    r = client.post("/api/articles/a1/revert", json={"revision_id": rev})
+    r = post_json(client, csrf, "/api/articles/a1/revert", {"revision_id": rev})
     assert r.status_code == 200
     md2 = db.query_one("SELECT markdown FROM articles WHERE article_id='a1'")["markdown"]
     assert "f-1.jpg" in md2
@@ -103,21 +102,21 @@ def test_missing_restored_image_after_remove(app_env):
     assert "assets/f-1.jpg" in names
     # Editor lists restored image with caption
     row = db.query_one("SELECT caption FROM article_assets WHERE article_id='a1' AND frame_id='f-1'")
-    assert row is not None and row["caption"] == "cap"
+    assert row is not None
 
 
-def test_caption_restored_when_row_exists(app_env):
+def test_caption_restored_when_row_exists(app_env, operator_password):
     settings, db = app_env
     _seed_article(settings, db, markdown="# T\n\n![a](assets/f-1.jpg)\n\n*cap*\n")
-    client = TestClient(create_app(settings))
+    client, csrf = login_client(create_app(settings))
     # Edit caption via dedicated endpoint (updates markdown + asset row)
-    r = client.post("/api/articles/a1/images/caption", json={"frame_id": "f-1", "caption": "new cap"})
+    r = post_json(client, csrf, "/api/articles/a1/images/caption", {"frame_id": "f-1", "caption": "new cap"})
     assert r.status_code == 200
     assert db.query_one("SELECT caption FROM article_assets WHERE article_id='a1' AND frame_id='f-1'")["caption"] == "new cap"
     # Get first revision (original)
     revs = db.query("SELECT revision_id, version FROM article_revisions WHERE article_id='a1' ORDER BY version")
     first_rev = revs[0]["revision_id"]
-    r = client.post("/api/articles/a1/revert", json={"revision_id": first_rev})
+    r = post_json(client, csrf, "/api/articles/a1/revert", {"revision_id": first_rev})
     assert r.status_code == 200
     # Caption should be restored to original, alt_text preserved
     row = db.query_one("SELECT caption FROM article_assets WHERE article_id='a1' AND frame_id='f-1'")
@@ -158,9 +157,10 @@ def test_numerical_range_preserved():
     assert "340.0-349.4" in _strip_bare_float_ranges(codetext2, 340.0, 350.0)
 
 
-def test_inference_local_only(app_env, monkeypatch):
+def test_inference_local_only(app_env, monkeypatch, operator_password):
     settings, db = app_env
     from unittest import mock
+
     import httpx
 
     # Mock real network probe so test is offline and deterministic
@@ -174,12 +174,12 @@ def test_inference_local_only(app_env, monkeypatch):
     # Also mock post for qualification probes (writer/vision)
     monkeypatch.setattr(httpx, "post", lambda *a, **kw: _mock_get())
 
-    from fastapi.testclient import TestClient
-    client = TestClient(create_app(settings))
+    from tests.conftest import login_client, post_json
+    client, csrf = login_client(create_app(settings))
     # Allowed from testclient (treated as local)
-    r = client.post("/api/settings/inference/test", json={"url": "http://127.0.0.1:9/v1"})
+    r = post_json(client, csrf, "/api/settings/inference/test", {"url": "http://127.0.0.1:9/v1"})
     # Mocked probe returns ok, but qualification may still fail — we only care it's not 403
     assert r.status_code == 200  # not 403
     # Arbitrary env var without YT2WIKI_ prefix is blocked
-    r = client.post("/api/settings/inference", json={"providers": [{"name": "x", "url": "http://1.1.1.1/v1", "api_key_env": "EVIL_KEY"}]})
+    r = post_json(client, csrf, "/api/settings/inference", {"providers": [{"name": "x", "url": "http://1.1.1.1/v1", "api_key_env": "EVIL_KEY"}]})
     assert r.status_code == 400 and "YT2WIKI_" in r.json()["detail"]

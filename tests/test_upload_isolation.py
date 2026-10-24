@@ -34,15 +34,16 @@ def isolated_app(tmp_path):
     return application, db, settings
 
 
-def _upload(client: TestClient, filename: str, content: bytes):
+def _upload(client: TestClient, filename: str, content: bytes, csrf: str = ""):
     return client.post(
         "/api/sources/upload",
         files={"file": (filename, content, "video/mp4")},
-        data={"profile": "compact"},
+        data={},
+        headers={"X-CSRF-Token": csrf} if csrf else {},
     )
 
 
-def test_upload_isolation_and_dedup(tmp_path, monkeypatch):
+def test_upload_isolation_and_dedup(tmp_path, monkeypatch, operator_password):
     """Steps 1-3,5,6 combined in isolated data dir."""
     # Use isolated_app fixture logic but manual to control sequence
     settings = Settings.load(data_dir=tmp_path / "iso1", profile="compact", device_index=None)
@@ -51,11 +52,14 @@ def test_upload_isolation_and_dedup(tmp_path, monkeypatch):
     app = create_app(settings)
     # Mock job scheduling — no GPU inference, just source registration
     monkeypatch.setattr(app.state.runner, "submit", lambda job, **kw: job)
-    client = TestClient(app)
+    from tests.conftest import configure_ready as _ready
+    _ready(settings)
+    from tests.conftest import login_client as _login
+    client, _csrf = _login(app)
 
     # 1. Upload A
     content_a = b"video-a-content-" + b"x" * 100
-    r = _upload(client, "video-a.mp4", content_a)
+    r = _upload(client, "video-a.mp4", content_a, _csrf)
     assert r.status_code == 200, r.text
     sid_a = r.json()["source_id"]
     stored_a = Path(db.query_one("SELECT upload_path FROM sources WHERE source_id=?", (sid_a,))["upload_path"])
@@ -66,7 +70,7 @@ def test_upload_isolation_and_dedup(tmp_path, monkeypatch):
 
     # 2. Upload B (different)
     content_b = b"video-b-different-" + b"y" * 100
-    r2 = _upload(client, "video-b.mp4", content_b)
+    r2 = _upload(client, "video-b.mp4", content_b, _csrf)
     assert r2.status_code == 200, r2.text
     sid_b = r2.json()["source_id"]
     assert sid_b != sid_a
@@ -80,7 +84,7 @@ def test_upload_isolation_and_dedup(tmp_path, monkeypatch):
     assert stored_b.name in files
 
     # 3. Upload A again (same bytes, different filename) -> dedup
-    r3 = _upload(client, "copy-of-a.mp4", content_a)
+    r3 = _upload(client, "copy-of-a.mp4", content_a, _csrf)
     assert r3.status_code == 200, r3.text
     sid_a2 = r3.json()["source_id"]
     assert sid_a2 == sid_a, "deduplication must return existing source"
@@ -102,24 +106,27 @@ def test_upload_isolation_and_dedup(tmp_path, monkeypatch):
     assert uploads_dir.exists()
 
 
-def test_upload_failure_cleans_temp_without_deleting_others(tmp_path, monkeypatch):
+def test_upload_failure_cleans_temp_without_deleting_others(tmp_path, monkeypatch, operator_password):
     """Step 4: registration failure cleans temp file only."""
     settings = Settings.load(data_dir=tmp_path / "iso2", profile="compact", device_index=None)
     db = Database(settings.paths.db_path)
     db.migrate()
     app = create_app(settings)
     monkeypatch.setattr(app.state.runner, "submit", lambda job, **kw: job)
-    client = TestClient(app, raise_server_exceptions=False)
+    from tests.conftest import configure_ready as _ready2
+    _ready2(settings)
+    from tests.conftest import login_client as _login2
+    client, _csrf = _login2(app, raise_server_exceptions=False)
 
     # Pre-populate with A and B
     content_a = b"pre-a-" + b"a" * 50
-    r = _upload(client, "a.mp4", content_a)
+    r = _upload(client, "a.mp4", content_a, _csrf)
     assert r.status_code == 200
     sid_a = r.json()["source_id"]
     stored_a = Path(db.query_one("SELECT upload_path FROM sources WHERE source_id=?", (sid_a,))["upload_path"])
 
     content_b = b"pre-b-" + b"b" * 50
-    r = _upload(client, "b.mp4", content_b)
+    r = _upload(client, "b.mp4", content_b, _csrf)
     assert r.status_code == 200
     sid_b = r.json()["source_id"]
     stored_b = Path(db.query_one("SELECT upload_path FROM sources WHERE source_id=?", (sid_b,))["upload_path"])
@@ -140,7 +147,7 @@ def test_upload_failure_cleans_temp_without_deleting_others(tmp_path, monkeypatc
     monkeypatch.setattr(Service, "create_upload_source", failing)
 
     # Attempt upload that will fail — must return error, not spurious 200 success
-    r_fail = _upload(client, "fail.mp4", b"fail-content")
+    r_fail = _upload(client, "fail.mp4", b"fail-content", _csrf)
     assert r_fail.status_code >= 400, f"expected error for failed registration, got {r_fail.status_code}: {r_fail.text}"
     assert r_fail.status_code in (400, 500), r_fail.text
     # Upload dir must still exist and contain the original files
@@ -154,7 +161,7 @@ def test_upload_failure_cleans_temp_without_deleting_others(tmp_path, monkeypatc
 
     # Restore and verify subsequent uploads still work
     monkeypatch.setattr(Service, "create_upload_source", orig)
-    r_ok = _upload(client, "ok-after-fail.mp4", b"ok-after")
+    r_ok = _upload(client, "ok-after-fail.mp4", b"ok-after", _csrf)
     assert r_ok.status_code == 200, r_ok.text
     sid_ok = r_ok.json()["source_id"]
     stored_ok = Path(db.query_one("SELECT upload_path FROM sources WHERE source_id=?", (sid_ok,))["upload_path"])
@@ -162,22 +169,25 @@ def test_upload_failure_cleans_temp_without_deleting_others(tmp_path, monkeypatc
     assert uploads_dir.is_dir()
 
 
-def test_upload_directory_persists_after_success_and_failure(tmp_path, monkeypatch):
+def test_upload_directory_persists_after_success_and_failure(tmp_path, monkeypatch, operator_password):
     """Explicitly test that dest.parent is never deleted."""
     settings = Settings.load(data_dir=tmp_path / "iso3", profile="compact", device_index=None)
     db = Database(settings.paths.db_path)
     db.migrate()
     app = create_app(settings)
     monkeypatch.setattr(app.state.runner, "submit", lambda job, **kw: job)
-    client = TestClient(app)
+    from tests.conftest import configure_ready as _ready3
+    _ready3(settings)
+    from tests.conftest import login_client as _login3
+    client, _csrf = _login3(app)
 
     uploads_dir = settings.paths.uploads_dir
     # Initially uploads dir may not exist; first upload creates it
-    r = _upload(client, "first.mp4", b"first")
+    r = _upload(client, "first.mp4", b"first", _csrf)
     assert r.status_code == 200
     assert uploads_dir.is_dir()
 
-    r2 = _upload(client, "second.mp4", b"second")
+    r2 = _upload(client, "second.mp4", b"second", _csrf)
     assert r2.status_code == 200
     # uploads dir must still be the same directory, not recreated
     assert uploads_dir.is_dir()

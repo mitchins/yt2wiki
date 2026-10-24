@@ -26,35 +26,14 @@ from fastapi.templating import Jinja2Templates
 from ..config import PROFILE_NAMES, ConfigError, Settings, load_registry
 from ..db.schema import Database
 from ..services import Service, new_id
+from . import auth as operator_auth
 from . import inference, views
 
 log = logging.getLogger("yt2wiki.web")
 
 _HERE = Path(__file__).resolve().parent
 
-# Profiles offered for new jobs; "enhanced" stays CLI-only.
-WEB_PROFILES = (
-    ("compact", "Compact", "Fits an 8 GB GPU"),
-    ("standard", "Standard", "12–16 GB GPU"),
-)
 ACTIVE_STATES = ("queued", "running")
-
-# Peers that count as the operator console. Anything else — Docker bridge
-# gateway, LAN address, tunneled port-forward — is a remote viewer, even when
-# the browser runs on the same laptop: the application sees the gateway
-# address, not the browser's loopback. Forwarding headers are never trusted.
-LOCAL_PEERS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1", "testclient", "localhost"})
-
-
-def peer_host(request: Request) -> str:
-    """Best-effort peer address for a request; never consults forwarding headers."""
-    client = getattr(request, "client", None)
-    host = getattr(client, "host", "") if client else ""
-    return host or ""
-
-
-def is_local_peer(host: str) -> bool:
-    return host in LOCAL_PEERS
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -74,7 +53,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     templates.env.filters["date"] = _fmt_date
     templates.env.filters["ago"] = _fmt_ago
     templates.env.filters["duration"] = views.fmt_duration
-    templates.env.globals["web_profiles"] = WEB_PROFILES
 
     app = FastAPI(title="yt2wiki", version="0.2.0", docs_url="/api/docs")
     app.state.settings = settings
@@ -94,10 +72,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.runner.stop()
 
     def page(request: Request, name: str, ctx: dict[str, Any], status_code: int = 200) -> Any:
+        session = operator_auth.session_from_request(settings.paths, request)
         base = {"request": request, "nav_active_jobs": len(app.state.runner.live()),
-                "default_profile": _default_profile(settings)}
+                "operator": session is not None,
+                "auth_configured": operator_auth.password_configured(),
+                "csrf_token": (session or {}).get("csrf", "")}
         return templates.TemplateResponse(request, name, {**base, **ctx},
                                           status_code=status_code)
+
+    def _http_auth_error(exc: operator_auth.AuthError) -> HTTPException:
+        return HTTPException(exc.status, exc.message)
+
+    def _require_operator(request: Request, csrf: bool = True) -> None:
+        try:
+            operator_auth.require_operator(settings.paths, request, csrf=csrf)
+        except operator_auth.AuthError as exc:
+            raise _http_auth_error(exc) from exc
+
+    def _require_operator_form(request: Request, csrf_token: str = "") -> None:
+        """Form-post variant: the CSRF token arrives as a field, not a header."""
+        try:
+            session = operator_auth.session_from_request(settings.paths, request)
+            if not operator_auth.password_configured():
+                raise operator_auth.AuthError(403,
+                    "Operator password is not configured. Set "
+                    f"{operator_auth.PASSWORD_ENV} in the container environment "
+                    "and restart yt2wiki, then log in on the Settings page.")
+            if session is None:
+                raise operator_auth.AuthError(401,
+                    "Operator login required. Log in on the Settings page.")
+            if not operator_auth.csrf_valid(session, request, form_field=csrf_token):
+                raise operator_auth.AuthError(403,
+                    "Invalid or missing CSRF token. Reload the page and try again.")
+        except operator_auth.AuthError as exc:
+            raise _http_auth_error(exc) from exc
 
     def active_jobs() -> list[dict[str, Any]]:
         live = app.state.runner.live()
@@ -127,10 +135,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                           "url": "", "jobs": active_jobs()})
 
     @app.post("/add/url")
-    def add_url_form(request: Request, url: str = Form(""), profile: str = Form(""),
-                     back: str = Form("")) -> Any:
+    def add_url_form(request: Request, url: str = Form(""), back: str = Form(""),
+                     csrf_token: str = Form("")) -> Any:
         try:
-            job_id = submit_url(url, profile)
+            _require_operator(request, csrf=False)
+            _require_operator_form(request, csrf_token)
+            job_id = submit_url(url, "")
         except HTTPException as exc:
             if back == "library":
                 from urllib.parse import quote
@@ -142,9 +152,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/add/upload")
     async def add_upload_form(request: Request, file: UploadFile = File(None),
-                              profile: str = Form("")) -> Any:
+                              csrf_token: str = Form("")) -> Any:
         try:
-            job_id = await submit_upload(file, profile)
+            _require_operator(request, csrf=False)
+            _require_operator_form(request, csrf_token)
+            job_id = await submit_upload(file, "")
         except HTTPException as exc:
             return page(request, "add.html", {"nav": "add", "mode": "upload",
                                               "error": exc.detail, "url": "",
@@ -174,7 +186,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                            "queued": queued, "history": history})
 
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
-    def job_page(request: Request, job_id: str) -> Any:
+    def job_page(request: Request, job_id: str, error: str = Query("")) -> Any:
         job = service.get_job(job_id)
         if job is None:
             raise HTTPException(404, "job not found")
@@ -189,15 +201,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if row:
             article = dict(row)
         return page(request, "job.html", {"nav": "jobs", "job": view, "logs": logs,
-                                          "article": article,
+                                          "article": article, "error": error,
                                           "source": service.get_source(job["source_id"])})
 
     @app.post("/jobs/{job_id}/retry")
-    def job_retry(job_id: str) -> Any:
-        return RedirectResponse(f"/jobs/{retry_job(job_id)}", status_code=303)
+    def job_retry(request: Request, job_id: str, csrf_token: str = Form("")) -> Any:
+        _require_operator(request, csrf=False)
+        _require_operator_form(request, csrf_token)
+        from urllib.parse import quote as _quote
+        try:
+            return RedirectResponse(f"/jobs/{retry_job(job_id)}", status_code=303)
+        except HTTPException as exc:
+            return RedirectResponse(f"/jobs/{job_id}?error={_quote(str(exc.detail))}",
+                                    status_code=303)
 
     @app.post("/jobs/{job_id}/cancel")
-    def job_cancel_form(job_id: str) -> Any:
+    def job_cancel_form(request: Request, job_id: str, csrf_token: str = Form("")) -> Any:
+        _require_operator(request, csrf=False)
+        _require_operator_form(request, csrf_token)
         app.state.runner.cancel_queued(job_id)
         return RedirectResponse("/jobs", status_code=303)
 
@@ -263,13 +284,54 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db_size = sum(p.stat().st_size for p in settings.paths.db_dir.glob("yt2wiki.sqlite3*")
                       if p.is_file())
         n_articles = db.query_one("SELECT COUNT(*) c FROM articles")["c"]
+        providers = cfg.get("providers") or {}
+        roles = cfg.get("roles") or {}
+        guided_llm = providers.get(roles.get("writer") or "", {}) or {}
+        guided_asr = providers.get(roles.get("asr") or "", {}) or {}
         return page(request, "settings.html", {
             "nav": "settings", "inference": cfg, "status": inference.load_status(settings.paths),
             "roles": inference.ROLES, "data_dir": str(settings.paths.root),
             "db_path": str(settings.paths.db_path), "db_size": db_size,
             "n_articles": n_articles,
-            "remote_viewer": not is_local_peer(peer_host(request)),
+            "readiness": readiness_summary(),
+            "guided_llm": guided_llm, "guided_asr": guided_asr,
         })
+
+    # ------------------------------------------------------------------
+    # operator authentication (first-run login; no user accounts)
+    @app.get("/api/auth/state")
+    def api_auth_state(request: Request) -> Any:
+        session = operator_auth.session_from_request(settings.paths, request)
+        return {"password_configured": operator_auth.password_configured(),
+                "authenticated": session is not None,
+                "csrf_token": (session or {}).get("csrf", "")}
+
+    @app.post("/api/auth/login")
+    def api_auth_login(payload: dict = Body(...)) -> Any:
+        if not operator_auth.password_configured():
+            raise HTTPException(403,
+                "Operator password is not configured. Set "
+                f"{operator_auth.PASSWORD_ENV} in the container environment "
+                "and restart yt2wiki first.")
+        password = str((payload or {}).get("password") or "")
+        if not operator_auth.verify_password(password):
+            raise HTTPException(401, "Wrong password.")
+        token, csrf = operator_auth.create_session(
+            settings.paths, label=str((payload or {}).get("label") or "")[:80])
+        from fastapi.responses import JSONResponse
+        resp = JSONResponse({"ok": True, "csrf_token": csrf})
+        resp.set_cookie(operator_auth.SESSION_COOKIE, token, httponly=True,
+                        samesite="lax", path="/",
+                        max_age=operator_auth.SESSION_TTL_S)
+        return resp
+
+    @app.post("/api/auth/logout")
+    def api_auth_logout(request: Request) -> Any:
+        operator_auth.revoke_session(settings.paths, request.cookies.get(operator_auth.SESSION_COOKIE))
+        from fastapi.responses import JSONResponse
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie(operator_auth.SESSION_COOKIE, path="/")
+        return resp
 
     @app.get("/assets/{article_id}/{filename}")
     def asset(article_id: str, filename: str) -> Any:
@@ -293,7 +355,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ------------------------------------------------------------------
     # submission (shared by the HTML forms and the JSON API)
     def _profile(value: str) -> str:
-        profile = (value or _default_profile(settings)).strip()
+        profile = (value or settings.profile).strip()
         if profile not in PROFILE_NAMES:
             raise HTTPException(400, f"Unknown profile “{profile}”.")
         try:
@@ -301,6 +363,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ConfigError as exc:
             raise HTTPException(400, str(exc)) from exc
         return profile
+
+    def _require_ready(has_captions: bool = False) -> None:
+        """Refuse to queue a job its services cannot run. Never queue an
+        inevitably failing job or leave a button apparently doing nothing."""
+        writing = inference.readiness(settings.paths, "writer", "Writing")
+        if writing["state"] != "Ready":
+            raise HTTPException(409,
+                f"Writing is not ready ({writing['detail']}) "
+                "Connect your multimodal LLM on the Settings page first.")
+        transcription = inference.readiness(settings.paths, "asr", "Transcription")
+        if transcription["state"] == "Ready" or has_captions:
+            return
+        raise HTTPException(409,
+            f"Transcription is not ready ({transcription['detail']}) "
+            "Connect a Whisper HTTP server on the Settings page first "
+            "(a video with captions can be used without one).")
 
     def _inference_snapshot() -> dict[str, Any]:
         """Capture the effective provider/model identities at submission time.
@@ -310,14 +388,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         so that later inspection can prove which provider was actually invoked.
         """
         cfg = inference.load(settings.paths)
-        st = inference.load_status(settings.paths)
         snap: dict[str, Any] = {}
         for role in ("writer", "vision", "asr"):
             name = (cfg.get("roles") or {}).get(role)
             if not name:
                 continue
             prov = (cfg.get("providers") or {}).get(name, {})
-            status = st.get(name, {})
+            # Identity-matched only: a stale PASS never enters job provenance.
+            status = inference.provider_status(settings.paths, name)
             snap[role] = {
                 "provider": name,
                 "url": prov.get("url"),
@@ -353,6 +431,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         preview = service.preview_url(url)
         if not preview.get("ok"):
             raise HTTPException(400, preview.get("error", "That video could not be reached."))
+        _require_ready(has_captions=bool(preview.get("has_manual_captions")))
         sid = service.create_youtube_source(url)
         return enqueue(sid, profile)
 
@@ -360,6 +439,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if file is None or not file.filename:
             raise HTTPException(400, "Choose a video file to upload.")
         profile = _profile(profile)
+        _require_ready()
         upload_id = new_id("upl")
         dest = settings.paths.upload_path(upload_id, Path(file.filename).name)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -393,21 +473,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         job = service.get_job(job_id)
         if job is None:
             raise HTTPException(404, "job not found")
+        _require_ready()
         return enqueue(job["source_id"], job["profile"] if job["profile"] in PROFILE_NAMES
                        else _default_profile(settings), retry_of=job_id)
 
     # ------------------------------------------------------------------
     # api
     @app.post("/api/sources/url")
-    def api_add_url(payload: dict = Body(...)) -> Any:
+    def api_add_url(request: Request, payload: dict = Body(...)) -> Any:
+        _require_operator(request)
         job = submit_url(payload.get("url") or "", payload.get("profile") or "")
         return {"source_id": service.get_job(job)["source_id"], "job_id": job}
 
     @app.post("/api/sources/upload")
     async def api_upload(
+        request: Request,
         file: UploadFile = File(...),
         profile: str = Form(default=""),
     ) -> Any:
+        _require_operator(request)
         job = await submit_upload(file, profile)
         return {"source_id": service.get_job(job)["source_id"], "job_id": job}
 
@@ -434,12 +518,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return out
 
     @app.post("/api/jobs/{job_id}/cancel")
-    def api_cancel(job_id: str) -> Any:
+    def api_cancel(request: Request, job_id: str) -> Any:
+        _require_operator(request)
         return {"cancelled": app.state.runner.cancel_queued(job_id)
                 or service.request_cancel(job_id)}
 
     @app.post("/api/jobs/{job_id}/reprocess")
-    def api_reprocess(job_id: str, payload: dict = Body(default={})) -> Any:
+    def api_reprocess(request: Request, job_id: str, payload: dict = Body(default={})) -> Any:
+        _require_operator(request)
+        _require_ready()
         job = service.get_job(job_id)
         if job is None:
             raise HTTPException(404, "job not found")
@@ -455,23 +542,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             new_job = enqueue(job["source_id"], profile, retry_of=job_id)
         return {"job_id": new_job, "source_id": job["source_id"]}
 
-    def _require_local(request: Request) -> None:
-        # Inference configuration can exfiltrate secrets and probe internal
-        # networks. Only allow it from the operator console (localhost peer).
-        # Browser sessions through the published Docker port — including SSH
-        # tunnels and LAN addresses — arrive as the gateway address, so they
-        # are refused here; use the operator console instead (see docs/deploy.md).
-        if not is_local_peer(peer_host(request)):
-            raise HTTPException(403,
-                "Inference configuration is only allowed from the operator console "
-                "(localhost). Browser sessions through the published Docker port — "
-                "including SSH tunnels — arrive as a non-localhost peer and are refused. "
-                "Configure inference with `yt2wiki inference save --file ...` via "
-                "`docker exec`, then `yt2wiki inference test --name ...`.")
+    def _readiness_for(role: str, label: str) -> dict[str, Any]:
+        """Stored-status readiness for one capability: Ready / Needs setup / Failed."""
+        return inference.readiness(settings.paths, role, label)
+
+    def readiness_summary() -> dict[str, Any]:
+        return {role: inference.readiness(settings.paths, role, label)
+                for role, label in inference.ROLES}
+
+    @app.get("/api/settings/readiness")
+    def api_readiness() -> Any:
+        return readiness_summary()
 
     @app.post("/api/settings/inference")
     def api_save_inference(request: Request, payload: dict = Body(...)) -> Any:
-        _require_local(request)
+        _require_operator(request)
         try:
             cfg = inference.save(settings.paths, payload)
         except inference.InferenceConfigError as exc:
@@ -480,7 +565,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/settings/inference/test")
     def api_test_inference(request: Request, payload: dict = Body(...)) -> Any:
-        _require_local(request)
+        _require_operator(request)
         url = str(payload.get("url") or "").strip()
         if not url.startswith(("http://", "https://")):
             raise HTTPException(400, "Enter an http:// or https:// base URL first.")
@@ -491,9 +576,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         result = inference.test_endpoint(url, api_key_env,
                                          model=str(payload.get("model") or "").strip())
         name = str(payload.get("name") or "").strip().lower()
-        if name and name in inference.load(settings.paths)["providers"]:
+        if name:
+            # Record under the tested name even before it is saved: Save keeps
+            # results for listed endpoints and prunes the rest, so testing
+            # first and saving after still yields a usable qualification.
+            # The result is bound to the tested identity (below).
+            result = dict(result)
+            result["model"] = str(payload.get("model") or "").strip()
+            result["api_key_env"] = api_key_env
             inference.record_test(settings.paths, name, result)
         return result
+
+    @app.post("/api/settings/inference/save-test")
+    def api_save_test_inference(request: Request, payload: dict = Body(...)) -> Any:
+        """Guided setup: save one endpoint, test the actual server, assign
+        roles whose qualification passed. The sequence is explicit and
+        reliable: an endpoint is only marked usable after its own test.
+        """
+        _require_operator(request)
+        try:
+            saved = inference.save_one(settings.paths, payload)
+        except inference.InferenceConfigError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        result = inference.test_endpoint(saved["url"], saved["api_key_env"],
+                                         model=saved["model"])
+        assigned = inference.record_qualified(settings.paths, saved["name"], result)
+        return {"ok": bool(result.get("ok")), "provider": saved["name"],
+                "result": result, "roles": assigned}
 
     @app.post("/api/preview")
     def api_preview(payload: dict = Body(...)) -> Any:
@@ -508,7 +617,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "body_html": view["body_html"]}
 
     @app.post("/api/articles/{article_id}/images/move")
-    def api_image_move(article_id: str, payload: dict = Body(...)) -> Any:
+    def api_image_move(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
+        _require_operator(request)
         fid = (payload.get("frame_id") or "").strip()
         heading = (payload.get("section") or "").strip()
         row = db.query_one("SELECT markdown FROM articles WHERE article_id=?", (article_id,))
@@ -547,7 +657,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             filename=f"{article_id}.html")
 
     @app.post("/api/articles/{article_id}")
-    def api_edit_article(article_id: str, payload: dict = Body(...)) -> Any:
+    def api_edit_article(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
+        _require_operator(request)
         markdown = payload.get("markdown")
         note = (payload.get("note") or "").strip()
         if not isinstance(markdown, str) or len(markdown) < 20:
@@ -568,7 +679,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return [dict(r) for r in rows]
 
     @app.post("/api/articles/{article_id}/revert")
-    def api_revert(article_id: str, payload: dict = Body(...)) -> Any:
+    def api_revert(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
+        _require_operator(request)
         revision_id = payload.get("revision_id")
         row = db.query_one(
             "SELECT * FROM article_revisions WHERE revision_id=? AND article_id=?",
@@ -708,7 +820,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "frames": [dict(r) for r in rows]}
 
     @app.post("/api/articles/{article_id}/images/replace")
-    def api_image_replace(article_id: str, payload: dict = Body(...)) -> Any:
+    def api_image_replace(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
+        _require_operator(request)
         old = (payload.get("old_frame_id") or "").strip()
         new = (payload.get("new_frame_id") or "").strip()
         caption = payload.get("caption")
@@ -718,7 +831,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                    caption=caption, note="image replaced by user")
 
     @app.post("/api/articles/{article_id}/images/remove")
-    def api_image_remove(article_id: str, payload: dict = Body(...)) -> Any:
+    def api_image_remove(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
+        _require_operator(request)
         old = (payload.get("frame_id") or "").strip()
         if not old:
             raise HTTPException(400, "frame_id required")
@@ -726,7 +840,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                    note="image removed by user")
 
     @app.post("/api/articles/{article_id}/images/caption")
-    def api_image_caption(article_id: str, payload: dict = Body(...)) -> Any:
+    def api_image_caption(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
+        _require_operator(request)
         fid = (payload.get("frame_id") or "").strip()
         caption = (payload.get("caption") or "").strip()
         if not fid:
@@ -827,7 +942,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return [_frame_out(r) for r in rows]
 
     @app.post("/api/sources/{source_id}/reprocess")
-    def api_reprocess_source(source_id: str, payload: dict = Body(default={})) -> Any:
+    def api_reprocess_source(request: Request, source_id: str, payload: dict = Body(default={})) -> Any:
+        _require_operator(request)
+        _require_ready()
         if service.get_source(source_id) is None:
             raise HTTPException(404, "source not found")
         profile = _profile(payload.get("profile") or "")
@@ -1042,8 +1159,8 @@ def _frame_file(settings: Settings, db: Database, source_id: str, filename: str)
 
 
 def _default_profile(settings: Settings) -> str:
-    names = [p[0] for p in WEB_PROFILES]
-    return settings.profile if settings.profile in names else names[0]
+    name = settings.profile
+    return name if name in PROFILE_NAMES else PROFILE_NAMES[0]
 
 
 def _job_json(view: dict[str, Any]) -> dict[str, Any]:

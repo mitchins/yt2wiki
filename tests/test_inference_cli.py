@@ -20,7 +20,7 @@ from yt2wiki.config import Settings
 from yt2wiki.db.schema import Database
 from yt2wiki.paths import Paths
 from yt2wiki.web import inference as inf
-from yt2wiki.web.app import create_app, is_local_peer, peer_host
+from yt2wiki.web.app import create_app
 
 
 def _app(tmp_path, name):
@@ -30,68 +30,72 @@ def _app(tmp_path, name):
     return create_app(settings), settings, db
 
 
-def test_peer_helpers_classify_gateway_and_loopback():
-    assert is_local_peer("127.0.0.1")
-    assert is_local_peer("::1")
-    assert is_local_peer("testclient")
-    assert is_local_peer("localhost")
-    assert not is_local_peer("172.18.0.1")
-    assert not is_local_peer("192.168.1.14")
-    assert not is_local_peer("")
+def test_unauthenticated_settings_mutations_denied(tmp_path, monkeypatch):
+    """Mutations without an operator session are denied; login enables them."""
+    from tests.conftest import TEST_OPERATOR_PASSWORD, login_client
+    from yt2wiki.web import inference as _inf
 
-    class FakeClient:
-        host = "172.18.0.1"
+    app, settings, _db = _app(tmp_path, "authgw")
+    anon = TestClient(app)
+    # Fail closed with no password configured.
+    monkeypatch.delenv("YT2WIKI_OPERATOR_PASSWORD", raising=False)
+    r = anon.post("/api/settings/inference", json={"providers": [], "roles": {}})
+    assert r.status_code == 403 and "YT2WIKI_OPERATOR_PASSWORD" in r.json()["detail"]
+    # Login required once a password exists.
+    monkeypatch.setenv("YT2WIKI_OPERATOR_PASSWORD", TEST_OPERATOR_PASSWORD)
+    r = anon.post("/api/settings/inference", json={"providers": [], "roles": {}})
+    assert r.status_code == 401
+    client, csrf = login_client(app)
+    r = client.post("/api/settings/inference", headers={"X-CSRF-Token": csrf},
+                    json={"providers": [{"name": "lan", "url": "http://10.0.0.2:8000/v1"}],
+                          "roles": {}})
+    assert r.status_code == 200, r.text
+    assert _inf.load(settings.paths)["providers"]["lan"]["url"] == "http://10.0.0.2:8000/v1"
 
-    class FakeRequest:
-        client = FakeClient()
 
-    assert peer_host(FakeRequest()) == "172.18.0.1"  # type: ignore[arg-type]
-    assert peer_host(None) == ""  # type: ignore[arg-type]
+def test_gateway_save_and_test_need_session_not_peer(tmp_path, monkeypatch):
+    """Gateway peers are treated exactly like anyone else: session decides."""
+    from tests.conftest import TEST_OPERATOR_PASSWORD, login_client
 
-
-def test_gateway_save_and_test_refused_even_with_forwarding_headers(tmp_path):
-    """Docker gateway peers get 403; X-Forwarded-For never grants access."""
+    monkeypatch.setenv("YT2WIKI_OPERATOR_PASSWORD", TEST_OPERATOR_PASSWORD)
     app, _settings, _db = _app(tmp_path, "gw")
     gateway = TestClient(app, client=("172.18.0.1", 50000))
     payload = {"providers": [{"name": "a", "url": "http://a.test/v1"}], "roles": {}}
 
-    r = gateway.post("/api/settings/inference", json=payload)
-    assert r.status_code == 403, r.text
-    assert "operator console" in r.json()["detail"]
-    assert "SSH" in r.json()["detail"]
-
-    r = gateway.post(
-        "/api/settings/inference",
-        headers={"X-Forwarded-For": "127.0.0.1", "X-Real-IP": "127.0.0.1"},
-        json=payload,
-    )
-    assert r.status_code == 403, "forwarding headers must not grant access"
-
-    r = gateway.post("/api/settings/inference/test",
-                     json={"url": "http://a.test/v1", "name": "a", "model": ""})
-    assert r.status_code == 403
-
-    # Localhost peer (default testclient) can still save
-    local = TestClient(app)
-    r = local.post("/api/settings/inference", json=payload)
+    # Forged loopback headers grant nothing without a session.
+    r = gateway.post("/api/settings/inference",
+                     headers={"X-Forwarded-For": "127.0.0.1", "X-Real-IP": "127.0.0.1"},
+                     json=payload)
+    assert r.status_code == 401, r.text
+    # Same gateway peer with a session cookie + CSRF: allowed.
+    client, csrf = login_client(app)
+    gw_authed = TestClient(app, client=("172.18.0.1", 50000))
+    gw_authed.cookies.update(client.cookies)
+    r = gw_authed.post("/api/settings/inference", headers={"X-CSRF-Token": csrf}, json=payload)
     assert r.status_code == 200, r.text
+    r = gw_authed.post("/api/settings/inference/test",
+                       headers={"X-CSRF-Token": csrf},
+                       json={"url": "http://127.0.0.1:9/v1", "name": "a", "model": ""})
+    assert r.status_code == 200 and r.json()["ok"] is False  # unreachable, but authorized
 
 
-def test_settings_page_marks_operator_only_for_gateway(tmp_path):
+def test_settings_page_shows_login_state(tmp_path, monkeypatch):
+    """Logged-out viewers get a compact login box; logged-in viewers get forms."""
+    from tests.conftest import TEST_OPERATOR_PASSWORD, login_client
+
+    monkeypatch.setenv("YT2WIKI_OPERATOR_PASSWORD", TEST_OPERATOR_PASSWORD)
     app, _settings, _db = _app(tmp_path, "banner")
     gateway = TestClient(app, client=("172.18.0.1", 50000))
     r = gateway.get("/settings")
     assert r.status_code == 200
-    assert "Operator only" in r.text
-    assert "data-remote" in r.text
-    assert "docker exec" in r.text
-    assert "SSH tunnel does not make this a localhost peer" in r.text
-
-    local = TestClient(app)
-    r = local.get("/settings")
-    assert r.status_code == 200
+    assert "Operator login" in r.text
+    assert "data-login" in r.text
     assert "Operator only" not in r.text
-    assert "data-remote" not in r.text
+    assert "docker exec" not in r.text
+    client, _csrf = login_client(app)
+    r = client.get("/settings")
+    assert r.status_code == 200
+    assert "Logged in as operator" in r.text
 
 
 def _run_cli(*argv):
@@ -134,7 +138,6 @@ def test_inference_cli_show_save_roundtrip(tmp_path, capsys):
 
 def test_read_payload_file_validates(tmp_path):
     from yt2wiki.config import Settings as _Settings
-
     from yt2wiki.web import inference as inf2
 
     settings = _Settings.load(data_dir=tmp_path / "payload-home", profile="compact",

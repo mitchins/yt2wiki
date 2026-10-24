@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
-{% from "_partials.html" import profile_picker, progress_strip %}
+{% from "_partials.html" import progress_strip %}
 {% block title %}{% if q %}“{{ q }}” — {% endif %}yt2wiki{% endblock %}
 {% block main %}
 <main class="wrap">
@@ -8,9 +8,12 @@
   <section class="hero" id="add">
     <h1>Turn a video into an illustrated guide.</h1>
     <p class="sub">Paste a YouTube link. yt2wiki listens to the narration, picks the frames that show each step,
-      and writes a guide you can read, search and edit — all on this machine.</p>
+      and writes a guide you can read, search and edit — transcription and writing run on the inference
+      services you connect in Settings.</p>
+    {% if operator %}
     <form class="addbar" method="post" action="/add/url" data-busy>
       <input type="hidden" name="back" value="library">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="addbar-row">
         <span class="lead-icon">{{ icon("link") }}</span>
         <label class="sr-only" for="url">YouTube link</label>
@@ -20,10 +23,21 @@
       </div>
       {% if error %}<p class="notice" role="alert">{{ icon("info") }}<span>{{ error }}</span></p>{% endif %}
       <div class="addbar-opts">
-        {{ profile_picker(default_profile, "home") }}
         <a href="/add?mode=upload">{{ icon("upload") }}Upload a video file instead</a>
       </div>
     </form>
+    {% elif not auth_configured %}
+    <p class="muted">Video submission needs an operator password: set <code>YT2WIKI_OPERATOR_PASSWORD</code> in the container environment, restart, then <a href="/settings">log in</a>.</p>
+    {% else %}
+    <form data-login>
+      <div class="addbar-row">
+        <label class="sr-only" for="pw">Operator password</label>
+        <input class="input" id="pw" name="password" type="password" autocomplete="current-password" required placeholder="Operator password">
+        <button class="btn" type="submit">Log in</button>
+      </div>
+      <p class="notice" data-login-error role="alert" hidden></p>
+    </form>
+    {% endif %}
   </section>
   {% endif %}
 
@@ -94,4 +108,4 @@
   </section>
 </main>
 {% endblock %}
-{% block scripts %}<script src="/static/app.js" defer></script>{% endblock %}
+{% block scripts %}<script src="/static/app.js" defer></script><script src="/static/auth.js" defer></script>{% endblock %}
