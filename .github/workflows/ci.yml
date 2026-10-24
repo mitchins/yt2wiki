@@ -9,6 +9,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      qualify_armv7:
+        description: "Attempt ARMv7 build + smoke qualification (manual only; never advertised, never auto-published)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -150,18 +155,9 @@ jobs:
         include:
           - platform: linux/amd64
             runner: ubuntu-24.04
-            experimental: false
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
-            experimental: false
-          # ARMv7 is a best-effort attempt: several pinned dependencies ship
-          # no armv7l wheels, so qualification may fail within budget. A
-          # failure here never blocks the qualified platforms (see manifest).
-          - platform: linux/arm/v7
-            runner: ubuntu-24.04
-            experimental: true
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.experimental }}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -171,12 +167,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, node24
         with:
           persist-credentials: false
-
-      - name: Set up QEMU (ARMv7 cross-build)
-        if: matrix.experimental
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0, node24
-        with:
-          platforms: arm
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1, node24
@@ -212,7 +202,7 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, node24
         with:
-          name: digests-${{ matrix.platform == 'linux/arm/v7' && 'arm-v7' || matrix.platform == 'linux/arm64' && 'arm64' || 'amd64' }}
+          name: digests-${{ matrix.platform == 'linux/arm64' && 'arm64' || 'amd64' }}
           path: /tmp/digests
           if-no-files-found: error
           retention-days: 7
@@ -260,15 +250,18 @@ jobs:
           echo "platform refs:$refs"
           test -n "$refs"
           short="${GITHUB_SHA::7}"
-          # :main tracks the latest qualified main build only; a version tag
-          # must never move it (the tag may point behind the main head).
-          tags="-t ghcr.io/mitchins/yt2wiki:sha-$short"
-          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
-            tags="$tags -t ghcr.io/mitchins/yt2wiki:main"
-          fi
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            tags="$tags -t ghcr.io/mitchins/yt2wiki:${GITHUB_REF#refs/tags/}"
-          fi
+          # Immutable contract: a :sha-<commit> tag is first-build-wins and is
+          # never silently moved. Tag collisions fail here with an explicit
+          # error (re-run only after deleting the tag, or cut a new commit).
+          bash scripts/ci/check-immutable.sh "ghcr.io/mitchins/yt2wiki:sha-$short"
+          # Tag set: :main tracks the latest qualified main build only — a
+          # version tag must never move it (it may point behind the head).
+          tags=""
+          while IFS= read -r tag; do
+            tags="$tags -t $tag"
+          done < <(bash scripts/ci/compute-tags.sh "$GITHUB_REF" "$GITHUB_SHA")
+          echo "publishing tags:$tags"
+          test -n "$tags"
           # shellcheck disable=SC2086
           docker buildx imagetools create $tags $refs
           echo "short=$short" >> "$GITHUB_OUTPUT"
@@ -307,3 +300,40 @@ jobs:
           path: release-report.txt
           if-no-files-found: error
           retention-days: 90
+
+  docker-armv7:
+    # Manual ARMv7 qualification path: the pinned dependency set ships no
+    # armv7l wheels, so this is an explicit opt-in experiment, never part of
+    # a release. It builds and smokes only — nothing is pushed, and a
+    # success here does not advertise ARMv7 (that takes a follow-up PR).
+    name: ARMv7 qualification attempt (manual only)
+    if: github.event_name == 'workflow_dispatch' && inputs.qualify_armv7
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, node24
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0, node24
+        with:
+          platforms: arm
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1, node24
+
+      - name: Build ARMv7 image (load, no push)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0, node24
+        with:
+          context: .
+          platforms: linux/arm/v7
+          load: true
+          tags: yt2wiki:armv7-manual
+          build-args: GIT_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=armv7-manual
+          cache-to: type=gha,mode=max,scope=armv7-manual
+
+      - name: Smoke-qualify the ARMv7 image
+        run: bash scripts/ci/image-smoke.sh yt2wiki:armv7-manual linux/arm/v7

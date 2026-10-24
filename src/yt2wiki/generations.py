@@ -10,6 +10,14 @@ each generation are snapshotted under ``articles/<id>/generations/<gid>/``
 while the existing current-article paths keep serving the reader unchanged.
 Human edits stay versioned as article revisions (origin ``user``) and are
 never misrepresented as model generations.
+
+Failure handling is deliberately bounded, not a general transaction
+framework: publishers stage outputs aside, snapshot and commit, then promote
+staged files over canonical paths with per-file backups. An injected failure
+anywhere before completion restores the previous files and rows. Crash
+consistency across the filesystem/SQLite domains is NOT claimed: an unclean
+shutdown mid-promotion can leave staged/new files ahead of the committed
+generation — re-running publication heals it by regenerating from source.
 """
 
 from __future__ import annotations
@@ -21,8 +29,9 @@ import os
 import shutil
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 log = logging.getLogger("yt2wiki.generations")
 
@@ -104,14 +113,8 @@ def build_info() -> dict[str, str]:
             version = _v
         except Exception:  # noqa: BLE001
             pass
-    commit = UNKNOWN
-    for candidate in (Path("/app/BUILD"), Path(__file__).resolve().parents[2] / "BUILD"):
-        try:
-            if candidate.is_file():
-                commit = candidate.read_text(encoding="utf-8").strip().split()[0]
-                break
-        except Exception:  # noqa: BLE001
-            continue
+    commit = _read_build_commit(
+        [Path("/app/BUILD"), Path(__file__).resolve().parents[2] / "BUILD"])
     if commit == UNKNOWN:
         commit = _repo_commit(Path(__file__).resolve().parents[2])
     digest = os.environ.get("YT2WIKI_IMAGE_DIGEST", "").strip() or UNKNOWN
@@ -256,29 +259,44 @@ def _build_manifest(*, generation_id: str, article_id: str, source_id: str,
     }
 
 
-def snapshot_generation_files(paths, article_id: str,
-                              generation_id: str) -> dict[str, str]:
-    """Copy the current article outputs to the immutable generation directory.
+def _read_build_commit(candidates: list[Path]) -> str:
+    """First non-empty BUILD file wins; anything unreadable reads as unknown."""
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate.read_text(encoding="utf-8").strip().split()[0]
+        except Exception:  # noqa: BLE001
+            continue
+    return UNKNOWN
 
-    No database writes. On failure the partial directory is removed and the
-    exception propagates — the publisher must treat this as a failed
-    publication, not a published article without provenance.
+
+def snapshot_generation_files(paths, article_id: str,
+                              generation_id: str,
+                              source_dir: Path | None = None) -> dict[str, str]:
+    """Copy article outputs to the immutable generation directory.
+
+    Reads from ``source_dir`` (a publisher staging directory) or, when
+    omitted, from the canonical article directory. No database writes. On
+    failure the partial directory is removed and the exception propagates —
+    the publisher must treat this as a failed publication, not a published
+    article without provenance.
     """
     adir = paths.article_dir(article_id)
+    src_dir = source_dir or adir
+    src_assets = src_dir / "assets"
     gdir = adir / "generations" / generation_id
-    assets_src = paths.article_assets(article_id)
     artifacts: dict[str, str] = {}
     try:
         gdir.mkdir(parents=True, exist_ok=False)
         for name in ("article.md", "article.html", "article.standalone.html"):
-            src = adir / name
+            src = src_dir / name
             if src.is_file():
                 shutil.copy2(src, gdir / name)
                 artifacts[name] = _file_hash(src)
-        if assets_src.is_dir():
+        if src_assets.is_dir():
             gassets = gdir / "assets"
             gassets.mkdir(exist_ok=True)
-            for f in sorted(assets_src.glob("*")):
+            for f in sorted(src_assets.glob("*")):
                 if f.is_file():
                     shutil.copy2(f, gassets / f.name)
                     artifacts[f"assets/{f.name}"] = _file_hash(f)
@@ -287,6 +305,86 @@ def snapshot_generation_files(paths, article_id: str,
         shutil.rmtree(gdir, ignore_errors=True)
         raise
     return artifacts
+
+
+@contextmanager
+def promoted_stage(article_dir: Path, stage_dir: Path, gid: str, *,
+                   prune_assets: bool = False) -> Iterator[None]:
+    """Publish staged outputs over canonical paths, with bounded rollback.
+
+    Moves every staged file over its canonical counterpart (per-file backups
+    kept aside); with ``prune_assets`` also removes canonical assets absent
+    from the stage. Yields once promotion completes. If the caller's block
+    then fails (e.g. the DB transaction aborts), canonical files are restored
+    from backup and the promoted files removed, and the exception propagates.
+
+    This covers the injected-failure domain only. It is not a general
+    transaction framework and claims no crash atomicity: an unclean shutdown
+    mid-promotion can leave new files ahead of the committed generation, in
+    which case re-running publication heals it.
+    """
+    backup_dir = article_dir / f".backup-{gid}"
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir, ignore_errors=True)
+    backup_dir.mkdir(parents=True)
+    staged = sorted(p for p in stage_dir.rglob("*") if p.is_file())
+    staged_rels = {p.relative_to(stage_dir) for p in staged}
+    completed: list[tuple[Path | None, Path, bool]] = []  # (backup, canonical, promoted?)
+    try:
+        for src in staged:
+            rel = src.relative_to(stage_dir)
+            dest = article_dir / rel
+            backup: Path | None = None
+            if dest.is_file() or dest.is_symlink() or dest.is_dir():
+                backup = backup_dir / rel
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(dest), str(backup))
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+            # Record intent before the move: if the move itself fails, the
+            # rollback below still restores the moved-aside original.
+            completed.append((backup, dest, True))
+            shutil.move(str(src), str(dest))
+        if prune_assets:
+            canonical_assets = article_dir / "assets"
+            staged_assets = {r for r in staged_rels if r.parts[:1] == ("assets",)}
+            if canonical_assets.is_dir():
+                for existing in sorted(canonical_assets.glob("*")):
+                    rel = existing.relative_to(article_dir)
+                    if rel not in staged_assets and existing.is_file():
+                        backup = backup_dir / rel
+                        backup.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(existing), str(backup))
+                        # Prune moves are single-op: only record success, so a
+                        # failed prune never discards an untouched original.
+                        completed.append((backup, existing, False))
+        yield
+    except Exception:
+        restore_failed = False
+        for backup, dest, promoted in reversed(completed):
+            try:
+                # Remove only what promotion put there; never touch a file
+                # promotion did not create.
+                if promoted and (dest.is_file() or dest.is_symlink()):
+                    dest.unlink()
+                if backup is not None and backup.exists() and not dest.exists():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(backup), str(dest))
+            except Exception:  # noqa: BLE001
+                restore_failed = True
+                log.exception("promotion rollback failed for %s", dest)
+        shutil.rmtree(stage_dir, ignore_errors=True)
+        if restore_failed:
+            # Keep the leftovers for manual inspection and say so loudly;
+            # re-running publication heals the canonical state.
+            log.error("promotion rollback incomplete; leftovers kept under %s",
+                      backup_dir)
+        else:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+        raise
+    else:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+        shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 def write_manifest(paths, article_id: str, manifest: dict[str, Any]) -> str:
@@ -345,19 +443,24 @@ def prepare_generation(db, paths, *, article_id: str, source_id: str,
                        snapshot: dict[str, Any] | None = None,
                        source_content_hash: str | None = None,
                        frame_ids: list[str] | None = None,
-                       selection: dict[str, Any] | None = None) -> dict[str, Any]:
+                       selection: dict[str, Any] | None = None,
+                       source_dir: Path | None = None) -> dict[str, Any]:
     """Plan + snapshot a generation without touching the database.
 
-    Returns the manifest dict and its directory. The caller inserts the row
-    with :func:`insert_generation_row` inside its own article transaction and
-    then calls :func:`write_manifest`. Any failure before the transaction
-    commits leaves no visible trace (the snapshot directory is removed).
+    Snapshots from ``source_dir`` (a publisher staging directory) or the
+    canonical article directory, writes the manifest beside the snapshot,
+    and returns the manifest dict plus paths. The caller inserts the row
+    with :func:`insert_generation_row` inside its own article transaction.
+    Any failure here leaves no visible trace (the snapshot directory,
+    manifest included, is removed).
     """
     providers = _resolve_providers(db, source_id, job_id, snapshot)
     parent, operation = _plan_generation(db, article_id=article_id)
     gid = f"gen-{uuid.uuid4().hex[:12]}"
     now = time.time()
-    artifacts = snapshot_generation_files(paths, article_id, gid)
+    gdir = paths.article_dir(article_id) / "generations" / gid
+    artifacts = snapshot_generation_files(paths, article_id, gid,
+                                          source_dir=source_dir)
     manifest = _build_manifest(
         generation_id=gid, article_id=article_id, source_id=source_id,
         job_id=job_id, parent=parent, operation=operation, recipe=recipe,
@@ -366,8 +469,13 @@ def prepare_generation(db, paths, *, article_id: str, source_id: str,
         source_content_hash=_resolve_source_hash(db, source_id, source_content_hash),
         stored_frames=sorted(frame_ids or []), artifacts=artifacts,
         selection=selection, created_at=now)
-    return {"manifest": manifest,
-            "directory": str(paths.article_dir(article_id) / "generations" / gid)}
+    try:
+        manifest_rel = write_manifest(paths, article_id, manifest)
+    except Exception:
+        shutil.rmtree(gdir, ignore_errors=True)
+        raise
+    return {"manifest": manifest, "manifest_rel": manifest_rel,
+            "directory": str(gdir)}
 
 
 def record_generation(db, paths, *, article_id: str, source_id: str,
@@ -381,12 +489,12 @@ def record_generation(db, paths, *, article_id: str, source_id: str,
                       selection: dict[str, Any] | None = None) -> dict[str, Any]:
     """Snapshot the current article outputs as one immutable generation.
 
-    Composed from :func:`prepare_generation` (files) plus a dedicated
-    transaction for the row: either both the files and the row land or the
-    snapshot directory is removed and nothing is recorded. Publishers that
-    need article + generation atomicity use ``prepare_generation`` /
-    ``insert_generation_row`` / ``write_manifest`` directly inside their own
-    article transaction.
+    Composed from :func:`prepare_generation` (snapshot + manifest files)
+    plus a dedicated transaction for the row: either the files, manifest and
+    row all land or the snapshot directory is removed and nothing is
+    recorded. Publishers that need article + generation consistency use
+    ``prepare_generation`` / ``insert_generation_row`` inside their own
+    article transaction together with :func:`promoted_stage`.
     """
     prep = prepare_generation(
         db, paths, article_id=article_id, source_id=source_id, job_id=job_id,
@@ -401,10 +509,9 @@ def record_generation(db, paths, *, article_id: str, source_id: str,
     except Exception:
         shutil.rmtree(prep["directory"], ignore_errors=True)
         raise
-    manifest_rel = write_manifest(paths, article_id, manifest)
     return {"generation_id": manifest["generation_id"],
             "parent_generation_id": manifest["parent_generation_id"],
-            "operation": manifest["operation"], "manifest": manifest_rel,
+            "operation": manifest["operation"], "manifest": prep["manifest_rel"],
             "artifacts": len(manifest["artifacts"])}
 
 

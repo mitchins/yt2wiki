@@ -15,7 +15,7 @@ from ..generations import (
     RECIPE_VERSION,
     insert_generation_row,
     prepare_generation,
-    write_manifest,
+    promoted_stage,
 )
 
 log = logging.getLogger("yt2wiki.v9.publish")
@@ -380,40 +380,35 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
 
     adir = settings.paths.article_dir(article_id)
     adir.mkdir(parents=True, exist_ok=True)
-    assets = settings.paths.article_assets(article_id)
-    assets.mkdir(parents=True, exist_ok=True)
+    canonical_assets = settings.paths.article_assets(article_id)
+    # Stage every output aside first: canonical files and the database stay
+    # untouched until the single commit below. A failure anywhere before the
+    # promotion commits leaves the previous article fully intact.
+    stage = adir / ".staging"
+    if stage.exists():
+        shutil.rmtree(stage, ignore_errors=True)
+    stage_assets = stage / "assets"
+    stage_assets.mkdir(parents=True)
     # Validate and install selected assets before committing article outputs;
     # a missing or failed copy must fail visibly, not publish a broken article.
-    asset_rows = _asset_rows(settings, assets, picks, article_id)
-    # Drop files from previous publishes: the zip below is built from this
-    # directory, and anything not in the current picks would otherwise ship
-    # as an unreferenced stale asset.
-    keep = {f"{p['frame_id']}.jpg" for plist in picks.values() for p in plist[:2]}
-    for f in assets.glob("*"):
-        if f.is_file() and f.name not in keep:
-            try:
-                f.unlink()
-            except OSError:
-                continue
-    md_path = settings.paths.article_markdown(article_id)
-    md_path.write_text(markdown, encoding="utf-8")
+    # Rows reference the canonical paths they will occupy after promotion.
+    asset_rows = _asset_rows(settings, stage_assets, picks, article_id,
+                             record_dir=canonical_assets)
+    (stage / "article.md").write_text(markdown, encoding="utf-8")
     body_html = markdown_to_html(markdown)
-    html = render_html(article, body_html, embed_images=False, asset_dir=assets)
-    settings.paths.article_html(article_id).write_text(html, encoding="utf-8")
-    standalone = render_html(article, body_html, embed_images=True, asset_dir=assets)
-    (settings.paths.article_dir(article_id) / "article.standalone.html").write_text(
-        standalone, encoding="utf-8")
+    html = render_html(article, body_html, embed_images=False, asset_dir=stage_assets)
+    (stage / "article.html").write_text(html, encoding="utf-8")
+    standalone = render_html(article, body_html, embed_images=True, asset_dir=stage_assets)
+    (stage / "article.standalone.html").write_text(standalone, encoding="utf-8")
 
     outline = [{"section_id": s["section_id"], "heading": s["heading"],
                 "t_start": s["t_start"], "t_end": s["t_end"],
                 "frames": [p["frame_id"] for p in picks.get(s["section_id"], [])]}
                for s in sections]
-    (adir / "v9_report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
-    (adir / "sections.json").write_text(json.dumps(sections, indent=1), encoding="utf-8")
-    # Immutable generation, atomic with the article: snapshot the just-written
-    # outputs first (files only, no DB), then commit the article row and the
-    # generation row in one transaction. A failure anywhere before the commit
-    # leaves no published-without-provenance state behind.
+    (stage / "v9_report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+    (stage / "sections.json").write_text(json.dumps(sections, indent=1), encoding="utf-8")
+    # Immutable generation from the staged outputs (files + manifest, no DB).
+    # Anything not in the current picks is pruned from the shipped assets.
     frame_ids = [p["frame_id"] for plist in picks.values() for p in plist[:2]
                  if p.get("frame_id")]
     prep = prepare_generation(
@@ -421,10 +416,23 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
         job_id=job_id, recipe="v9", recipe_version=RECIPE_VERSION,
         settings_fingerprint=provenance.get("fingerprint"),
         profile=provenance.get("profile"),
-        snapshot=inference_snapshot, frame_ids=frame_ids)
+        snapshot=inference_snapshot, frame_ids=frame_ids,
+        source_dir=stage)
     manifest = prep["manifest"]
+    # The zip is a derived bundle: build it from the staged files so a zip
+    # failure also lands before the commit, then promote it with the rest.
+    with zipfile.ZipFile(stage / "article.zip", "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(stage / "article.md", "article.md")
+        for f in sorted(stage_assets.glob("*")):
+            if f.is_file():
+                zf.write(f, f"assets/{f.name}")
+    # Promote staged files over canonical paths, then commit the article row
+    # and the generation row in one transaction. A failure in either step
+    # restores the previous files and rows; the snapshot directory (manifest
+    # included) is removed.
     try:
-        with db.transaction() as conn:
+        with promoted_stage(adir, stage, manifest["generation_id"], prune_assets=True), \
+                db.transaction() as conn:
             prev = conn.execute(
                 "SELECT version, markdown, html FROM articles WHERE article_id=?",
                 (article_id,)).fetchone()
@@ -462,26 +470,21 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
             insert_generation_row(conn, manifest, provenance.get("fingerprint"),
                                   provenance.get("profile"))
     except Exception:
-        import shutil as _shutil
-        _shutil.rmtree(prep["directory"], ignore_errors=True)
+        shutil.rmtree(prep["directory"], ignore_errors=True)
         raise
-    manifest_rel = write_manifest(settings.paths, article_id, manifest)
     zp = settings.paths.article_dir(article_id) / "article.zip"
-    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(md_path, "article.md")
-        for f in sorted(assets.glob("*")):
-            if f.is_file():
-                zf.write(f, f"assets/{f.name}")
+    assets = settings.paths.article_assets(article_id)
     return {"article_id": article_id, "markdown_chars": len(markdown),
             "assets": len(list(assets.glob('*'))), "zip_bytes": zp.stat().st_size,
             "generation_id": manifest["generation_id"],
             "generation_operation": manifest["operation"],
-            "manifest": manifest_rel}
+            "manifest": prep["manifest_rel"]}
 
 
 def _asset_rows(settings, assets: Path, picks: dict[str, list[dict[str, Any]]],
-                article_id: str):
+                article_id: str, record_dir: Path | None = None):
     rows = []
+    record = record_dir if record_dir is not None else assets
     for plist in picks.values():
         for pick in plist[:2]:
             fid = pick["frame_id"]
@@ -496,7 +499,9 @@ def _asset_rows(settings, assets: Path, picks: dict[str, list[dict[str, Any]]],
                 raise RuntimeError(f"failed to install asset {fname}: {exc}") from exc
             if not dest.is_file():
                 raise RuntimeError(f"asset {fname} not installed at {dest}")
+            # Rows always reference the canonical location the file will
+            # occupy after promotion, even when installing into a stage.
             rows.append({"asset_id": f"{article_id}-asset-{fid}",
-                         "frame_id": fid, "path": str(dest),
+                         "frame_id": fid, "path": str(record / fname),
                          "caption": pick.get("caption", ""), "alt_text": pick.get("alt_text", "")})
     return rows

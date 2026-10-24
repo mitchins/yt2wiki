@@ -120,3 +120,65 @@ def test_readme_is_sixty_seconds():
     for banned in ("feature matrix", "benchmark", "roadmap", "Architecture",
                    "faster-whisper", ":0.1.0"):
         assert banned not in text
+
+
+def test_compute_tags_script():
+    import subprocess
+
+    def tags(ref, sha):
+        out = subprocess.run(["bash", str(ROOT / "scripts/ci/compute-tags.sh"), ref, sha],
+                             capture_output=True, text=True, check=True)
+        return out.stdout.split()
+
+    sha = "abc1234def5678"
+    main = tags("refs/heads/main", sha)
+    assert main == ["ghcr.io/mitchins/yt2wiki:sha-abc1234",
+                    "ghcr.io/mitchins/yt2wiki:main"]
+    # Same commit pushed as a version tag: sha tag shared, :main untouched.
+    ver = tags("refs/tags/v1.2.3", sha)
+    assert ver == ["ghcr.io/mitchins/yt2wiki:sha-abc1234",
+                   "ghcr.io/mitchins/yt2wiki:v1.2.3"]
+    assert "ghcr.io/mitchins/yt2wiki:main" not in ver
+    pr = tags("refs/pull/14/merge", sha)
+    assert pr == ["ghcr.io/mitchins/yt2wiki:sha-abc1234"]
+
+
+def test_check_immutable_script(tmp_path):
+    import subprocess
+
+    script = str(ROOT / "scripts/ci/check-immutable.sh")
+    missing = tmp_path / "docker-missing.sh"
+    missing.write_text("#!/usr/bin/env bash\nexit 1\n")
+    missing.chmod(0o755)
+    env = {"DOCKER": str(missing), "PATH": "/usr/bin:/bin"}
+    r = subprocess.run(["bash", script, "ghcr.io/mitchins/yt2wiki:sha-abc1234"],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "free to publish" in r.stdout
+    exists = tmp_path / "docker-exists.sh"
+    exists.write_text("#!/usr/bin/env bash\nexit 0\n")
+    exists.chmod(0o755)
+    env = {"DOCKER": str(exists), "PATH": "/usr/bin:/bin"}
+    r = subprocess.run(["bash", script, "ghcr.io/mitchins/yt2wiki:sha-abc1234"],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "Refusing to move immutable tag" in r.stderr
+
+
+def test_ci_immutable_tags_and_manual_armv7():
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    jobs = cfg["jobs"]
+    # Only the two qualified platforms ride the release matrix.
+    platforms = [m["platform"] for m in jobs["docker-build"]["strategy"]["matrix"]["include"]]
+    assert sorted(platforms) == ["linux/amd64", "linux/arm64"]
+    # Immutable-tag scripts drive the manifest job.
+    manifest_src = str(jobs["docker-manifest"])
+    assert "compute-tags.sh" in manifest_src and "check-immutable.sh" in manifest_src
+    # ARMv7 is an explicit manual path: gated on the dispatch input, builds
+    # and smokes only, never pushes or joins a manifest.
+    armv7 = jobs["docker-armv7"]
+    assert "qualify_armv7" in armv7["if"]
+    armv7_src = str(armv7)
+    assert "linux/arm/v7" in armv7_src and "imagetools create" not in armv7_src
+    assert "'load': True" in armv7_src and "push-by-digest" not in armv7_src
+    assert cfg[True]["workflow_dispatch"]["inputs"]["qualify_armv7"]["default"] is False

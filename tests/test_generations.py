@@ -312,6 +312,71 @@ def test_classic_store_records_generation(tmp_path):
             row["generation_id"] / "article.md").read_text() == "see ![](assets/f-9.jpg)"
 
 
+def test_classic_regenerate_new_image_both_generations_restore(tmp_path):
+    """Regenerating with a different image preserves both snapshots exactly."""
+    from yt2wiki.article import Article, Section
+    from yt2wiki.generations import restore_generation
+    from yt2wiki.pipeline.stages import compose as _compose
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db)
+    _seed_article(db, article_id="art-yt-abc")
+    frames = tmp_path / "frames"
+    frames.mkdir(parents=True)
+    (frames / "f-9.jpg").write_bytes(b"\xff\xd8nine")
+    (frames / "f-10.jpg").write_bytes(b"\xff\xd8ten")
+    for fid in ("f-9", "f-10"):
+        db.execute("INSERT INTO frames(frame_id, source_id, t, path, kind, created_at)"
+                   " VALUES(?, 'yt-abc', 1.0, ?, 'scene', 1.0)",
+                   (fid, str(frames / f"{fid}.jpg")))
+
+    def _ctx():
+        return SimpleNamespace(
+            db=db, paths=paths, source_id="yt-abc", job_id="job-1",
+            fingerprint="fp",
+            settings=SimpleNamespace(profile="compact", fingerprint=lambda: "fp"),
+            inference_snapshot=None, artifacts={},
+            record_artifact_hash=lambda *a: None)
+
+    _compose._store(
+        _ctx(), Article(source_id="yt-abc", title="T",
+                        sections=[Section(heading="H", body=["see ![](assets/f-9.jpg)"])],
+                        provenance={"profile": "compact", "fingerprint": "fp"}),
+        "art-yt-abc", "see ![](assets/f-9.jpg)")
+    g1 = db.query_one(
+        "SELECT generation_id FROM generations WHERE article_id='art-yt-abc'")["generation_id"]
+    _compose._store(
+        _ctx(), Article(source_id="yt-abc", title="T",
+                        sections=[Section(heading="H", body=["see ![](assets/f-10.jpg)"])],
+                        provenance={"profile": "compact", "fingerprint": "fp"}),
+        "art-yt-abc", "see ![](assets/f-10.jpg)")
+    rows = db.query("SELECT generation_id, parent_generation_id, operation FROM generations "
+                    "WHERE article_id='art-yt-abc' ORDER BY created_at")
+    assert [r["operation"] for r in rows] == ["initial", "regenerate"]
+    assert rows[1]["parent_generation_id"] == g1
+    g2 = rows[1]["generation_id"]
+    # The new image is installed and its row recorded in the same transaction.
+    # Classic keeps previously installed files (no prune); rows and files stay
+    # mutually consistent.
+    assert (paths.article_assets("art-yt-abc") / "f-10.jpg").read_bytes() == b"\xff\xd8ten"
+    assert (paths.article_assets("art-yt-abc") / "f-9.jpg").read_bytes() == b"\xff\xd8nine"
+    assert sorted(r["frame_id"] for r in db.query(
+        "SELECT frame_id FROM article_assets WHERE article_id='art-yt-abc'")) == ["f-10", "f-9"]
+    # Each generation restores with its own correct image and hash.
+    out1 = restore_generation(db, paths, g1)
+    assert out1["markdown"] == "see ![](assets/f-9.jpg)"
+    assert (paths.article_assets("art-yt-abc") / "f-9.jpg").read_bytes() == b"\xff\xd8nine"
+    gens = paths.article_dir("art-yt-abc") / "generations"
+    assert (gens / g1 / "assets" / "f-9.jpg").read_bytes() == b"\xff\xd8nine"
+    assert not (gens / g1 / "assets" / "f-10.jpg").exists()
+    out2 = restore_generation(db, paths, g2)
+    assert out2["markdown"] == "see ![](assets/f-10.jpg)"
+    assert (paths.article_assets("art-yt-abc") / "f-10.jpg").read_bytes() == b"\xff\xd8ten"
+    assert (gens / g2 / "assets" / "f-10.jpg").read_bytes() == b"\xff\xd8ten"
+    assert not (gens / g2 / "assets" / "f-9.jpg").exists()
+
+
 def test_build_info_fallbacks_and_digest_env(tmp_path, monkeypatch):
     import importlib.metadata as _md
 
@@ -411,22 +476,31 @@ def test_record_generation_without_job_uses_snapshot_and_hash_failure(tmp_path, 
         (g2["generation_id"],))["source_content_hash"] == "unknown"
 
 
-def test_snapshot_write_failure_aborts_generation(tmp_path):
+def test_snapshot_copy_oserror_aborts_generation(tmp_path, monkeypatch):
+    """A snapshot-copy OSError fails the publication with nothing recorded."""
+    import shutil as _sh
+
     paths = Paths(root=tmp_path / "data")
     db = Database(paths.db_path)
     _seed_source_job(db)
     _seed_article(db)
-    _article_files(paths, "art9-yt-abc", body="# One", assets={})
-    md = paths.article_markdown("art9-yt-abc")
-    md.chmod(0o000)
-    try:
-        with pytest.raises(OSError):
-            record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
-                              job_id="job-1", recipe="v9",
-                              recipe_version=RECIPE_VERSION)
-    finally:
-        md.chmod(0o644)
+    _article_files(paths, "art9-yt-abc", body="# One", assets={"f-1.jpg": b"one"})
+    real_copy = _sh.copy2
+    calls = []
+    def _boom(src, dst, *a, **k):
+        calls.append(str(src))
+        if len(calls) == 1:
+            raise OSError("disk full")
+        return real_copy(src, dst, *a, **k)
+    monkeypatch.setattr(_sh, "copy2", _boom)
+    with pytest.raises(OSError, match="disk full"):
+        record_generation(db, paths, article_id="art9-yt-abc", source_id="yt-abc",
+                          job_id="job-1", recipe="v9",
+                          recipe_version=RECIPE_VERSION)
     assert db.query_one("SELECT COUNT(*) c FROM generations")["c"] == 0
+    assert list((paths.article_dir("art9-yt-abc") / "generations").iterdir()) == []
+    # Canonical outputs are untouched by the failed snapshot.
+    assert (paths.article_dir("art9-yt-abc") / "article.md").read_text() == "# One"
 
 
 def test_prompt_hash_failure_degrades_manifest(tmp_path, monkeypatch):
@@ -592,20 +666,35 @@ def test_restore_list_manifest_is_unreadable(tmp_path):
         restore_generation(db, paths, g["generation_id"])
 
 
-def test_v9_publish_is_atomic_when_generation_fails(tmp_path, monkeypatch):
-    """A generation failure must not leave a published-without-provenance article."""
-    from yt2wiki.v9 import publish as v9publish
+def _v9_old_article(paths, article_id="art9-yt-abc"):
+    """An existing published article: old markdown, HTML and one image."""
+    adir = paths.article_dir(article_id)
+    (adir / "assets").mkdir(parents=True, exist_ok=True)
+    (adir / "article.md").write_text("# Old\n\nOld body.", encoding="utf-8")
+    (adir / "article.html").write_text("<html>old</html>", encoding="utf-8")
+    (adir / "assets" / "f-old.jpg").write_bytes(b"\xff\xd8old")
 
-    paths = Paths(root=tmp_path / "data")
-    db = Database(paths.db_path)
-    _seed_source_job(db, inference=_JOB_SNAPSHOT)
-    _seed_article(db)
+
+def _v9_new_picks(tmp_path):
     frame_src = tmp_path / "frame.jpg"
     frame_src.write_bytes(b"\xff\xd8fakejpg")
     picks = {"s1": [{"frame_id": "f-1", "path": str(frame_src),
                      "caption": "c", "alt_text": "a"}]}
     sections = [{"section_id": "s1", "heading": "H", "t_start": 0.0, "t_end": 10.0,
                  "body": "Do it."}]
+    return picks, sections
+
+
+def test_v9_publish_is_atomic_when_generation_fails(tmp_path, monkeypatch):
+    """A generation failure must not replace current files or DB state."""
+    from yt2wiki.v9 import publish as v9publish
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db, inference=_JOB_SNAPSHOT)
+    _seed_article(db)
+    _v9_old_article(paths)
+    picks, sections = _v9_new_picks(tmp_path)
     settings = SimpleNamespace(paths=paths, fingerprint=lambda: "fp")
 
     def _boom(conn, manifest, fp, prof):
@@ -618,13 +707,111 @@ def test_v9_publish_is_atomic_when_generation_fails(tmp_path, monkeypatch):
             title="T", markdown="# T", sections=sections, picks=picks,
             provenance={"url": "http://x", "fingerprint": "fp", "profile": "compact"},
             report={}, inference_snapshot=_JOB_SNAPSHOT)
-    # Nothing committed: article row is the seeded stub, no generations, no dirs.
+    # Old database and old files are both intact and mutually consistent.
     assert db.query_one(
         "SELECT markdown FROM articles WHERE article_id='art9-yt-abc'")["markdown"] == "# T"
     assert db.query_one("SELECT COUNT(*) c FROM generations")["c"] == 0
     assert db.query_one("SELECT COUNT(*) c FROM article_revisions")["c"] == 0
+    assert (paths.article_dir("art9-yt-abc") / "article.md").read_text() == "# Old\n\nOld body."
+    assert (paths.article_dir("art9-yt-abc") / "article.html").read_text() == "<html>old</html>"
+    assert (paths.article_dir("art9-yt-abc") / "assets" / "f-old.jpg").read_bytes() == b"\xff\xd8old"
+    assert not (paths.article_dir("art9-yt-abc") / "assets" / "f-1.jpg").exists()
     gdir = paths.article_dir("art9-yt-abc") / "generations"
     assert not gdir.is_dir() or list(gdir.iterdir()) == []
+    assert not (paths.article_dir("art9-yt-abc") / ".staging").exists()
+
+
+def test_v9_manifest_write_failure_keeps_old_state(tmp_path, monkeypatch):
+    """A manifest-write failure is pre-commit: old files and rows survive."""
+    from yt2wiki import generations as _g
+    from yt2wiki.v9 import publish as v9publish
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db, inference=_JOB_SNAPSHOT)
+    _seed_article(db)
+    _v9_old_article(paths)
+    picks, sections = _v9_new_picks(tmp_path)
+    settings = SimpleNamespace(paths=paths, fingerprint=lambda: "fp")
+    monkeypatch.setattr(_g, "write_manifest",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no space")))
+    with pytest.raises(OSError, match="no space"):
+        v9publish.persist(
+            settings, db, article_id="art9-yt-abc", source_id="yt-abc", job_id="job-1",
+            title="T", markdown="# T", sections=sections, picks=picks,
+            provenance={"url": "http://x", "fingerprint": "fp", "profile": "compact"},
+            report={}, inference_snapshot=_JOB_SNAPSHOT)
+    assert db.query_one(
+        "SELECT markdown FROM articles WHERE article_id='art9-yt-abc'")["markdown"] == "# T"
+    assert db.query_one("SELECT COUNT(*) c FROM generations")["c"] == 0
+    assert (paths.article_dir("art9-yt-abc") / "article.md").read_text() == "# Old\n\nOld body."
+    assert (paths.article_dir("art9-yt-abc") / "assets" / "f-old.jpg").read_bytes() == b"\xff\xd8old"
+    gdir = paths.article_dir("art9-yt-abc") / "generations"
+    assert not gdir.is_dir() or list(gdir.iterdir()) == []
+
+
+def test_v9_promote_failure_rolls_back_files(tmp_path, monkeypatch):
+    """A promotion failure restores canonical files; the DB never commits."""
+    import shutil as _sh
+
+    from yt2wiki.v9 import publish as v9publish
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db, inference=_JOB_SNAPSHOT)
+    _seed_article(db)
+    _v9_old_article(paths)
+    picks, sections = _v9_new_picks(tmp_path)
+    settings = SimpleNamespace(paths=paths, fingerprint=lambda: "fp")
+    real_move = _sh.move
+    calls = []
+    def _flaky(src, dst, *a, **k):
+        calls.append(str(dst))
+        if len(calls) == 2:
+            raise OSError("promote failed")
+        return real_move(src, dst, *a, **k)
+    monkeypatch.setattr(_sh, "move", _flaky)
+    with pytest.raises(OSError, match="promote failed"):
+        v9publish.persist(
+            settings, db, article_id="art9-yt-abc", source_id="yt-abc", job_id="job-1",
+            title="T", markdown="# T", sections=sections, picks=picks,
+            provenance={"url": "http://x", "fingerprint": "fp", "profile": "compact"},
+            report={}, inference_snapshot=_JOB_SNAPSHOT)
+    # New files were moved aside; old files are back; DB untouched.
+    assert (paths.article_dir("art9-yt-abc") / "article.md").read_text() == "# Old\n\nOld body."
+    assert (paths.article_dir("art9-yt-abc") / "article.html").read_text() == "<html>old</html>"
+    assert (paths.article_dir("art9-yt-abc") / "assets" / "f-old.jpg").read_bytes() == b"\xff\xd8old"
+    assert db.query_one(
+        "SELECT markdown FROM articles WHERE article_id='art9-yt-abc'")["markdown"] == "# T"
+    assert db.query_one("SELECT COUNT(*) c FROM generations")["c"] == 0
+
+
+def test_v9_publish_success_supersedes_old_files(tmp_path):
+    """Control case: a clean publish replaces files, rows and generations."""
+    from yt2wiki.v9 import publish as v9publish
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    _seed_source_job(db, inference=_JOB_SNAPSHOT)
+    _seed_article(db)
+    _v9_old_article(paths)
+    picks, sections = _v9_new_picks(tmp_path)
+    settings = SimpleNamespace(paths=paths, fingerprint=lambda: "fp")
+    out = v9publish.persist(
+        settings, db, article_id="art9-yt-abc", source_id="yt-abc", job_id="job-1",
+        title="T", markdown="# T", sections=sections, picks=picks,
+        provenance={"url": "http://x", "fingerprint": "fp", "profile": "compact"},
+        report={}, inference_snapshot=_JOB_SNAPSHOT)
+    assert out["generation_operation"] == "initial"
+    assert (paths.article_dir("art9-yt-abc") / "article.md").read_text() == "# T"
+    assert (paths.article_dir("art9-yt-abc") / "assets" / "f-1.jpg").is_file()
+    assert not (paths.article_dir("art9-yt-abc") / "assets" / "f-old.jpg").exists()
+    row = db.query_one(
+        "SELECT markdown, current_generation_id FROM articles WHERE article_id='art9-yt-abc'")
+    assert row["markdown"] == "# T"
+    assert row["current_generation_id"] == out["generation_id"]
+    assert db.query_one(
+        "SELECT COUNT(*) c FROM article_assets WHERE article_id='art9-yt-abc'")["c"] == 1
 
 
 def test_wrapper_cleans_snapshot_when_row_insert_fails(tmp_path, monkeypatch):
@@ -745,3 +932,102 @@ def test_peek_version_edge_cases(tmp_path):
     import pytest as _pt
     with _pt.raises(RuntimeError, match="newer than this build supports"):
         _s._migrate(newer)
+
+
+def test_read_build_commit_lookup_is_isolated(tmp_path):
+    from yt2wiki import generations as _g
+
+    assert _g._read_build_commit([tmp_path / "missing"]) == "unknown"
+    build = tmp_path / "BUILD"
+    build.write_text("deadbee\n", encoding="utf-8")
+    assert _g._read_build_commit([tmp_path / "missing", build]) == "deadbee"
+
+
+def test_promoted_stage_caller_failure_restores_pruned_and_replaced(tmp_path):
+    """Rollback covers replaced files and pruned stale assets alike."""
+    from yt2wiki.generations import promoted_stage
+
+    adir = tmp_path / "art"
+    stage = tmp_path / "stage"
+    (adir / "assets").mkdir(parents=True)
+    (adir / "article.md").write_text("OLD")
+    (adir / "assets" / "stale.jpg").write_bytes(b"stale")
+    # Stale backup dir from an unclean run is cleared, not followed.
+    (adir / ".backup-g9" / "nested").mkdir(parents=True)
+    (stage / "assets").mkdir(parents=True)
+    (stage / "article.md").write_text("NEW")
+    (stage / "assets" / "f-1.jpg").write_bytes(b"new")
+    with pytest.raises(RuntimeError, match="caller failed"), \
+            promoted_stage(adir, stage, "g9", prune_assets=True):
+        raise RuntimeError("caller failed")
+    assert (adir / "article.md").read_text() == "OLD"
+    assert (adir / "assets" / "stale.jpg").read_bytes() == b"stale"
+    assert not (adir / "assets" / "f-1.jpg").exists()
+    assert not (adir / ".backup-g9").exists()
+    assert not stage.exists()
+
+
+def test_promoted_stage_success_prunes_and_cleans_up(tmp_path):
+    from yt2wiki.generations import promoted_stage
+
+    adir = tmp_path / "art"
+    stage = tmp_path / "stage"
+    (adir / "assets").mkdir(parents=True)
+    (adir / "article.md").write_text("OLD")
+    (adir / "assets" / "stale.jpg").write_bytes(b"stale")
+    (stage / "assets").mkdir(parents=True)
+    (stage / "article.md").write_text("NEW")
+    with promoted_stage(adir, stage, "g9", prune_assets=True):
+        pass
+    assert (adir / "article.md").read_text() == "NEW"
+    assert not (adir / "assets" / "stale.jpg").exists()
+    assert not stage.exists()
+    assert not (adir / ".backup-g9").exists()
+
+
+def test_promoted_stage_without_canonical_assets(tmp_path):
+    from yt2wiki.generations import promoted_stage
+
+    adir = tmp_path / "art"
+    stage = tmp_path / "stage"
+    adir.mkdir(parents=True)
+    (adir / "article.md").write_text("OLD")
+    (stage / "assets").mkdir(parents=True)
+    (stage / "article.md").write_text("NEW")
+    (stage / "assets" / "f-1.jpg").write_bytes(b"new")
+    with promoted_stage(adir, stage, "g9", prune_assets=True):
+        pass
+    assert (adir / "assets" / "f-1.jpg").read_bytes() == b"new"
+    # No assets anywhere: the prune scan is skipped entirely.
+    adir2 = tmp_path / "art2"
+    stage2 = tmp_path / "stage2"
+    adir2.mkdir(parents=True)
+    stage2.mkdir(parents=True)
+    (adir2 / "article.md").write_text("OLD")
+    (stage2 / "article.md").write_text("NEW")
+    with promoted_stage(adir2, stage2, "g9", prune_assets=True):
+        pass
+    assert (adir2 / "article.md").read_text() == "NEW"
+
+
+def test_promoted_stage_rollback_failure_is_logged(tmp_path, monkeypatch):
+    """A failing restore is logged, never masks the original error."""
+    import shutil as _sh
+    from yt2wiki.generations import promoted_stage
+
+    adir = tmp_path / "art"
+    stage = tmp_path / "stage"
+    adir.mkdir(parents=True)
+    stage.mkdir(parents=True)
+    (adir / "article.md").write_text("OLD")
+    (stage / "article.md").write_text("NEW")
+    real_move = _sh.move
+    def _flaky(src, dst, *a, **k):
+        if ".backup-" in str(src):
+            raise OSError("restore failed")
+        return real_move(src, dst, *a, **k)
+    monkeypatch.setattr(_sh, "move", _flaky)
+    with pytest.raises(RuntimeError, match="caller failed"), promoted_stage(adir, stage, "g9"):
+        raise RuntimeError("caller failed")
+    # Original error propagates; the unrestorable backup is kept and logged.
+    assert (adir / ".backup-g9" / "article.md").is_file()

@@ -41,6 +41,14 @@ back over the current outputs and is itself recorded as a **user** revision,
 not a new model generation. Refinement (`refine` operations, child
 generations from edits) is not implemented.
 
+Publishers stage outputs aside, snapshot and commit the article row plus the
+generation row in one SQLite transaction, then promote staged files over the
+canonical paths with per-file backups. Any failure before completion
+restores the previous files and rows — this covers the failure domain of
+injected errors, not crashes: no cross-domain (filesystem + SQLite) atomicity
+is claimed. An unclean shutdown mid-promotion can leave staged or new files
+ahead of the committed generation; re-running publication heals it.
+
 ## Schema evolution
 
 Upgrades are automatic and additive: opening a v3 library creates the
