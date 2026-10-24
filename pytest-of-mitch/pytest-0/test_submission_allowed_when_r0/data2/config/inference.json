@@ -1,0 +1,15 @@
+{
+ "providers": {
+  "llm": {
+   "api_key_env": "",
+   "model": "m",
+   "url": "http://llm:8000/v1"
+  }
+ },
+ "roles": {
+  "asr": "",
+  "vision": "llm",
+  "writer": "llm"
+ },
+ "updated_at": 1792835702.2003353
+}

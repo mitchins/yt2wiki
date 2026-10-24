@@ -370,12 +370,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def _require_ready(has_captions: bool = False) -> None:
         """Refuse to queue a job its services cannot run. Never queue an
-        inevitably failing job or leave a button apparently doing nothing."""
+        inevitably failing job or leave a button apparently doing nothing.
+        V9 needs all three capabilities: writing, image judging and
+        transcription (or usable captions for the transcription leg)."""
         writing = inference.readiness(settings.paths, "writer", "Writing")
         if writing["state"] != "Ready":
             raise HTTPException(409,
                 f"Writing is not ready ({writing['detail']}) "
                 "Connect your multimodal LLM on the Settings page first.")
+        images = inference.readiness(settings.paths, "vision", "Image judging")
+        if images["state"] != "Ready":
+            raise HTTPException(409,
+                f"Image judging is not ready ({images['detail']}) "
+                "Connect a multimodal LLM that judges images on the Settings page first.")
         transcription = inference.readiness(settings.paths, "asr", "Transcription")
         if transcription["state"] == "Ready" or has_captions:
             return
@@ -608,7 +615,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         result = inference.test_endpoint(saved["url"], saved["api_key_env"],
                                          model=saved["model"])
-        assigned = inference.record_qualified(settings.paths, saved["name"], result)
+        try:
+            assigned = inference.record_qualified(settings.paths, saved["name"], result,
+                                                  tested=saved)
+        except inference.StaleIdentityError as exc:
+            raise HTTPException(409, str(exc)) from exc
         return {"ok": bool(result.get("ok")), "provider": saved["name"],
                 "result": result, "roles": assigned}
 

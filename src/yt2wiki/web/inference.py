@@ -24,6 +24,15 @@ class InferenceConfigError(ValueError):
     pass
 
 
+class StaleIdentityError(InferenceConfigError):
+    """The saved endpoint changed identity while a test was in flight.
+
+    Recording or assigning roles from that result would bind a PASS to an
+    endpoint that was never tested. Callers must fail loudly (HTTP 409) and
+    let the operator re-run the test, never silently use the stale result.
+    """
+
+
 def validate_api_key_env(value: str) -> str:
     key_env = str(value or "").strip()
     if key_env and not _ENV.match(key_env):
@@ -177,14 +186,22 @@ def save_one(paths, payload: dict[str, Any]) -> dict[str, str]:
     return {"name": name, "url": url, "model": model[:200], "api_key_env": key_env}
 
 
-def record_qualified(paths, name: str, result: dict[str, Any]) -> dict[str, str]:
+def record_qualified(paths, name: str, result: dict[str, Any],
+                     tested: dict[str, str] | None = None) -> dict[str, str]:
     """Record a save-test result and assign roles whose qualification passed.
 
     Roles are only ever assigned from a fresh test of the saved endpoint —
-    never from a stale result or by guessing. Returns the assigned roles.
+    never from a stale result or by guessing. When ``tested`` is given, the
+    saved provider must still carry exactly that URL/model/key identity;
+    otherwise a concurrent edit changed the endpoint mid-test and a
+    StaleIdentityError is raised instead of recording. Returns the assigned
+    roles.
     """
     name = str(name or "").strip().lower()
     provider = (load(paths).get("providers") or {}).get(name, {})
+    if tested is not None and _identity(provider) != _identity(tested):
+        raise StaleIdentityError(
+            f"“{name}” changed while the test was running — re-run Save & test.")
     result = dict(result)
     result["url"] = provider.get("url", result.get("url"))
     result["model"] = provider.get("model", "")
@@ -233,15 +250,27 @@ def readiness(paths, role: str, label: str) -> dict[str, Any]:
     cfg = load(paths)
     name = (cfg.get("roles") or {}).get(role)
     if role == "asr" and not name:
-        # An ASR server supplied through the environment counts even with no
-        # explicit role assignment (see YT2WIKI_ASR_URL).
+        # An ASR server supplied through the environment is only Ready when
+        # the exact URL matches a stored, still-valid qualification. The URL
+        # alone proves nothing, and readiness never probes the network here
+        # (that would stall every page load); validation happens once in
+        # save-test and is cached by endpoint identity.
         from ..config import Settings as _Settings
         try:
             env_url = (_Settings.load(data_dir=paths.root).asr_identity() or {}).get("url")
         except Exception:  # noqa: BLE001 - readiness must never raise
             env_url = ""
+        env_url = (env_url or "").rstrip("/")
         if env_url:
-            return {"state": "Ready", "detail": f"Server URL from environment ({env_url}).",
+            for pname, prov in (cfg.get("providers") or {}).items():
+                if _identity(prov)[0] == env_url and \
+                        provider_status(paths, pname).get("qualified_for_asr"):
+                    return {"state": "Ready",
+                            "detail": f"Server URL from environment matches the validated test for “{pname}”.",
+                            "provider": pname, "role": role, "label": label}
+            return {"state": NEEDS_SETUP,
+                    "detail": f"Server URL from environment ({env_url}) has no validated test yet. "
+                              "Save & test it in the Transcription card below.",
                     "provider": "", "role": role, "label": label}
         return {"state": NEEDS_SETUP,
                 "detail": "No transcription endpoint assigned. Add a Whisper HTTP server below.",

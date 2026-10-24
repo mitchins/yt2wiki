@@ -121,11 +121,12 @@ def test_identity_change_invalidates_old_pass(onboarded, monkeypatch):
 
 
 def test_asr_env_fallback_readiness(onboarded, monkeypatch):
+    # Superseded by test_env_asr_url_alone_is_not_ready: an environment URL
+    # alone is not Ready, only a matching validated test is.
     _app, settings, client, csrf = onboarded
     monkeypatch.setenv("YT2WIKI_ASR_URL", "http://asr:9000")
     ready = client.get("/api/settings/readiness").json()
-    assert ready["asr"]["state"] == "Ready"
-    assert "environment" in ready["asr"]["detail"]
+    assert ready["asr"]["state"] == "Needs setup"
     monkeypatch.delenv("YT2WIKI_ASR_URL")
     ready = client.get("/api/settings/readiness").json()
     assert ready["asr"]["state"] == "Needs setup"
@@ -275,3 +276,92 @@ def test_asr_word_timestamp_contract(tmp_path, monkeypatch):
     assert [w.word for w in t.segments[0].words] == ["hello", "world"]
     assert t.segments[0].words[0].start == 0.1
     assert t.segments[0].text == "hello world"
+
+
+def test_vision_required_before_queuing(onboarded, monkeypatch):
+    """V9 needs image judging too: writer+transcription alone must not queue."""
+    from yt2wiki.web import app as webapp
+    from yt2wiki.web import inference as inf
+
+    _app, settings, client, csrf = onboarded
+    monkeypatch.setattr(webapp.Service, "preview_url", lambda self, url: {"ok": True})
+    configure_ready(settings, writer=True, asr=True)
+    # Drop the vision role: writer + transcription are Ready, images are not.
+    cfg = inf.load(settings.paths)
+    cfg["roles"].pop("vision", None)
+    inf._write_json(settings.paths, "config", cfg)
+    assert client.get("/api/settings/readiness").json()["vision"]["state"] == "Needs setup"
+    r = client.post("/api/sources/url", json={"url": "https://youtu.be/abc"},
+                    headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 409
+    assert "judging" in r.json()["detail"]
+    # Assigned but unqualified vision also blocks.
+    cfg["roles"]["vision"] = "llm"
+    inf._write_json(settings.paths, "config", cfg)
+    st = inf.load_status(settings.paths)
+    st["llm"] = {**st.get("llm", {}), "qualified_for_vision": False}
+    inf._write_json(settings.paths, "status", st)
+    assert client.get("/api/settings/readiness").json()["vision"]["state"] == "Failed"
+    r = client.post("/api/sources/url", json={"url": "https://youtu.be/abc"},
+                    headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 409
+
+
+def test_env_asr_url_alone_is_not_ready(onboarded, monkeypatch):
+    """An environment ASR URL is not Ready and admits no job until validated."""
+    from yt2wiki.web import app as webapp
+    from yt2wiki.web import inference as inf
+
+    _app, settings, client, csrf = onboarded
+    monkeypatch.setenv("YT2WIKI_ASR_URL", "http://asr:9000")
+    monkeypatch.setattr(webapp.Service, "preview_url", lambda self, url: {"ok": True})
+    ready = client.get("/api/settings/readiness").json()
+    assert ready["asr"]["state"] == "Needs setup"
+    r = client.post("/api/sources/url", json={"url": "https://youtu.be/abc"},
+                    headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 409
+    # A stored, identity-matched qualification for that exact URL counts —
+    # cached validation, no probe on page load.
+    inf.save(settings.paths, {"providers": [{"name": "whisper",
+                                              "url": "http://asr:9000",
+                                              "model": "large-v3",
+                                              "api_key_env": ""}],
+                              "roles": {}})
+    inf._write_json(settings.paths, "status",
+                    {"whisper": {"ok": True, "url": "http://asr:9000",
+                                 "model": "large-v3", "api_key_env": "",
+                                 "qualified_for_asr": True,
+                                 "checked_at": 1700000000.0}})
+    ready = client.get("/api/settings/readiness").json()
+    assert ready["asr"]["state"] == "Ready"
+    assert "validated test" in ready["asr"]["detail"]
+    # Changing the environment URL invalidates the match.
+    monkeypatch.setenv("YT2WIKI_ASR_URL", "http://other:9000")
+    assert client.get("/api/settings/readiness").json()["asr"]["state"] == "Needs setup"
+
+
+def test_save_test_rejects_concurrent_identity_change(onboarded, monkeypatch):
+    """A mid-test endpoint edit fails loudly (409); the stale PASS is dropped."""
+    from yt2wiki.web import inference as inf
+
+    _app, settings, client, csrf = onboarded
+
+    def _racing_test(url, api_key_env="", *, model="", timeout=6.0):
+        # Simulate a concurrent edit landing while the test was in flight.
+        inf.save_one(settings.paths, {"name": "hal", "url": "http://other:9999/v1",
+                                      "model": "m", "api_key_env": ""})
+        return {"ok": True, "kind": "llm", "models": ["m"], "latency_ms": 1,
+                "checked_at": 1700000000.0, "url": url,
+                "qualified_for_writer": True, "qualified_for_vision": True,
+                "qualified_for_asr": False}
+
+    monkeypatch.setattr(inf, "test_endpoint", _racing_test)
+    r = post_json(client, csrf, "/api/settings/inference/save-test",
+                  {"name": "hal", "url": "http://hal:8731/v1", "model": "m",
+                   "api_key_env": ""})
+    assert r.status_code == 409
+    assert "changed while the test" in r.json()["detail"]
+    # The concurrent edit won the record, but no roles came from the stale test.
+    assert inf.load(settings.paths)["providers"]["hal"]["url"] == "http://other:9999/v1"
+    assert inf.load(settings.paths)["roles"] == {}
+    assert inf.load_status(settings.paths).get("hal") is None

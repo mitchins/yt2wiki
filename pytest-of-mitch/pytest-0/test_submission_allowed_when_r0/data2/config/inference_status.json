@@ -1,0 +1,11 @@
+{
+ "llm": {
+  "api_key_env": "",
+  "checked_at": 1792835702.2003188,
+  "model": "m",
+  "ok": true,
+  "qualified_for_vision": true,
+  "qualified_for_writer": true,
+  "url": "http://llm:8000/v1"
+ }
+}
