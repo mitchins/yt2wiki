@@ -14,6 +14,7 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
+from tests.conftest import login_client  # noqa: E402,F401
 from yt2wiki.config import Settings  # noqa: E402
 from yt2wiki.db.schema import Database  # noqa: E402
 from yt2wiki.web import app as webapp  # noqa: E402
@@ -104,35 +105,38 @@ def _seed(db, settings, *, title="Install the thing", article_id="art9-yt-abc", 
 
 # ----------------------------------------------------------------------
 # submission and the job lifecycle
-def test_url_submission_creates_v9_job_and_dedupes(env, monkeypatch):
+def test_url_submission_creates_v9_job_and_dedupes(env, monkeypatch, operator_password):
+    from tests.conftest import configure_ready
     settings, db, calls = env
+    configure_ready(settings)
     monkeypatch.setattr(webapp.Service, "preview_url", lambda self, url: {"ok": True})
     application = create_app(settings)
     held = []
     monkeypatch.setattr(application.state.runner, "start", lambda: held.append(1))
-    client = TestClient(application)
-    r = client.post("/add/url", data={"url": "https://youtu.be/abc12345678", "profile": "compact"},
+    client, csrf = login_client(application)
+    r = client.post("/add/url", data={"url": "https://youtu.be/abc12345678", "csrf_token": csrf},
                     follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"].startswith("/jobs/job-")
     job_id = r.headers["location"].rsplit("/", 1)[1]
     cfg = json.loads(db.query_one("SELECT config_json FROM jobs WHERE job_id=?", (job_id,))[0])
     assert cfg["pipeline"] == "v9" and cfg["origin"] == "web"
     # the same source while queued does not create duplicate work
-    again = client.post("/api/sources/url", json={"url": "https://youtu.be/abc12345678"}).json()
+    again = client.post("/api/sources/url", json={"url": "https://youtu.be/abc12345678"},
+                        headers={"X-CSRF-Token": csrf}).json()
     assert again["job_id"] == job_id
     assert db.query_one("SELECT COUNT(*) c FROM jobs")["c"] == 1
     page = client.get(f"/jobs/{job_id}")
     assert page.status_code == 200 and "Queued" in page.text
 
 
-def test_url_form_reports_errors_in_page(env, monkeypatch):
+def test_url_form_reports_errors_in_page(env, monkeypatch, operator_password):
     settings, _, _ = env
     monkeypatch.setattr(webapp.Service, "preview_url",
                         lambda self, url: {"ok": False, "error": "Video unavailable"})
-    client = TestClient(create_app(settings))
-    r = client.post("/add/url", data={"url": "https://youtu.be/nope"})
+    client, csrf = login_client(create_app(settings))
+    r = client.post("/add/url", data={"url": "https://youtu.be/nope", "csrf_token": csrf})
     assert r.status_code == 400 and "Video unavailable" in r.text
-    r = client.post("/add/url", data={"url": "not a link"})
+    r = client.post("/add/url", data={"url": "not a link", "csrf_token": csrf})
     assert r.status_code == 400 and "https://" in r.text
 
 
@@ -152,8 +156,10 @@ def test_worker_runs_web_jobs_through_v9_with_the_job_id(env):
     assert calls and calls[0][0] == "yt-abc" and calls[0][1]["job_id"] == job
 
 
-def test_recover_marks_interrupted_and_requeues_web_jobs(env, monkeypatch):
+def test_recover_marks_interrupted_and_requeues_web_jobs(env, monkeypatch, operator_password):
+    from tests.conftest import configure_ready
     settings, db, _ = env
+    configure_ready(settings)
     _seed(db, settings)
     application = create_app(settings)
     service, runner = application.state.service, application.state.runner
@@ -174,7 +180,8 @@ def test_recover_marks_interrupted_and_requeues_web_jobs(env, monkeypatch):
     page = client.get(f"/jobs/{running}")
     assert "Interrupted" in page.text and "Retry" in page.text
     # retry re-enqueues the same source; the queued job already covers it
-    r = client.post(f"/jobs/{running}/retry", follow_redirects=False)
+    _cli, _csrf = login_client(application)
+    r = _cli.post(f"/jobs/{running}/retry", data={"csrf_token": _csrf}, follow_redirects=False)
     assert r.headers["location"] == f"/jobs/{queued}"
     assert runner.cancel_queued(queued)
     assert db.query_one("SELECT state FROM jobs WHERE job_id=?", (queued,))["state"] == "cancelled"
@@ -272,42 +279,44 @@ def test_standalone_export_shares_reader_styles(tmp_path):
 
 # ----------------------------------------------------------------------
 # editing
-def test_edit_revert_and_title_sync(env):
+def test_edit_revert_and_title_sync(env, operator_password):
+    from tests.conftest import post_json
     settings, db, _ = env
     _seed(db, settings)
-    client = TestClient(create_app(settings))
+    client, csrf = login_client(create_app(settings))
     assert client.get("/articles/art9-yt-abc/edit").status_code == 200
     new_md = MD.replace("# Install the thing", "# Install the thing properly")
-    r = client.post("/api/articles/art9-yt-abc", json={"markdown": new_md, "note": "retitled"})
+    r = post_json(client, csrf, "/api/articles/art9-yt-abc", {"markdown": new_md, "note": "retitled"})
     assert r.json()["version"] == 2
     row = db.query_one("SELECT title, edit_note FROM articles WHERE article_id='art9-yt-abc'")
     assert row["title"] == "Install the thing properly" and row["edit_note"] == "retitled"
     rev = client.get("/api/articles/art9-yt-abc/revisions").json()[0]
     assert client.get(f"/api/articles/art9-yt-abc/revisions/{rev['revision_id']}").json()["markdown"] == MD
-    r = client.post("/api/articles/art9-yt-abc/revert", json={"revision_id": rev["revision_id"]})
+    r = post_json(client, csrf, "/api/articles/art9-yt-abc/revert", {"revision_id": rev["revision_id"]})
     assert r.json()["version"] == 3
     row = db.query_one("SELECT title, markdown FROM articles WHERE article_id='art9-yt-abc'")
     assert row["markdown"] == MD and row["title"] == "Install the thing"
     hits = db.query("SELECT article_id FROM articles_fts WHERE articles_fts MATCH 'properly'")
     assert not hits  # search follows the restored text
-    assert client.post("/api/articles/other/revert",
-                       json={"revision_id": rev["revision_id"]}).status_code == 404
+    assert post_json(client, csrf, "/api/articles/other/revert",
+                     {"revision_id": rev["revision_id"]}).status_code == 404
 
 
-def test_move_image_between_sections(env):
+def test_move_image_between_sections(env, operator_password):
+    from tests.conftest import post_json
     settings, db, _ = env
     _seed(db, settings)
-    client = TestClient(create_app(settings))
-    r = client.post("/api/articles/art9-yt-abc/images/move",
-                    json={"frame_id": "f-1", "section": "Second part"})
+    client, csrf = login_client(create_app(settings))
+    r = post_json(client, csrf, "/api/articles/art9-yt-abc/images/move",
+                  {"frame_id": "f-1", "section": "Second part"})
     assert r.status_code == 200, r.text
     md = db.query_one("SELECT markdown FROM articles WHERE article_id='art9-yt-abc'")["markdown"]
     second = md.index("## Second part")
     assert md.index("assets/f-1.jpg") > second
     assert md.index("*Source frame — source at") > second
     assert md.count("assets/f-1.jpg") == 1
-    bad = client.post("/api/articles/art9-yt-abc/images/move",
-                      json={"frame_id": "f-1", "section": "Nope"})
+    bad = post_json(client, csrf, "/api/articles/art9-yt-abc/images/move",
+                    {"frame_id": "f-1", "section": "Nope"})
     assert bad.status_code == 400
 
 
@@ -337,19 +346,20 @@ def test_republish_keeps_previous_text_as_revision(env):
 
 # ----------------------------------------------------------------------
 # settings
-def test_inference_settings_validate_and_never_store_keys(env):
+def test_inference_settings_validate_and_never_store_keys(env, operator_password):
+    from tests.conftest import post_json
     settings, _, _ = env
-    client = TestClient(create_app(settings))
+    client, csrf = login_client(create_app(settings))
     assert client.get("/settings").status_code == 200
-    bad = client.post("/api/settings/inference", json={
+    bad = post_json(client, csrf, "/api/settings/inference", {
         "providers": [{"name": "lan", "url": "http://10.0.0.2:8000/v1", "api_key_env": "sk-secret-123"}]})
     assert bad.status_code == 400 and "YT2WIKI_" in bad.json()["detail"]
-    bad2 = client.post("/api/settings/inference", json={
+    bad2 = post_json(client, csrf, "/api/settings/inference", {
         "providers": [{"name": "lan", "url": "http://10.0.0.2:8000/v1/", "model": "m",
                        "api_key_env": "LAN_KEY"}],
         "roles": {"writer": "lan", "vision": "lan"}})
     assert bad2.status_code == 400 and "YT2WIKI_" in bad2.json()["detail"]
-    ok = client.post("/api/settings/inference", json={
+    ok = post_json(client, csrf, "/api/settings/inference", {
         "providers": [{"name": "lan", "url": "http://10.0.0.2:8000/v1/", "model": "m",
                        "api_key_env": "YT2WIKI_LAN_KEY"}],
         "roles": {"writer": "lan", "vision": "lan"}})
@@ -357,26 +367,27 @@ def test_inference_settings_validate_and_never_store_keys(env):
     saved = json.loads((settings.paths.root / "config" / "inference.json").read_text())
     assert saved["providers"]["lan"]["url"] == "http://10.0.0.2:8000/v1"
     assert saved["roles"] == {"writer": "lan", "vision": "lan", "asr": ""}
-    unknown = client.post("/api/settings/inference", json={"providers": [], "roles": {"writer": "x"}})
+    unknown = post_json(client, csrf, "/api/settings/inference", {"providers": [], "roles": {"writer": "x"}})
     assert unknown.status_code == 400
     page = client.get("/settings").text
     assert "http://10.0.0.2:8000/v1" in page and "YT2WIKI_LAN_KEY" in page
 
 
-def test_inference_test_reports_unreachable(env, monkeypatch):
+def test_inference_test_reports_unreachable(env, monkeypatch, operator_password):
+    from tests.conftest import post_json
     settings, _, _ = env
     monkeypatch.delenv("YT2WIKI_NO_SUCH_KEY_VAR", raising=False)
     monkeypatch.delenv("NO_SUCH_KEY_VAR", raising=False)
-    client = TestClient(create_app(settings))
-    r = client.post("/api/settings/inference/test",
-                    json={"url": "http://127.0.0.1:9/v1"}).json()
+    client, csrf = login_client(create_app(settings))
+    r = post_json(client, csrf, "/api/settings/inference/test",
+                  {"url": "http://127.0.0.1:9/v1"}).json()
     assert r["ok"] is False and r["error"]
     # Non-prefixed env var is rejected before probing (400)
-    r2 = client.post("/api/settings/inference/test",
-                     json={"url": "http://127.0.0.1:9/v1", "api_key_env": "NO_SUCH_KEY_VAR"})
+    r2 = post_json(client, csrf, "/api/settings/inference/test",
+                   {"url": "http://127.0.0.1:9/v1", "api_key_env": "NO_SUCH_KEY_VAR"})
     assert r2.status_code == 400 and "YT2WIKI_" in r2.json()["detail"]
-    r = client.post("/api/settings/inference/test",
-                    json={"url": "http://127.0.0.1:9/v1", "api_key_env": "YT2WIKI_NO_SUCH_KEY_VAR"}).json()
+    r = post_json(client, csrf, "/api/settings/inference/test",
+                  {"url": "http://127.0.0.1:9/v1", "api_key_env": "YT2WIKI_NO_SUCH_KEY_VAR"}).json()
     assert r["ok"] is False and "YT2WIKI_NO_SUCH_KEY_VAR" in r["error"]
 
 

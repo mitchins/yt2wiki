@@ -1,11 +1,27 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
-{% from "_partials.html" import profile_picker, progress_strip %}
 {% block title %}Add a video — yt2wiki{% endblock %}
 {% block main %}
 <main class="wrap page">
   <div class="add-wrap">
     <div class="section-head"><h2>Add a video</h2></div>
+    {% if not operator %}
+    <section class="panel form-panel" aria-labelledby="login-h">
+      <h3 id="login-h">Operator login</h3>
+      {% if not auth_configured %}
+      <p class="muted">Adding videos needs an operator password. Set <code>YT2WIKI_OPERATOR_PASSWORD</code> in the container environment and restart yt2wiki, then log in here.</p>
+      {% else %}
+      <p class="muted">Log in to add videos and run guides.</p>
+      <form data-login>
+        <label class="field"><span>Operator password</span>
+          <input class="input" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <p class="notice" data-login-error role="alert" hidden></p>
+        <div><button class="btn" type="submit">Log in</button></div>
+      </form>
+      {% endif %}
+    </section>
+    {% else %}
     <div class="tabs" role="tablist">
       <a role="tab" href="/add?mode=url" aria-selected="{{ 'true' if mode != 'upload' else 'false' }}">YouTube link</a>
       <a role="tab" href="/add?mode=upload" aria-selected="{{ 'true' if mode == 'upload' else 'false' }}">Upload a file</a>
@@ -13,28 +29,27 @@
 
     {% if mode == 'upload' %}
     <form class="panel form-panel" method="post" action="/add/upload" enctype="multipart/form-data" data-busy>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label class="drop" data-drop>
         <input type="file" name="file" accept="video/*,.mkv,.webm,.mp4,.mov" required>
         {{ icon("upload") }}
         <span><strong>Choose a video</strong> or drop it here</span>
         <span class="muted" data-fname style="font-size:.84rem">MP4, WebM, MKV or MOV</span>
       </label>
-      <div class="field"><span>Profile</span>{{ profile_picker(default_profile, "up") }}
-        <small>Choose the size that matches the GPU doing the work.</small></div>
       {% if error %}<p class="notice" role="alert">{{ icon("info") }}<span>{{ error }}</span></p>{% endif %}
       <div><button class="btn" type="submit">{{ icon("upload") }}Upload and make guide</button></div>
     </form>
     {% else %}
     <form class="panel form-panel" method="post" action="/add/url" data-busy>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label class="field"><span>YouTube link</span>
         <input class="input" name="url" type="url" inputmode="url" autocomplete="off" required value="{{ url }}"
                placeholder="https://www.youtube.com/watch?v=…" autofocus>
       </label>
-      <div class="field"><span>Profile</span>{{ profile_picker(default_profile, "url") }}
-        <small>Choose the size that matches the GPU doing the work.</small></div>
       {% if error %}<p class="notice" role="alert">{{ icon("info") }}<span>{{ error }}</span></p>{% endif %}
       <div><button class="btn" type="submit">Make guide</button></div>
     </form>
+    {% endif %}
     {% endif %}
 
     <ul class="hint-list">
@@ -46,4 +61,4 @@
   </div>
 </main>
 {% endblock %}
-{% block scripts %}<script src="/static/app.js" defer></script>{% endblock %}
+{% block scripts %}<script src="/static/app.js" defer></script><script src="/static/auth.js" defer></script>{% endblock %}

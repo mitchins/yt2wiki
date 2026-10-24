@@ -117,15 +117,18 @@ def test_article_route_rewrites_asset_paths(app, tmp_path):
     assert got.headers["content-type"].startswith("image/")
 
 
-def test_upload_and_job_creation_without_running(app, tmp_path):
-    application, _, _ = app
-    client = TestClient(application)
+def test_upload_and_job_creation_without_running(app, tmp_path, operator_password):
+    from tests.conftest import configure_ready, login_client
+    application, _, settings = app
+    configure_ready(settings)
+    client, csrf = login_client(application)
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"not-really-a-video")
     r = client.post(
         "/api/sources/upload",
         files={"file": ("clip.mp4", b"not-really-a-video", "video/mp4")},
-        data={"profile": "compact"},
+        data={},
+        headers={"X-CSRF-Token": csrf},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -133,20 +136,22 @@ def test_upload_and_job_creation_without_running(app, tmp_path):
     assert body["job_id"].startswith("job-")
 
 
-def test_add_url_rejects_unreachable_source(app, monkeypatch):
+def test_add_url_rejects_unreachable_source(app, monkeypatch, operator_password):
+    from tests.conftest import login_client, post_json
     application, _, _ = app
 
     def boom(self, _):
         return {"ok": False, "error": "unavailable"}
 
     monkeypatch.setattr("yt2wiki.web.app.Service.preview_url", boom)
-    client = TestClient(application)
-    r = client.post("/api/sources/url", json={"url": "https://youtu.be/nope"})
+    client, csrf = login_client(application)
+    r = post_json(client, csrf, "/api/sources/url", {"url": "https://youtu.be/nope"})
     assert r.status_code == 400
     assert "unavailable" in r.json()["detail"]
 
 
-def test_article_edit_creates_revision(app):
+def test_article_edit_creates_revision(app, operator_password):
+    from tests.conftest import login_client, post_json
     application, db, _ = app
     with db.transaction() as conn:
         conn.execute(
@@ -157,8 +162,9 @@ def test_article_edit_creates_revision(app):
             "created_at, updated_at) VALUES('art-1','s1','T','original text',"
             "'<p>original text</p>',1,'draft',0,0)"
         )
-    client = TestClient(application)
-    r = client.post("/api/articles/art-1", json={"markdown": "# New\n\nEdited body text."})
+    from tests.conftest import login_client, post_json
+    client, csrf = login_client(application)
+    r = post_json(client, csrf, "/api/articles/art-1", {"markdown": "# New\n\nEdited body text."})
     assert r.status_code == 200
     assert r.json()["version"] == 2
     row = db.query_one("SELECT version FROM articles WHERE article_id='art-1'")
