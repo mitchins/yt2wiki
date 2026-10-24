@@ -25,11 +25,12 @@ from yt2wiki.db.schema import Database
 from yt2wiki.web.app import create_app
 
 
-def _upload(client: TestClient, filename: str, content: bytes):
+def _upload(client: TestClient, filename: str, content: bytes, csrf: str = ""):
     return client.post(
         "/api/sources/upload",
         files={"file": (filename, content, "video/mp4")},
-        data={"profile": "compact"},
+        data={},
+        headers={"X-CSRF-Token": csrf} if csrf else {},
     )
 
 
@@ -100,13 +101,17 @@ def test_concurrent_duplicate_via_service(tmp_path):
     assert_exact()
 
 
-def test_concurrent_duplicate_via_api(tmp_path, monkeypatch):
+def test_concurrent_duplicate_via_api(tmp_path, monkeypatch, operator_password):
     """Two simultaneous POST /api/sources/upload with identical bytes."""
+    from tests.conftest import configure_ready, login_client
     settings = Settings.load(data_dir=tmp_path / "conc-api", profile="compact", device_index=None)
     db = Database(settings.paths.db_path)
     db.migrate()
+    configure_ready(settings)
     app = create_app(settings)
     monkeypatch.setattr(app.state.runner, "submit", lambda job, **kw: job)
+    probe, csrf = login_client(app)
+    token = probe.cookies.get("yt2wiki_op")
 
     content = b"api-concurrent-" + b"x" * 4096
     barrier = threading.Barrier(2)
@@ -117,12 +122,14 @@ def test_concurrent_duplicate_via_api(tmp_path, monkeypatch):
         # Each thread needs its own TestClient (client is not thread-safe for concurrent use)
         # but they share the same app/state/db.
         client = TestClient(app, raise_server_exceptions=False)
+        client.cookies.set("yt2wiki_op", token)
         try:
             barrier.wait(timeout=5)
             r = client.post(
                 "/api/sources/upload",
                 files={"file": ("video.mp4", content, "video/mp4")},
-                data={"profile": "compact"},
+                data={},
+                headers={"X-CSRF-Token": csrf},
             )
             statuses[name] = r.status_code
             results[name] = r.json() if r.status_code == 200 else r.text
@@ -162,7 +169,9 @@ def test_concurrent_duplicate_via_api(tmp_path, monkeypatch):
     # Different-content concurrent: ensure independence
     content2 = b"api-different-" + b"y" * 100
     c1 = TestClient(app)
-    r1 = c1.post("/api/sources/upload", files={"file": ("a.mp4", content2, "video/mp4")}, data={"profile": "compact"})
+    c1.cookies.set("yt2wiki_op", token)
+    r1 = c1.post("/api/sources/upload", files={"file": ("a.mp4", content2, "video/mp4")},
+                 data={}, headers={"X-CSRF-Token": csrf})
     assert r1.status_code == 200
     assert r1.json()["source_id"] != sid1
     assert stored.is_file(), "original must not be deleted by different-content upload"

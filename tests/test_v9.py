@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from yt2wiki.v9.writer import plan_sections, section_transcript
+import pytest
+
+pytest.importorskip("fastapi")
+from fastapi.testclient import TestClient  # noqa: E402
+
+from yt2wiki.v9.writer import plan_sections, section_transcript  # noqa: E402
 
 
 def _segs(n=20, step=30.0):
@@ -74,10 +79,8 @@ def test_normalize_timestamps_ranges_none_targets_and_past_eof():
     assert "assets/f.jpg" in out
 
 
-def test_image_remove_drops_caption_and_refreshes_exports(tmp_path):
+def test_image_remove_drops_caption_and_refreshes_exports(tmp_path, operator_password):
     import time as _time
-
-    from fastapi.testclient import TestClient
 
     from yt2wiki.config import Settings
     from yt2wiki.db.schema import Database
@@ -106,8 +109,9 @@ def test_image_remove_drops_caption_and_refreshes_exports(tmp_path):
     (settings.paths.article_assets("a9")).mkdir(parents=True, exist_ok=True)
     from PIL import Image
     Image.new("RGB", (8, 8)).save(settings.paths.article_assets("a9") / "f-1.jpg")
-    client = TestClient(create_app(settings))
-    r = client.post("/api/articles/a9/images/remove", json={"frame_id": "f-1"})
+    from tests.conftest import login_client, post_json
+    client, csrf = login_client(create_app(settings))
+    r = post_json(client, csrf, "/api/articles/a9/images/remove", {"frame_id": "f-1"})
     assert r.status_code == 200 and r.json()["ok"]
     row = db.query_one("SELECT markdown FROM articles WHERE article_id='a9'")
     assert "f-1.jpg" not in row["markdown"]
@@ -120,8 +124,6 @@ def test_image_remove_drops_caption_and_refreshes_exports(tmp_path):
 def test_v9_sections_endpoint_lists_stable_ids(tmp_path):
     import json as _json
     import time as _time
-
-    from fastapi.testclient import TestClient
 
     from yt2wiki.config import Settings
     from yt2wiki.db.schema import Database
@@ -163,10 +165,8 @@ def test_text_model_class_is_importable():
     assert m.Qwen3_5ForCausalLM is not None
 
 
-def test_edit_refreshes_html_zip_and_standalone(tmp_path):
+def test_edit_refreshes_html_zip_and_standalone(tmp_path, operator_password):
     import time as _time
-
-    from fastapi.testclient import TestClient
 
     from yt2wiki.config import Settings
     from yt2wiki.db.schema import Database
@@ -190,8 +190,9 @@ def test_edit_refreshes_html_zip_and_standalone(tmp_path):
     (settings.paths.article_assets("a9")).mkdir(parents=True, exist_ok=True)
     from PIL import Image
     Image.new("RGB", (8, 8)).save(settings.paths.article_assets("a9") / "f-1.jpg")
-    client = TestClient(create_app(settings))
-    r = client.post("/api/articles/a9", json={"markdown": "# T\n\nnew para with enough text here\n"})
+    from tests.conftest import login_client, post_json
+    client, csrf = login_client(create_app(settings))
+    r = post_json(client, csrf, "/api/articles/a9", {"markdown": "# T\n\nnew para with enough text here\n"})
     assert r.status_code == 200 and r.json()["ok"]
     html = (settings.paths.article_dir("a9") / "article.html").read_text()
     assert "new para" in html
@@ -199,10 +200,8 @@ def test_edit_refreshes_html_zip_and_standalone(tmp_path):
     assert (settings.paths.article_dir("a9") / "article.standalone.html").is_file()
 
 
-def test_replace_without_caption_neutralises_alt_and_caption(tmp_path):
+def test_replace_without_caption_neutralises_alt_and_caption(tmp_path, operator_password):
     import time as _time
-
-    from fastapi.testclient import TestClient
 
     from yt2wiki.config import Settings
     from yt2wiki.db.schema import Database
@@ -230,9 +229,10 @@ def test_replace_without_caption_neutralises_alt_and_caption(tmp_path):
     (settings.paths.article_assets("a9")).mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (8, 8)).save(tmp_path / "f2.jpg")
     Image.new("RGB", (8, 8)).save(settings.paths.article_assets("a9") / "f-1.jpg")
-    client = TestClient(create_app(settings))
-    r = client.post("/api/articles/a9/images/replace",
-                    json={"old_frame_id": "f-1", "new_frame_id": "f-2"})
+    from tests.conftest import login_client, post_json
+    client, csrf = login_client(create_app(settings))
+    r = post_json(client, csrf, "/api/articles/a9/images/replace",
+                  {"old_frame_id": "f-1", "new_frame_id": "f-2"})
     assert r.status_code == 200 and r.json()["ok"]
     row = db.query_one("SELECT markdown FROM articles WHERE article_id='a9'")
     assert "old alt" not in row["markdown"] and "old cap" not in row["markdown"]

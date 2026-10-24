@@ -23,6 +23,9 @@ services:
       - YT2WIKI_HOME=/data
       - YT2WIKI_PROFILE=${YT2WIKI_PROFILE:-compact}
       - HF_HOME=/data/models
+      # Operator password for the browser login (no default — empty fails
+      # all mutations closed). Define it as a Portainer stack variable.
+      - YT2WIKI_OPERATOR_PASSWORD=${YT2WIKI_OPERATOR_PASSWORD:-}
       # OCI digest of the running image for generation manifests
       # (set when deploying a pinned :sha-<commit> tag).
       - YT2WIKI_IMAGE_DIGEST=${YT2WIKI_IMAGE_DIGEST:-}

@@ -5,6 +5,9 @@ FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3
 # Build commit baked in by CI (--build-arg GIT_COMMIT=<sha>); local builds
 # record the working-tree commit via `git rev-parse` in docker-compose.build.
 ARG GIT_COMMIT=unknown
+# Deno JS runtime (pinned): yt-dlp's modern YouTube extraction requires a JS
+# runtime. Official upstream release zips, resolved per target architecture.
+ARG DENO_VERSION=2.5.4
 
 LABEL org.opencontainers.image.title="yt2wiki" \
       org.opencontainers.image.description="Turn technical videos into illustrated, searchable guides" \
@@ -22,6 +25,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # System deps: ffmpeg for media, tesseract for OCR veto, curl for healthcheck,
 # sqlite3 CLI for the documented WAL-safe `.backup` procedure.
+# Deno provides the JS runtime yt-dlp needs for modern YouTube extraction
+# (unzip fetches the pinned upstream release zip per target architecture).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         tesseract-ocr \
@@ -29,8 +34,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
         sqlite3 \
+        unzip \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd -m -u 1000 yt2wiki
+    && useradd -m -u 1000 yt2wiki \
+    && case "$(dpkg --print-architecture)" in \
+         amd64) DENO_ARCH=x86_64-unknown-linux-gnu ;; \
+         arm64) DENO_ARCH=aarch64-unknown-linux-gnu ;; \
+         *) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://dl.deno.land/release/v${DENO_VERSION}/deno-${DENO_ARCH}.zip" \
+         -o /tmp/deno.zip \
+    && unzip -p /tmp/deno.zip deno > /usr/local/bin/deno \
+    && chmod 755 /usr/local/bin/deno \
+    && rm /tmp/deno.zip \
+    && deno --version
 
 WORKDIR /app
 

@@ -19,6 +19,7 @@
       </div>
     </div>
     {% if job.state == 'queued' %}<p class="muted" style="margin:16px 0 0">Waiting for the current job to finish. Only one video is processed at a time.</p>{% endif %}
+    {% if error %}<p class="notice" role="alert">{{ icon("info") }}<span>{{ error }}</span></p>{% endif %}
     {% if job.state == 'stale' %}<p class="job-error warn">This job was created outside the web worker and is not scheduled here. Retry to run it now.</p>{% endif %}
     {% if job.steps %}<div class="bar" style="margin-top:18px"><i style="width:{{ job.progress }}%" data-bar></i></div>{% endif %}
     {{ job_steps(job) }}
@@ -27,8 +28,8 @@
     {% endif %}
     <div class="job-done">
       {% if article %}<a class="btn" href="/articles/{{ article.article_id }}">{{ icon("book") }}Read the guide</a>{% endif %}
-      {% if job.can_retry %}<form method="post" action="/jobs/{{ job.job_id }}/retry"><button class="btn btn-quiet" type="submit">{{ icon("refresh") }}Retry</button></form>{% endif %}
-      {% if job.can_cancel %}<form method="post" action="/jobs/{{ job.job_id }}/cancel"><button class="btn btn-ghost" type="submit">Cancel</button></form>{% endif %}
+      {% if operator and job.can_retry %}<form method="post" action="/jobs/{{ job.job_id }}/retry"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-quiet" type="submit">{{ icon("refresh") }}Retry</button></form>{% endif %}
+      {% if operator and job.can_cancel %}<form method="post" action="/jobs/{{ job.job_id }}/cancel"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-ghost" type="submit">Cancel</button></form>{% endif %}
     </div>
     {% if logs %}
     <details class="log"><summary>Log ({{ logs|length }})</summary>

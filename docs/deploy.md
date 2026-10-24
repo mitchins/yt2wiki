@@ -185,11 +185,23 @@ Two mechanisms, do not confuse them:
   `docker exec yt2wiki cat /data/config/inference.json` must show the name,
   never the key.
 
-### Operator console: `yt2wiki inference` (required in Docker)
+### Operator login and inference setup (normal path: browser)
 
-The settings web API refuses non-localhost peers (see §5), so browser sessions
-through the published Docker port — including SSH tunnels — cannot save or test
-endpoints. Configure inference from the operator console instead:
+Browser mutations require an operator login. Set the password in the
+container environment and restart once:
+
+```bash
+# in .env (Compose) or the Portainer stack variables:
+YT2WIKI_OPERATOR_PASSWORD=<strong password>
+docker compose up -d   # restart picks it up
+```
+
+Then open Settings in the browser, log in, and use the guided cards:
+**Writing & images** (one multimodal LLM — save & test assigns both roles
+when writing and judging qualify) and **Transcription** (Whisper `/asr`
+server root, no `/v1` suffix). The readiness strip turns green per
+capability; the Make guide button refuses to queue until writing and
+transcription are Ready. The `yt2wiki inference` CLI remains for scripting:
 
 ```bash
 docker exec yt2wiki yt2wiki inference show
@@ -215,7 +227,8 @@ docker exec yt2wiki yt2wiki inference save --file /data/config/inference-payload
 
 Transcription uses a separate provider entry pointing at the Whisper
 service (no `/v1` suffix — the adapter drives its `/asr` contract) and the
-`asr` role. Do not reuse the LLM `/v1` example for ASR:
+`asr` role. Do not reuse the LLM `/v1` example for ASR (the browser guided
+card does this for you; the CLI form is below):
 
 ```bash
 cat > /tmp/inference-asr-payload.json <<'EOF'
@@ -239,8 +252,9 @@ server-side model (recorded for provenance — `/asr` echoes no model id).
 - `test` runs the full qualification (writer JSON probe + 2-image rubric judge),
   records the result in `inference_status.json`, prints it, and exits non-zero
   when the endpoint is not reachable/qualified.
-- The `/settings` page renders an explicit **Operator only** notice — with these
-  exact commands — for every non-localhost viewer, and disables its form.
+- The `/settings` page shows a compact login (or setup instructions when no
+  operator password is configured) and, once logged in, the guided endpoint
+  cards, per-capability readiness and the advanced providers/roles form.
 
 Verified against a locally built image of the same Dockerfile (tag `yt2wiki:0.1.0`,
 pre-GHCR) running with an authenticated mock
@@ -360,11 +374,29 @@ from external OpenAI-compatible endpoints (§3).
 
 ## 5. Network security
 
-The web app has editing (`POST /api/articles/{id}`), uploads (`POST /api/sources/upload`), job execution (`POST /api/jobs/{id}/reprocess`) and inference config (`POST /api/settings/inference`) — all unauthenticated.
+The web app's mutations (endpoint configuration, video submission, job
+mutation, article editing) require an operator session: a password from the
+deployment environment (`YT2WIKI_OPERATOR_PASSWORD`, no default), an
+HttpOnly SameSite session cookie and a per-session CSRF token. Read-only
+library pages stay public under the existing network policy.
 
-- Default `docker-compose.yml` binds `127.0.0.1:8080:8000` so the admin UI is only reachable from the host's loopback. Reach it from your laptop with `ssh -L 8080:localhost:8080 user@host` then `http://localhost:8080`, or via a VPN — but understand what that does **not** do: an SSH tunnel does **not** make the settings API accept your browser. The app sees the Docker gateway address (e.g. `172.18.0.1`), not your browser's loopback, so `/api/settings/inference` still returns `403` through a tunnel. Never change the host binding to `0.0.0.0:8080:8000` — that publishes the unauthenticated UI directly and bypasses any proxy in front of it — and do not tell users a tunnel fixes the guard — it does not.
-- `src/yt2wiki/web/app.py` (`LOCAL_PEERS`, `peer_host`, `is_local_peer`) allows inference configuration only from a localhost peer (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`, `testclient`, `localhost`). It does **not** trust `X-Forwarded-For` or `X-Real-IP` — arbitrary client-supplied headers cannot grant admin access, and whitelisting the Docker gateway is explicitly not done. The 403 message points at the operator console instead. For Docker deployments the working management path is `docker exec yt2wiki yt2wiki inference …` (see §3), which the `/settings` page also states in its **Operator only** notice for every non-localhost viewer (with its mutation form disabled).
-- For broader LAN operation, put an authenticated boundary in front, e.g. Caddy/Traefik with `basic_auth` or Authelia. Keep the yt2wiki container itself on host loopback or an isolated Docker network — never publish the unauthenticated app port broadly. Example `Caddyfile` (proxy on the host network, upstream via loopback):
+- Default `docker-compose.yml` binds `127.0.0.1:8080:8000` so the app is only
+  reachable from the host's loopback. Reach it from your laptop with
+  `ssh -L 8080:localhost:8080 user@host` then `http://localhost:8080`, or via
+  a VPN. Never change the host binding to `0.0.0.0:8080:8000` — that publishes
+  the app port directly and bypasses any proxy in front of it.
+- Authority never comes from a peer address or a forwarded header. The app
+  does **not** trust `X-Forwarded-For` or `X-Real-IP`; a Docker gateway peer,
+  an SSH tunnel and a LAN address are all treated identically — only the
+  session cookie plus CSRF token authorise a mutation. Whitelisting the
+  Docker gateway is explicitly not done.
+- Fail closed: with no operator password configured every mutation is
+  refused with setup instructions; nothing is granted on locality.
+- For broader LAN operation, put an authenticated boundary in front, e.g.
+  Caddy/Traefik with `basic_auth` or Authelia — a useful additional layer in
+  front of the operator login, never a replacement for it. Keep the yt2wiki
+  container itself on host loopback or an isolated Docker network. Example
+  `Caddyfile` (proxy on the host network, upstream via loopback):
   ```
   yt2wiki.lan {
       basicauth * {
@@ -373,10 +405,8 @@ The web app has editing (`POST /api/articles/{id}`), uploads (`POST /api/sources
       reverse_proxy 127.0.0.1:8080
   }
   ```
-  Or give the proxy and yt2wiki an isolated network (`docker network create yt2wiki-net`, attach both, no published `ports:` on yt2wiki) and proxy to `http://yt2wiki:8000` inside that network. Test that unauthenticated `curl http://yt2wiki.lan/api/settings/inference` returns `401` from the proxy. Note the proxy does **not** make browser sessions localhost peers: even behind an authenticated proxy, settings save/test from a browser still requires the operator console unless authenticated management is implemented (the localhost guard intentionally stays).
+  Or give the proxy and yt2wiki an isolated network (`docker network create yt2wiki-net`, attach both, no published `ports:` on yt2wiki) and proxy to `http://yt2wiki:8000` inside that network. Test that unauthenticated `curl http://yt2wiki.lan/api/settings/inference` returns `401` with no session cookie.
 - Secrets: `api_key_env` names an env var (`YT2WIKI_GEMMA_API_KEY`) that is set via host env or `env_file` with `0600` permissions, not baked into the image or compose. `inference.json` stores only the name, and job `config_json` stores `url`/`model`/`api_key_env` name, not the key. Logs and exports never include keys.
-
-Do not remove the localhost guard merely because requests arrive from a container network address.
 
 ---
 
@@ -387,12 +417,13 @@ Import `docker-compose.portainer.yml` as a Portainer Stack (or paste
 
 - **Prebuilt image.** The stack pulls `ghcr.io/mitchins/yt2wiki:main`
   automatically; pin releases with the `YT2WIKI_IMAGE_TAG` stack variable
-  (`:vX.Y.Z` or `:sha-<commit>`, see docs/releases.md).
+  (`vX.Y.Z` or `sha-<commit>`, see docs/releases.md).
 - One required service `yt2wiki`, one **experimental** `llama` (enable the
   `llama` profile in Portainer's stack options only to attempt your own
   qualification — §4).
 - Persistent named volumes `yt2wiki-data` and `yt2wiki-models` (or replace with bind mounts for an existing library — see below).
-- Environment-variable-based settings: `YT2WIKI_HOME`, `YT2WIKI_PROFILE`, `HF_HOME`.
+- Environment-variable-based settings: `YT2WIKI_HOME`, `YT2WIKI_PROFILE`, `HF_HOME`,
+  plus `YT2WIKI_OPERATOR_PASSWORD` (required to log in and change anything — no default).
 - Provider keys via Portainer stack variables (Stack → Environment variables →
   Advanced mode): define `YT2WIKI_OPENAI_API_KEY`, `YT2WIKI_GEMMA_API_KEY`, …,
   and the compose mapping `YT2WIKI_OPENAI_API_KEY=${YT2WIKI_OPENAI_API_KEY:-}`
@@ -400,13 +431,20 @@ Import `docker-compose.portainer.yml` as a Portainer Stack (or paste
   container receives the resolved value; `inference.json` stores only the name.
 - Health and `restart: unless-stopped` policies.
 - No mandatory GPU for `yt2wiki`; GPU reservation only for `llama`.
+- Note: this standalone Portainer file ships no Whisper transcription service
+  (the Compose `asr` profile has no Portainer equivalent here). Point the
+  `Transcription` card in Settings at an existing Whisper HTTP service, or add
+  an `asr` service to the stack mirroring `docker-compose.yml` (pinned image,
+  persistent model cache, no published ports) before expecting transcription
+  readiness.
 
 Connecting existing LAN inference providers instead of the sidecar: in Portainer set
-`YT2WIKI_PROFILE` and the provider key stack variables above, then from the
-endpoint shell run `docker exec yt2wiki yt2wiki inference save --file …` pointing
-`writer`/`vision` at your `http://192.168.1.x:8000` providers, then
-`docker exec yt2wiki yt2wiki inference test --name …` to qualify. The Settings UI
-cannot save/test from a browser session (see §3/§5) — use the operator console.
+`YT2WIKI_PROFILE`, `YT2WIKI_OPERATOR_PASSWORD` and the provider key stack variables
+above, then open Settings in the browser, log in, and use the guided cards to
+point `writer`/`vision` at your `http://192.168.1.x:8000` providers (save & test
+qualifies them), or do the same from the endpoint shell with
+`docker exec yt2wiki yt2wiki inference save --file …` and
+`docker exec yt2wiki yt2wiki inference test --name …`.
 
 Migration-free installation for an already existing article library:
 

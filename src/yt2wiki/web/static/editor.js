@@ -21,8 +21,10 @@
     toast.t = setTimeout(() => toastEl.classList.remove("show"), 2600);
   };
   const post = async (url, body) => {
-    const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body) });
+    const headers = { "Content-Type": "application/json" };
+    const csrf = document.querySelector('meta[name=csrf-token]')?.content;
+    if (csrf) headers["X-CSRF-Token"] = csrf;
+    const r = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
     let data = {};
     try { data = await r.json(); } catch { /* empty body */ }
     if (!r.ok) throw new Error(data.detail || `Request failed (${r.status})`);

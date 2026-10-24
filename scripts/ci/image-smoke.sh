@@ -51,6 +51,16 @@ for mod in torch transformers faster_whisper ctranslate2 sentencepiece bitsandby
 done
 echo "runtime modules absent: ok"
 
+echo "--- JS runtime for yt-dlp YouTube extraction"
+docker exec "$NAME" deno --version
+docker exec "$NAME" python -c "
+from yt_dlp import YoutubeDL
+with YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
+    runtimes = ydl._js_runtimes
+assert 'deno' in runtimes, f'no deno runtime for yt-dlp: {sorted(runtimes)}'
+print('deno available to yt-dlp:', sorted(runtimes))
+"
+
 echo "--- non-root execution and /data persistence"
 docker exec "$NAME" sh -c 'test "$(id -u)" = "1000" && touch /data/.smoke && test -f /data/.smoke && echo "uid1000 + writable /data: ok"'
 

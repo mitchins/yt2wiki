@@ -1,16 +1,5 @@
 {% from "_icons.html" import icon %}
 
-{%- macro profile_picker(selected, prefix) -%}
-<div class="seg" role="radiogroup" aria-label="Processing profile">
-  {%- for key, label, hint in web_profiles %}
-  <label title="{{ hint }}">
-    <input type="radio" name="profile" value="{{ key }}" {% if key == selected %}checked{% endif %}>
-    <span>{{ label }}<small>{{ hint }}</small></span>
-  </label>
-  {%- endfor %}
-</div>
-{%- endmacro -%}
-
 {%- macro progress_strip(jobs) -%}
 {% if jobs %}
 <div class="progress-list" data-live-jobs aria-live="polite">

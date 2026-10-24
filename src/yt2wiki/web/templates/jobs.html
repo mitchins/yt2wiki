@@ -31,7 +31,7 @@
       <div class="main"><div class="t"><a href="/jobs/{{ j.job_id }}">{{ j.source_title or 'New video' }}</a></div>
         <div class="s">{{ j.profile|capitalize }} · added {{ j.created_at|ago }}</div></div>
       <div class="acts">
-        <form method="post" action="/jobs/{{ j.job_id }}/cancel"><button class="btn btn-ghost btn-sm" type="submit">Cancel</button></form>
+        {% if operator %}<form method="post" action="/jobs/{{ j.job_id }}/cancel"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-ghost btn-sm" type="submit">Cancel</button></form>{% endif %}
       </div>
     </div>
     {% endfor %}
@@ -58,7 +58,7 @@
       </div>
       <div class="acts">
         {% if j.article_id and j.state == 'done' %}<a class="btn btn-quiet btn-sm" href="/articles/{{ j.article_id }}">Read</a>{% endif %}
-        {% if j.can_retry %}<form method="post" action="/jobs/{{ j.job_id }}/retry"><button class="btn btn-quiet btn-sm" type="submit">{{ icon("refresh") }}Retry</button></form>{% endif %}
+        {% if operator and j.can_retry %}<form method="post" action="/jobs/{{ j.job_id }}/retry"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-quiet btn-sm" type="submit">{{ icon("refresh") }}Retry</button></form>{% endif %}
       </div>
     </div>
     {% endfor %}
