@@ -5,9 +5,15 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      qualify_armv7:
+        description: "Attempt ARMv7 build + smoke qualification (manual only; never advertised, never auto-published)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -109,3 +115,225 @@ jobs:
             -Dsonar.python.coverage.reportPaths=coverage.xml
             -Dsonar.qualitygate.wait=true
             -Dsonar.qualitygate.timeout=300
+
+  docker-smoke:
+    name: Image build and smoke (amd64, no publish)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, node24
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1, node24
+
+      - name: Build amd64 image (load, no push)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0, node24
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: yt2wiki:ci-smoke
+          build-args: GIT_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=smoke-amd64
+          cache-to: type=gha,mode=max,scope=smoke-amd64
+
+      - name: Smoke-qualify the image
+        run: bash scripts/ci/image-smoke.sh yt2wiki:ci-smoke linux/amd64
+
+  docker-build:
+    name: Build and push ${{ matrix.platform }}
+    needs: [test, sonar]
+    # Publish only after green tests AND the Sonar quality gate on main or a
+    # version tag. PRs build without publishing (see docker-smoke above).
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && needs.sonar.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, node24
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1, node24
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0, node24
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0, node24
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: GIT_COMMIT=${{ github.sha }}
+          outputs: type=image,name=ghcr.io/mitchins/yt2wiki,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=image-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.platform }}
+
+      - name: Smoke-qualify the pushed image
+        run: bash scripts/ci/image-smoke.sh "ghcr.io/mitchins/yt2wiki@${{ steps.build.outputs.digest }}" "${{ matrix.platform }}"
+
+      - name: Record digest (only a smoke-qualified image joins the manifest)
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          test -n "$digest"
+          echo "$digest" > "/tmp/digests/${digest//:/_}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, node24
+        with:
+          name: digests-${{ matrix.platform == 'linux/arm64' && 'arm64' || 'amd64' }}
+          path: /tmp/digests
+          if-no-files-found: error
+          retention-days: 7
+
+  docker-manifest:
+    name: Publish multi-arch manifest
+    needs: [test, sonar, docker-build]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && needs.sonar.result == 'success' && needs.docker-build.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, node24
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1, node24
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0, node24
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download platform digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1, node24
+        with:
+          pattern: digests-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Create and verify the manifest
+        id: manifest
+        run: |
+          refs=""
+          for f in /tmp/digests/*_*; do
+            digest="$(cat "$f")"
+            refs="$refs ghcr.io/mitchins/yt2wiki@$digest"
+          done
+          echo "platform refs:$refs"
+          test -n "$refs"
+          short="${GITHUB_SHA::7}"
+          # Immutable contract: a :sha-<commit> tag is first-build-wins and is
+          # never silently moved. Tag collisions fail here with an explicit
+          # error (re-run only after deleting the tag, or cut a new commit).
+          bash scripts/ci/check-immutable.sh "ghcr.io/mitchins/yt2wiki:sha-$short"
+          # Tag set: :main tracks the latest qualified main build only — a
+          # version tag must never move it (it may point behind the head).
+          tags=""
+          while IFS= read -r tag; do
+            tags="$tags -t $tag"
+          done < <(bash scripts/ci/compute-tags.sh "$GITHUB_REF" "$GITHUB_SHA")
+          echo "publishing tags:$tags"
+          test -n "$tags"
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $tags $refs
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+          docker buildx imagetools inspect "ghcr.io/mitchins/yt2wiki:sha-$short" | tee /tmp/p3-manifest.txt
+          grep -o 'linux/[a-z0-9/]*' /tmp/p3-manifest.txt | sort -u | tee /tmp/p3-platforms.txt
+
+      - name: Smoke-qualify the published tag
+        run: bash scripts/ci/image-smoke.sh "ghcr.io/mitchins/yt2wiki:sha-${{ steps.manifest.outputs.short }}" linux/amd64
+
+      - name: Probe anonymous pull (visibility check, non-blocking)
+        id: anon
+        run: |
+          docker logout ghcr.io || true
+          if docker pull "ghcr.io/mitchins/yt2wiki:sha-${{ steps.manifest.outputs.short }}" >/dev/null 2>&1; then
+            echo "anonymous=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "anonymous=no" >> "$GITHUB_OUTPUT"
+          fi
+          echo "anonymous pull: $(grep anonymous= "$GITHUB_OUTPUT" | cut -d= -f2)"
+
+      - name: Write release report
+        run: |
+          {
+            echo "commit=${GITHUB_SHA}";
+            echo "tag=${GITHUB_REF}";
+            echo "manifest_digest=$(grep -m1 Digest: /tmp/p3-manifest.txt | awk '{print $2}')";
+            echo "platforms=$(paste -sd, /tmp/p3-platforms.txt)";
+            echo "anonymous_pull=${{ steps.anon.outputs.anonymous }}";
+            echo "digests:"; ls /tmp/digests;
+          } | tee "$GITHUB_WORKSPACE/release-report.txt"
+
+      - name: Upload release report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, node24
+        with:
+          name: release-report
+          path: release-report.txt
+          if-no-files-found: error
+          retention-days: 90
+
+  docker-armv7:
+    # Manual ARMv7 qualification path: the pinned dependency set ships no
+    # armv7l wheels, so this is an explicit opt-in experiment, never part of
+    # a release. It builds and smokes only — nothing is pushed, and a
+    # success here does not advertise ARMv7 (that takes a follow-up PR).
+    name: ARMv7 qualification attempt (manual only)
+    if: github.event_name == 'workflow_dispatch' && inputs.qualify_armv7
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, node24
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0, node24
+        with:
+          platforms: arm
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1, node24
+
+      - name: Build ARMv7 image (load, no push)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0, node24
+        with:
+          context: .
+          platforms: linux/arm/v7
+          load: true
+          tags: yt2wiki:armv7-manual
+          build-args: GIT_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=armv7-manual
+          cache-to: type=gha,mode=max,scope=armv7-manual
+
+      - name: Smoke-qualify the ARMv7 image
+        run: bash scripts/ci/image-smoke.sh yt2wiki:armv7-manual linux/arm/v7

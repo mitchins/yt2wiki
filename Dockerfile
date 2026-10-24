@@ -2,6 +2,16 @@
 # Pinned base for reproducibility; update digest via `docker pull` + `docker inspect`.
 FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70
 
+# Build commit baked in by CI (--build-arg GIT_COMMIT=<sha>); local builds
+# record the working-tree commit via `git rev-parse` in docker-compose.build.
+ARG GIT_COMMIT=unknown
+
+LABEL org.opencontainers.image.title="yt2wiki" \
+      org.opencontainers.image.description="Turn technical videos into illustrated, searchable guides" \
+      org.opencontainers.image.source="https://github.com/mitchins/yt2wiki" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.version="${GIT_COMMIT}"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -35,7 +45,10 @@ RUN pip install --upgrade pip \
     && rm -rf /root/.cache
 
 # Data directory (SQLite, uploads, frames, articles, assets, revisions, config)
-RUN mkdir -p /data /data/config /data/models && chown -R yt2wiki:yt2wiki /data /app
+RUN mkdir -p /data /data/config /data/models && chown -R yt2wiki:yt2wiki /data /app \
+    # Record the exact build commit inside the image: the .git directory is
+    # excluded from the build context, so `git rev-parse` cannot run here.
+    && echo "${GIT_COMMIT}" > /app/BUILD && chown yt2wiki:yt2wiki /app/BUILD
 
 USER yt2wiki
 EXPOSE 8000

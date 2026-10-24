@@ -147,6 +147,10 @@ def _cmd_info(args) -> int:
 
     settings = _settings(args)
     print(f"yt2wiki {__version__}")
+    from .generations import build_info
+    _build = build_info()
+    print(f"build commit   : {_build['git_commit']}")
+    print(f"image digest   : {_build['image_digest']}")
     print(f"data directory : {settings.paths.root}")
     print(f"profile        : {settings.profile} "
           f"(VRAM budget {settings.vram_budget_gb():.1f} GB)")

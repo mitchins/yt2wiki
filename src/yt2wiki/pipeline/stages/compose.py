@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Sequence
@@ -18,6 +19,12 @@ from typing import Any, Sequence
 from ...article import Article, FrameRef, Section, format_ts, render_markdown, timestamp_url
 from ...backends.loader import ModelManager
 from ...db.schema import json_dumps, json_loads
+from ...generations import (
+    CLASSIC_RECIPE_VERSION,
+    insert_generation_row,
+    prepare_generation,
+    promoted_stage,
+)
 from ...literals import Literal, _command_fragments, extract_literals, normalize_value, values_match
 from ...records import Evidence, Procedure
 from .. import StageContext, CancelRequested
@@ -723,56 +730,102 @@ def _provenance_section(ctx: StageContext, article: Article) -> Section:
 def _store(ctx: StageContext, article: Article, article_id: str, md: str) -> None:
     from ...article import markdown_to_html, render_html
 
-    ctx.paths.article_dir(article_id).mkdir(parents=True, exist_ok=True)
-    md_path = ctx.paths.article_markdown(article_id)
-    assets = ctx.paths.article_assets(article_id)
-    assets.mkdir(parents=True, exist_ok=True)
+    adir = ctx.paths.article_dir(article_id)
+    adir.mkdir(parents=True, exist_ok=True)
+    # Stage every output aside first: canonical files stay untouched until the
+    # single commit below, and the generation snapshots the staged selection —
+    # never the previous publish's leftovers.
+    stage = adir / ".staging"
+    if stage.exists():
+        shutil.rmtree(stage, ignore_errors=True)
+    stage_assets = stage / "assets"
+    stage_assets.mkdir(parents=True)
     body_html = markdown_to_html(md)
-    html = render_html(article, body_html, embed_images=False, asset_dir=assets)
-    md_path.write_text(md, encoding="utf-8")
-    ctx.paths.article_html(article_id).write_text(html, encoding="utf-8")
+    html = render_html(article, body_html, embed_images=False, asset_dir=stage_assets)
+    (stage / "article.md").write_text(md, encoding="utf-8")
+    (stage / "article.html").write_text(html, encoding="utf-8")
     outline = [{"heading": s.heading, "level": s.level} for s in article.sections if s.heading != "__skip__"]
-    with ctx.db.transaction() as conn:
-        conn.execute(
-            """INSERT INTO articles(article_id, source_id, job_id, title, markdown, html, version,
-                                     status, fingerprint, outline_json, created_at, updated_at)
-               VALUES(?,?,?,?,?,?,?, 'draft',?,?,?,?)
-               ON CONFLICT(article_id) DO UPDATE SET
-                 title=excluded.title, markdown=excluded.markdown, html=excluded.html,
-                 version=excluded.version, fingerprint=excluded.fingerprint,
-                 outline_json=excluded.outline_json, updated_at=excluded.updated_at""",
-            (
-                article_id, ctx.source_id, ctx.job_id, article.title, md, html, 1,
-                ctx.settings.fingerprint(), json_dumps(outline), time.time(), time.time(),
-            ),
-        )
-        conn.execute("DELETE FROM articles_fts WHERE article_id=?", (article_id,))
-        conn.execute(
-            "INSERT INTO articles_fts(article_id, title, markdown) VALUES(?,?,?)",
-            (article_id, article.title, md),
-        )
-    _copy_assets(ctx, article_id, article, md)
+    asset_rows = _stage_asset_files(ctx, article_id, stage_assets, md)
+    # Immutable generation from the staged outputs (files + manifest, no DB).
+    _prep = prepare_generation(
+        ctx.db, ctx.paths, article_id=article_id, source_id=ctx.source_id,
+        job_id=ctx.job_id, recipe="classic",
+        recipe_version=CLASSIC_RECIPE_VERSION,
+        settings_fingerprint=ctx.fingerprint,
+        profile=getattr(ctx.settings, "profile", None),
+        snapshot=getattr(ctx, "inference_snapshot", None),
+        frame_ids=[n.rsplit(".", 1)[0]
+                   for n in re.findall(r"\]\(assets/([^)]+)\)", md)],
+        source_dir=stage)
+    _manifest = _prep["manifest"]
+    # Promote staged files over canonical paths, then commit the article, its
+    # asset rows and the generation row in one transaction. A failure in
+    # either step restores the previous files and rows.
+    try:
+        with promoted_stage(adir, stage, _manifest["generation_id"]), \
+                ctx.db.transaction() as conn:
+            conn.execute(
+                """INSERT INTO articles(article_id, source_id, job_id, title, markdown, html, version,
+                                          status, fingerprint, outline_json, created_at, updated_at)
+                    VALUES(?,?,?,?,?,?,?, 'draft',?,?,?,?)
+                    ON CONFLICT(article_id) DO UPDATE SET
+                      title=excluded.title, markdown=excluded.markdown, html=excluded.html,
+                      version=excluded.version, fingerprint=excluded.fingerprint,
+                      outline_json=excluded.outline_json, updated_at=excluded.updated_at""",
+                (
+                    article_id, ctx.source_id, ctx.job_id, article.title, md, html, 1,
+                    ctx.settings.fingerprint(), json_dumps(outline), time.time(), time.time(),
+                ),
+            )
+            conn.execute("DELETE FROM articles_fts WHERE article_id=?", (article_id,))
+            conn.execute(
+                "INSERT INTO articles_fts(article_id, title, markdown) VALUES(?,?,?)",
+                (article_id, article.title, md),
+            )
+            for a in asset_rows:
+                conn.execute(
+                    """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path,
+                                                              caption, alt_text, created_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (a["asset_id"], article_id, a["frame_id"], a["path"],
+                     a["caption"], a["alt_text"], time.time()),
+                )
+            insert_generation_row(conn, _manifest, ctx.fingerprint,
+                                  getattr(ctx.settings, "profile", None))
+    except Exception:
+        import shutil as _shutil
+        _shutil.rmtree(_prep["directory"], ignore_errors=True)
+        raise
     ctx.artifacts["article_html_chars"] = len(html)
-    ctx.record_artifact_hash("markdown", str(md_path))
+    ctx.record_artifact_hash("markdown", str(ctx.paths.article_markdown(article_id)))
+    ctx.artifacts["generation_id"] = _manifest["generation_id"]
+    ctx.artifacts["generation_operation"] = _manifest["operation"]
 
 
-def _copy_assets(ctx: StageContext, article_id: str, article: Article, md: str) -> None:
-    import re
+def _stage_asset_files(ctx: StageContext, article_id: str, staging_assets: Path,
+                       md: str) -> list[dict[str, str]]:
+    """Copy the markdown-referenced frames into the staging assets directory.
+
+    No database writes: rows reference the canonical paths they will occupy
+    after promotion and are inserted by the caller inside its transaction.
+    """
     import shutil
 
-    assets = ctx.paths.article_assets(article_id)
-    assets.mkdir(parents=True, exist_ok=True)
-    used = re.findall(r"\]\(assets/([^)]+)\)", md)
-    for name in used:
+    rows = []
+    canonical_assets = ctx.paths.article_assets(article_id)
+    for name in re.findall(r"\]\(assets/([^)]+)\)", md):
         fid = name.rsplit(".", 1)[0]
         row = ctx.db.query_one("SELECT path FROM frames WHERE frame_id=?", (fid,))
         if not row:
             continue
         src = Path(row["path"])
         if src.is_file():
-            shutil.copy2(src, assets / name)
-            ctx.db.execute(
-                """INSERT OR REPLACE INTO article_assets(asset_id, article_id, frame_id, path, caption, alt_text, created_at)
-                   VALUES(?,?,?,?,?,?,?)""",
-                (f"{article_id}-asset-{fid}", article_id, fid, str(assets / name), "", "", time.time()),
-            )
+            shutil.copy2(src, staging_assets / name)
+            rows.append({
+                "asset_id": f"{article_id}-asset-{fid}",
+                "frame_id": fid,
+                "path": str(canonical_assets / name),
+                "caption": "",
+                "alt_text": "",
+            })
+    return rows

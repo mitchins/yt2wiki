@@ -1,10 +1,14 @@
 services:
   yt2wiki:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    # For Portainer: use prebuilt image if you prefer: image: ghcr.io/mitchins/yt2wiki:0.1.0
-    image: yt2wiki:0.1.0
+    # Canonical install: prebuilt multi-arch image from GHCR. No local build.
+    #   docker compose pull && docker compose up -d
+    # Pin a release with YT2WIKI_IMAGE_TAG=vX.Y.Z or an immutable build with
+    # YT2WIKI_IMAGE_TAG=sha-<commit> (no leading colon — the ':' separator
+    # is already in the reference below). See docs/releases.md.
+    image: ghcr.io/mitchins/yt2wiki:${YT2WIKI_IMAGE_TAG:-main}
+    # Developer-only local build path (never used for ordinary installs):
+    #   docker compose -f docker-compose.yml -f docker-compose.build.yml build
+    #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
     container_name: yt2wiki
     # Bind to host loopback only. LAN access goes through an authenticated
     # reverse proxy (see docs/deploy.md): either a host proxy with this
@@ -27,6 +31,9 @@ services:
     environment:
       # All settings are env-driven; secrets via YT2WIKI_ env names, not hardcoded.
       - YT2WIKI_HOME=/data
+      # OCI digest of the running image when the operator pins one
+      # (YT2WIKI_IMAGE_TAG=sha-...); recorded in generation manifests.
+      - YT2WIKI_IMAGE_DIGEST=${YT2WIKI_IMAGE_DIGEST:-}
       # Optional: choose profile (compact fits 8 GB, standard 12–16 GB). Default is standard.
       - YT2WIKI_PROFILE=compact
       # Default transcription backend: the pinned Whisper service below
