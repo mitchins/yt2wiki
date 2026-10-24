@@ -18,6 +18,10 @@ from typing import Any
 ROLES = (("writer", "Writing"), ("vision", "Image judging"), ("asr", "Transcription"))
 _NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 _ENV = re.compile(r"^YT2WIKI_[A-Z0-9_]{1,56}$")
+# Config writes are allowlisted to plain filenames: even though every caller
+# passes a fixed name under the config dir, the guard keeps the sink safe if
+# a future caller ever interpolates request data into the path.
+_SAFE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 class InferenceConfigError(ValueError):
@@ -51,6 +55,9 @@ def _read_json(path: Path, default: Any) -> Any:
 
 
 def _write_json(path: Path, data: Any) -> None:
+    path = Path(path)
+    if not _SAFE_FILE.match(path.name):
+        raise InferenceConfigError(f"refusing to write outside the config dir: {path.name}")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")

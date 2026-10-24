@@ -7,13 +7,13 @@
   const csrfFromMeta = () => document.querySelector('meta[name=csrf-token]')?.content || "";
 
   async function api(path, opts = {}) {
-    const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+    const headers = { "Content-Type": "application/json", ...(opts.headers ?? {}) };
     const csrf = csrfFromMeta();
     if (csrf && (opts.method || "GET").toUpperCase() !== "GET") headers["X-CSRF-Token"] = csrf;
     const r = await fetch(path, { ...opts, headers });
     let data = null;
     try { data = await r.json(); } catch { /* non-JSON error page */ }
-    if (!r.ok) throw new Error((data && data.detail) || `Request failed (${r.status})`);
+    if (!r.ok) throw new Error(data?.detail || `Request failed (${r.status})`);
     return data;
   }
 

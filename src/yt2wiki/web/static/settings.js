@@ -9,7 +9,7 @@
   // Guided card: save one endpoint, test the actual server, show what it
   // qualified for. Server assigns writer+vision / asr when they pass.
   $$("[data-guided-llm], [data-guided-asr]").forEach((card) => {
-    const kind = card.hasAttribute("data-guided-asr") ? "asr" : "llm";
+    const kind = "guidedAsr" in card.dataset ? "asr" : "llm";
     const read = () => Object.fromEntries(
       $$("[data-g]", card).map((i) => [i.dataset.g, i.value.trim()]));
     const msg = $("[data-guided-msg]", card);
@@ -94,9 +94,13 @@
         if (d.qualified_for_vision) caps.push("judges images");
         if (d.qualified_for_asr) caps.push("transcribes");
         out.className = "test-result ok";
-        out.textContent = d.kind === "asr"
-          ? `Speaks /asr · checked just now`
-          : `Reachable · ${d.latency_ms} ms${d.models && d.models.length ? " · " + d.models.slice(0, 3).join(", ") : ""}${caps.length ? " · " + caps.join(" · ") : " · no qualification"}`;
+        if (d.kind === "asr") {
+          out.textContent = "Speaks /asr · checked just now";
+        } else {
+          const models = (d.models ?? []).slice(0, 3).join(", ");
+          const quals = caps.length ? ` · ${caps.join(" · ")}` : " · no qualification";
+          out.textContent = `Reachable · ${d.latency_ms} ms${models ? ` · ${models}` : ""}${quals}`;
+        }
         const model = $("[data-k=model]", p);
         if (d.models && d.models.length === 1 && !model.value) {
           model.value = d.models[0]; msg.textContent = "Unsaved changes";

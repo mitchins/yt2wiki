@@ -125,3 +125,42 @@ def test_health_and_library_accessible_without_login(tmp_path):
     page = gw.get("/settings")
     assert page.status_code == 200
     assert "Operator login" in page.text or "operator password" in page.text
+
+
+def test_auth_edge_cases_unit(tmp_path, monkeypatch):
+    """Direct unit coverage: empty secrets, unknown/expired tokens, guards."""
+    import time as _time
+    from pathlib import Path as _Path
+
+    import pytest
+
+    from yt2wiki.web import auth as _auth
+
+    monkeypatch.setenv("YT2WIKI_OPERATOR_PASSWORD", TEST_OPERATOR_PASSWORD)
+    assert _auth.verify_password("") is False
+    assert _auth.verify_password("wrong") is False
+    assert _auth.verify_password(TEST_OPERATOR_PASSWORD) is True
+    monkeypatch.delenv("YT2WIKI_OPERATOR_PASSWORD")
+    assert _auth.verify_password(TEST_OPERATOR_PASSWORD) is False
+    monkeypatch.setenv("YT2WIKI_OPERATOR_PASSWORD", TEST_OPERATOR_PASSWORD)
+
+    class _P:
+        root = tmp_path
+
+    assert _auth.get_session(_P(), None) is None
+    assert _auth.get_session(_P(), "nope") is None
+    assert _auth.revoke_session(_P(), None) is None
+    assert _auth.revoke_session(_P(), "nope") is None
+    # Expired sessions are rejected.
+    token, _csrf = _auth.create_session(_P())
+    sessions = _auth._read_sessions(_P())
+    for entry in sessions.values():
+        entry["expires_at"] = _time.time() - 1
+    _auth._write_sessions(_P(), sessions)
+    assert _auth.get_session(_P(), token) is None
+    # CSRF with no expected token never passes.
+    assert _auth.csrf_valid({}, None) is False
+    # The config-file sink refuses directory escapes.
+    monkeypatch.setattr(_auth, "_sessions_path", lambda paths: _Path("/tmp/.."))
+    with pytest.raises(_auth.AuthError):
+        _auth._write_sessions(_P(), {})

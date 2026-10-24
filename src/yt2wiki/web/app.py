@@ -307,7 +307,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "csrf_token": (session or {}).get("csrf", "")}
 
     @app.post("/api/auth/login")
-    def api_auth_login(payload: dict = Body(...)) -> Any:
+    def api_auth_login(request: Request, payload: dict = Body(...)) -> Any:
         if not operator_auth.password_configured():
             raise HTTPException(403,
                 "Operator password is not configured. Set "
@@ -320,8 +320,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.paths, label=str((payload or {}).get("label") or "")[:80])
         from fastapi.responses import JSONResponse
         resp = JSONResponse({"ok": True, "csrf_token": csrf})
+        # The publisher is loopback-only, so plain HTTP is the normal case and
+        # Secure must only be set behind TLS — otherwise browsers would drop
+        # the session cookie and lock the operator out.
+        secure = request.url.scheme == "https"
         resp.set_cookie(operator_auth.SESSION_COOKIE, token, httponly=True,
-                        samesite="lax", path="/",
+                        secure=secure, samesite="lax", path="/",
                         max_age=operator_auth.SESSION_TTL_S)
         return resp
 
@@ -541,10 +545,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             new_job = enqueue(job["source_id"], profile, retry_of=job_id)
         return {"job_id": new_job, "source_id": job["source_id"]}
-
-    def _readiness_for(role: str, label: str) -> dict[str, Any]:
-        """Stored-status readiness for one capability: Ready / Needs setup / Failed."""
-        return inference.readiness(settings.paths, role, label)
 
     def readiness_summary() -> dict[str, Any]:
         return {role: inference.readiness(settings.paths, role, label)
