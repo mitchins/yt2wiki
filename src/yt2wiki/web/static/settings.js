@@ -36,11 +36,11 @@
           msg.textContent = "Saved.";
           setTimeout(() => location.reload(), 1200);
         } else if (d.ok) {
-          out.className = "test-result bad";
-          out.textContent = "Reachable, but qualified for nothing. " +
-            (kind === "asr"
-              ? "The server did not speak the Whisper /asr contract (multipart audio_file, segments + language JSON)."
-              : "The server answered but did not produce the required structured output.");
+          out.className = "test-result ok";
+          const savedNote = "Endpoint saved; qualification recorded as failed — fix the endpoint and test again.";
+          out.textContent = kind === "asr"
+            ? `Reachable, but it did not speak the Whisper /asr contract (multipart audio_file, segments + language JSON). ${savedNote}`
+            : `Reachable, but it did not produce the required structured output. ${savedNote}`;
           msg.textContent = "Saved, not qualified.";
         } else {
           out.className = "test-result bad";

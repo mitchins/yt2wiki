@@ -31,6 +31,9 @@ services:
     environment:
       # All settings are env-driven; secrets via YT2WIKI_ env names, not hardcoded.
       - YT2WIKI_HOME=/data
+      # Operator password for the browser login (no default — empty fails
+      # all mutations closed). Set in .env, the shell, or Portainer variables.
+      - YT2WIKI_OPERATOR_PASSWORD=${YT2WIKI_OPERATOR_PASSWORD:-}
       # OCI digest of the running image when the operator pins one
       # (YT2WIKI_IMAGE_TAG=sha-...); recorded in generation manifests.
       - YT2WIKI_IMAGE_DIGEST=${YT2WIKI_IMAGE_DIGEST:-}

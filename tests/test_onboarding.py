@@ -80,7 +80,8 @@ def test_guided_save_test_assigns_qualified_roles(onboarded, monkeypatch):
     assert body["result"]["qualified_for_writer"] is True
     assert body["result"]["qualified_for_vision"] is True
     cfg = inf.load(settings.paths)
-    assert cfg["roles"]["writer"] == "hal" and cfg["roles"]["vision"] == "hal"
+    assert cfg["roles"]["writer"] == "hal"
+    assert cfg["roles"]["vision"] == "hal"
     # Readiness reflects the fresh qualification.
     ready = client.get("/api/settings/readiness").json()
     assert ready["writer"]["state"] == "Ready"

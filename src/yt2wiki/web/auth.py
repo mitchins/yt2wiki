@@ -22,10 +22,16 @@ import json
 import os
 import secrets
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 PASSWORD_ENV = "YT2WIKI_OPERATOR_PASSWORD"
+# Force the Secure cookie flag when TLS terminates at a reverse proxy (the
+# app itself only sees plain HTTP then). Loopback-only deployments leave it
+# unset so login keeps working over plain HTTP.
+COOKIE_SECURE_ENV = "YT2WIKI_COOKIE_SECURE"
 SESSION_COOKIE = "yt2wiki_op"
 CSRF_HEADER = "x-csrf-token"
 CSRF_FIELD = "csrf_token"
@@ -52,7 +58,19 @@ def verify_password(candidate: str) -> bool:
     expected = os.environ.get(PASSWORD_ENV, "")
     if not expected or not candidate:
         return False
-    return hmac.compare_digest(candidate, expected)
+    # Byte comparison: str-only compare_digest raises TypeError on non-ASCII
+    # input, which would surface as HTTP 500 instead of a clean 401.
+    return hmac.compare_digest(_bytes(candidate), _bytes(expected))
+
+
+def _bytes(value: str) -> bytes:
+    return value.encode("utf-8", "surrogatepass")
+
+
+def want_secure_cookie(request_scheme: str) -> bool:
+    """Secure flag when the browser used HTTPS or the operator declares a
+    TLS-terminating proxy in front of the plain-HTTP app."""
+    return request_scheme == "https" or os.environ.get(COOKIE_SECURE_ENV) == "1"
 
 
 def _sessions_path(paths) -> Path:
@@ -65,6 +83,26 @@ def _read_sessions(paths) -> dict[str, Any]:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+@contextmanager
+def _session_lock(paths):
+    """Process-shared lock for session read-modify-write cycles.
+
+    Login and logout overlap otherwise: the loser’s write can resurrect a
+    revoked cookie (or drop a fresh session). The lock lives beside the data
+    file; fcntl is POSIX-only and the publisher image is Linux-only.
+    """
+    import fcntl
+
+    lock_path = _sessions_path(paths).with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def _write_sessions(paths, data: dict[str, Any]) -> None:
@@ -85,17 +123,18 @@ def _token_hash(token: str) -> str:
 def create_session(paths, *, label: str = "") -> tuple[str, str]:
     """Mint a session; returns (token, csrf). Prunes expired entries."""
     now = time.time()
-    sessions = {k: v for k, v in _read_sessions(paths).items()
-                if isinstance(v, dict) and float(v.get("expires_at", 0)) > now}
-    token = secrets.token_urlsafe(32)
-    csrf = secrets.token_urlsafe(32)
-    sessions[_token_hash(token)] = {
-        "csrf": csrf,
-        "created_at": now,
-        "expires_at": now + SESSION_TTL_S,
-        "label": label[:80],
-    }
-    _write_sessions(paths, sessions)
+    with _session_lock(paths):
+        sessions = {k: v for k, v in _read_sessions(paths).items()
+                    if isinstance(v, dict) and float(v.get("expires_at", 0)) > now}
+        token = secrets.token_urlsafe(32)
+        csrf = secrets.token_urlsafe(32)
+        sessions[_token_hash(token)] = {
+            "csrf": csrf,
+            "created_at": now,
+            "expires_at": now + SESSION_TTL_S,
+            "label": label[:80],
+        }
+        _write_sessions(paths, sessions)
     return token, csrf
 
 
@@ -113,10 +152,11 @@ def get_session(paths, token: str | None) -> dict[str, Any] | None:
 def revoke_session(paths, token: str | None) -> None:
     if not token:
         return
-    sessions = _read_sessions(paths)
-    if _token_hash(token) in sessions:
-        del sessions[_token_hash(token)]
-        _write_sessions(paths, sessions)
+    with _session_lock(paths):
+        sessions = _read_sessions(paths)
+        if _token_hash(token) in sessions:
+            del sessions[_token_hash(token)]
+            _write_sessions(paths, sessions)
 
 
 def session_from_request(paths, request) -> dict[str, Any] | None:
@@ -129,7 +169,9 @@ def csrf_valid(session: dict[str, Any], request, form_field: str = "") -> bool:
     if not expected:
         return False
     presented = request.headers.get(CSRF_HEADER, "") or form_field
-    return bool(presented) and hmac.compare_digest(str(presented), str(expected))
+    if not presented:
+        return False
+    return hmac.compare_digest(_bytes(str(presented)), _bytes(str(expected)))
 
 
 def require_operator(paths, request, *, csrf: bool = True) -> dict[str, Any]:

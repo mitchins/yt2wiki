@@ -34,7 +34,8 @@ def test_unauthenticated_mutations_denied_from_gateway(tmp_path, monkeypatch):
     gw = TestClient(app, client=("172.18.0.1", 50000))
     # No password configured: fail closed with setup instructions.
     r = gw.post("/api/settings/inference", json={"providers": [], "roles": {}})
-    assert r.status_code == 403 and "YT2WIKI_OPERATOR_PASSWORD" in r.json()["detail"]
+    assert r.status_code == 403
+    assert "YT2WIKI_OPERATOR_PASSWORD" in r.json()["detail"]
     monkeypatch.setenv("YT2WIKI_OPERATOR_PASSWORD", TEST_OPERATOR_PASSWORD)
     # Password configured but no session: login required (401, not 403).
     for method, url, kwargs in [

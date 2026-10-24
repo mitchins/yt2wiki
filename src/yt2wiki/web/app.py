@@ -320,10 +320,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.paths, label=str((payload or {}).get("label") or "")[:80])
         from fastapi.responses import JSONResponse
         resp = JSONResponse({"ok": True, "csrf_token": csrf})
-        # The publisher is loopback-only, so plain HTTP is the normal case and
-        # Secure must only be set behind TLS — otherwise browsers would drop
-        # the session cookie and lock the operator out.
-        secure = request.url.scheme == "https"
+        # The publisher is loopback-only, so plain HTTP is the normal case.
+        # Secure is set for HTTPS browsers, or forced when the operator
+        # declares a TLS-terminating proxy via YT2WIKI_COOKIE_SECURE=1.
+        secure = operator_auth.want_secure_cookie(request.url.scheme)
         resp.set_cookie(operator_auth.SESSION_COOKIE, token, httponly=True,
                         secure=secure, samesite="lax", path="/",
                         max_age=operator_auth.SESSION_TTL_S)
@@ -413,15 +413,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             }
         return snap
 
-    def enqueue(source_id: str, profile: str, **config: Any) -> str:
+    def enqueue(source_id: str, profile: str, has_captions: bool = False, **config: Any) -> str:
         for live_id in app.state.runner.live():
             row = db.query_one("SELECT source_id FROM jobs WHERE job_id=?", (live_id,))
             if row and row["source_id"] == source_id:
                 return live_id  # already queued or running here: no duplicate work
+        _require_ready(has_captions=has_captions)
         snap = _inference_snapshot()
         job = service.create_job(source_id, profile=profile,
                                  config={"pipeline": "v9", "origin": "web",
-                                         "inference": snap, **config})
+                                         "inference": snap,
+                                         "has_captions": has_captions, **config})
         app.state.runner.submit(job)
         return job
 
@@ -435,15 +437,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         preview = service.preview_url(url)
         if not preview.get("ok"):
             raise HTTPException(400, preview.get("error", "That video could not be reached."))
-        _require_ready(has_captions=bool(preview.get("has_manual_captions")))
         sid = service.create_youtube_source(url)
-        return enqueue(sid, profile)
+        return enqueue(sid, profile, has_captions=bool(preview.get("has_manual_captions")))
 
     async def submit_upload(file: UploadFile | None, profile: str) -> str:
         if file is None or not file.filename:
             raise HTTPException(400, "Choose a video file to upload.")
         profile = _profile(profile)
-        _require_ready()
         upload_id = new_id("upl")
         dest = settings.paths.upload_path(upload_id, Path(file.filename).name)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -473,13 +473,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 dest.unlink(missing_ok=True)
         return enqueue(sid, profile)
 
+    def _job_captions(job: dict[str, Any]) -> bool:
+        try:
+            prev_cfg = json.loads(job.get("config_json") or "{}")
+        except ValueError:
+            return False
+        return bool(prev_cfg.get("has_captions"))
+
     def retry_job(job_id: str) -> str:
         job = service.get_job(job_id)
         if job is None:
             raise HTTPException(404, "job not found")
-        _require_ready()
         return enqueue(job["source_id"], job["profile"] if job["profile"] in PROFILE_NAMES
-                       else _default_profile(settings), retry_of=job_id)
+                       else _default_profile(settings),
+                       has_captions=_job_captions(job),
+                       retry_of=job_id)
 
     # ------------------------------------------------------------------
     # api
@@ -530,7 +538,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/jobs/{job_id}/reprocess")
     def api_reprocess(request: Request, job_id: str, payload: dict = Body(default={})) -> Any:
         _require_operator(request)
-        _require_ready()
         job = service.get_job(job_id)
         if job is None:
             raise HTTPException(404, "job not found")
@@ -543,7 +550,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 config={"force": force, "pipeline": "legacy", "origin": "web"})
             app.state.runner.submit(new_job, force=force)
         else:
-            new_job = enqueue(job["source_id"], profile, retry_of=job_id)
+            new_job = enqueue(job["source_id"], profile,
+                              has_captions=_job_captions(job), retry_of=job_id)
         return {"job_id": new_job, "source_id": job["source_id"]}
 
     def readiness_summary() -> dict[str, Any]:
@@ -944,7 +952,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/sources/{source_id}/reprocess")
     def api_reprocess_source(request: Request, source_id: str, payload: dict = Body(default={})) -> Any:
         _require_operator(request)
-        _require_ready()
         if service.get_source(source_id) is None:
             raise HTTPException(404, "source not found")
         profile = _profile(payload.get("profile") or "")

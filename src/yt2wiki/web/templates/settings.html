@@ -50,7 +50,7 @@
         <label class="field"><span>Model</span><input class="input" data-g="model" value="{{ guided_llm.get('model', '') }}" placeholder="Server default model"></label>
         <label class="field wide"><span>Base URL</span><input class="input" data-g="url" type="url" value="{{ guided_llm.get('url', '') }}" placeholder="http://host:port/v1" required></label>
         <label class="field wide"><span>API key variable <span class="muted" style="font-weight:400">— optional</span></span>
-          <input class="input" data-g="api_key_env" value="" placeholder="YT2WIKI_HAL_KEY" autocomplete="off" spellcheck="false">
+          <input class="input" data-g="api_key_env" value="{{ guided_llm.get('api_key_env', '') }}" placeholder="YT2WIKI_LLM_KEY" autocomplete="off" spellcheck="false">
           <small>The name of an environment variable holding the key (<code>YT2WIKI_…</code> prefix required). The key itself is never stored.</small></label>
       </div>
       <div class="set-actions">

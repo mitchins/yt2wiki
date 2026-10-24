@@ -40,7 +40,8 @@ def test_unauthenticated_settings_mutations_denied(tmp_path, monkeypatch):
     # Fail closed with no password configured.
     monkeypatch.delenv("YT2WIKI_OPERATOR_PASSWORD", raising=False)
     r = anon.post("/api/settings/inference", json={"providers": [], "roles": {}})
-    assert r.status_code == 403 and "YT2WIKI_OPERATOR_PASSWORD" in r.json()["detail"]
+    assert r.status_code == 403
+    assert "YT2WIKI_OPERATOR_PASSWORD" in r.json()["detail"]
     # Login required once a password exists.
     monkeypatch.setenv("YT2WIKI_OPERATOR_PASSWORD", TEST_OPERATOR_PASSWORD)
     r = anon.post("/api/settings/inference", json={"providers": [], "roles": {}})
@@ -76,7 +77,8 @@ def test_gateway_save_and_test_need_session_not_peer(tmp_path, monkeypatch):
     r = gw_authed.post("/api/settings/inference/test",
                        headers={"X-CSRF-Token": csrf},
                        json={"url": "http://127.0.0.1:9/v1", "name": "a", "model": ""})
-    assert r.status_code == 200 and r.json()["ok"] is False  # unreachable, but authorized
+    assert r.status_code == 200
+    assert r.json()["ok"] is False  # unreachable, but authorized
 
 
 def test_settings_page_shows_login_state(tmp_path, monkeypatch):
@@ -483,7 +485,8 @@ def test_cli_test_exit_asr_protocol_ok_but_unassigned_ok(tmp_path, capsys, monke
     _patch_mock_provider(monkeypatch, _mock_handler(models="unreachable", asr="ok"))
     rc, result = _run_test(data, capsys, "mock")
     assert rc == 0
-    assert result["ok"] is True and result["qualified_for_asr"] is True
+    assert result["ok"] is True
+    assert result["qualified_for_asr"] is True
 
 
 def test_cli_test_exit_asr_assigned_to_llm_provider(tmp_path, capsys, monkeypatch):

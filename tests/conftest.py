@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 TEST_OPERATOR_PASSWORD = "test-operator-password"
 
 
-@pytest.fixture()
+@pytest.fixture
 def operator_password(monkeypatch):
     """Set the operator password for the test process."""
     monkeypatch.setenv("YT2WIKI_OPERATOR_PASSWORD", TEST_OPERATOR_PASSWORD)
