@@ -20,15 +20,10 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import secrets
 import time
 from pathlib import Path
 from typing import Any
-
-# Session storage is allowlisted to one fixed filename: the sink stays safe
-# even if a future caller interpolates request data into the path.
-_SAFE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 PASSWORD_ENV = "YT2WIKI_OPERATOR_PASSWORD"
 SESSION_COOKIE = "yt2wiki_op"
@@ -74,8 +69,6 @@ def _read_sessions(paths) -> dict[str, Any]:
 
 def _write_sessions(paths, data: dict[str, Any]) -> None:
     path = _sessions_path(paths)
-    if not _SAFE_FILE.match(path.name):
-        raise AuthError(500, "refusing to write outside the config dir")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")

@@ -18,10 +18,6 @@ from typing import Any
 ROLES = (("writer", "Writing"), ("vision", "Image judging"), ("asr", "Transcription"))
 _NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 _ENV = re.compile(r"^YT2WIKI_[A-Z0-9_]{1,56}$")
-# Config writes are allowlisted to plain filenames: even though every caller
-# passes a fixed name under the config dir, the guard keeps the sink safe if
-# a future caller ever interpolates request data into the path.
-_SAFE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 class InferenceConfigError(ValueError):
@@ -54,10 +50,18 @@ def _read_json(path: Path, default: Any) -> Any:
         return default
 
 
-def _write_json(path: Path, data: Any) -> None:
-    path = Path(path)
-    if not _SAFE_FILE.match(path.name):
-        raise InferenceConfigError(f"refusing to write outside the config dir: {path.name}")
+def _write_json(paths, kind: str, data: Any) -> None:
+    """Atomically write a config-dir JSON file.
+
+    The filename is selected from fixed literals, never derived from request
+    data: ``config`` → inference.json, ``status`` → inference_status.json.
+    """
+    if kind == "config":
+        path = config_path(paths)
+    elif kind == "status":
+        path = status_path(paths)
+    else:  # pragma: no cover - internal programming error, not user input
+        raise InferenceConfigError(f"refusing to write unknown config file: {kind}")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")
@@ -122,7 +126,7 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
 def save(paths, payload: dict[str, Any]) -> dict[str, Any]:
     cfg = validate(payload)
     cfg["updated_at"] = time.time()
-    _write_json(config_path(paths), cfg)
+    _write_json(paths, "config", cfg)
     status = load_status(paths)
     pruned = {}
     for name, entry in status.items():
@@ -132,7 +136,7 @@ def save(paths, payload: dict[str, Any]) -> dict[str, Any]:
             continue  # URL/model/key changed: the old PASS no longer applies
         pruned[name] = entry
     if pruned != status:
-        _write_json(status_path(paths), pruned)
+        _write_json(paths, "status", pruned)
     return cfg
 
 
@@ -161,12 +165,12 @@ def save_one(paths, payload: dict[str, Any]) -> dict[str, str]:
     providers[name] = {"url": url, "model": model[:200], "api_key_env": key_env}
     cfg["providers"] = providers
     cfg["updated_at"] = time.time()
-    _write_json(config_path(paths), cfg)
+    _write_json(paths, "config", cfg)
     # A changed URL/model/key invalidates the previous qualification.
     status = load_status(paths)
     if name in status and _identity(status[name]) != (url, model[:200], key_env):
         del status[name]
-        _write_json(status_path(paths), status)
+        _write_json(paths, "status", status)
     return {"name": name, "url": url, "model": model[:200], "api_key_env": key_env}
 
 
@@ -196,7 +200,7 @@ def record_qualified(paths, name: str, result: dict[str, Any]) -> dict[str, str]
             assigned[role] = name
     cfg["roles"] = roles
     cfg["updated_at"] = time.time()
-    _write_json(config_path(paths), cfg)
+    _write_json(paths, "config", cfg)
     return assigned
 
 
@@ -537,7 +541,7 @@ def _probe_asr(url: str, headers: dict[str, str], model: str, timeout: float) ->
 def record_test(paths, name: str, result: dict[str, Any]) -> None:
     status = load_status(paths)
     status[name] = result
-    _write_json(status_path(paths), status)
+    _write_json(paths, "status", status)
 
 
 def _short_error(exc: Exception) -> str:

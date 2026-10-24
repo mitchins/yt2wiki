@@ -56,5 +56,5 @@ def configure_ready(settings, *, writer=True, asr=True):
                          "checked_at": _time.time()}
     cfg = _inf.save(settings.paths, {"providers": [
         {"name": n, **p} for n, p in providers.items()], "roles": roles})
-    _inf._write_json(_inf.status_path(settings.paths), status)
+    _inf._write_json(settings.paths, "status", status)
     return cfg

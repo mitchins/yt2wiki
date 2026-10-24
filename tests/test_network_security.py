@@ -130,9 +130,6 @@ def test_health_and_library_accessible_without_login(tmp_path):
 def test_auth_edge_cases_unit(tmp_path, monkeypatch):
     """Direct unit coverage: empty secrets, unknown/expired tokens, guards."""
     import time as _time
-    from pathlib import Path as _Path
-
-    import pytest
 
     from yt2wiki.web import auth as _auth
 
@@ -160,7 +157,7 @@ def test_auth_edge_cases_unit(tmp_path, monkeypatch):
     assert _auth.get_session(_P(), token) is None
     # CSRF with no expected token never passes.
     assert _auth.csrf_valid({}, None) is False
-    # The config-file sink refuses directory escapes.
-    monkeypatch.setattr(_auth, "_sessions_path", lambda paths: _Path("/tmp/.."))
-    with pytest.raises(_auth.AuthError):
-        _auth._write_sessions(_P(), {})
+    # Sessions persist to the fixed config filename only.
+    token2, _ = _auth.create_session(_P())
+    assert (_auth._sessions_path(_P())).name == "operator_sessions.json"
+    assert _auth.get_session(_P(), token2) is not None
