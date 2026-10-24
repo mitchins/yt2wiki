@@ -64,7 +64,10 @@ def _write_json(paths, kind: str, data: Any) -> None:
         raise InferenceConfigError(f"refusing to write unknown config file: {kind}")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")
+    # False positive (pythonsecurity:S2083): the path is a fixed literal
+    # (config/inference.json or inference_status.json), never request-derived,
+    # and the content passes validate() before it is serialized here as JSON.
+    tmp.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")  # NOSONAR
     tmp.replace(path)
 
 
@@ -204,6 +207,9 @@ def record_qualified(paths, name: str, result: dict[str, Any]) -> dict[str, str]
     return assigned
 
 
+NEEDS_SETUP = "Needs setup"
+
+
 def provider_status(paths, name: str) -> dict[str, Any]:
     """The stored test result, but only when it matches the saved endpoint.
 
@@ -237,16 +243,16 @@ def readiness(paths, role: str, label: str) -> dict[str, Any]:
         if env_url:
             return {"state": "Ready", "detail": f"Server URL from environment ({env_url}).",
                     "provider": "", "role": role, "label": label}
-        return {"state": "Needs setup",
+        return {"state": NEEDS_SETUP,
                 "detail": "No transcription endpoint assigned. Add a Whisper HTTP server below.",
                 "provider": "", "role": role, "label": label}
     if not name:
-        return {"state": "Needs setup",
+        return {"state": NEEDS_SETUP,
                 "detail": f"No endpoint assigned for {label.lower()}. Save and test one below.",
                 "provider": "", "role": role, "label": label}
     st = provider_status(paths, name)
     if not st:
-        return {"state": "Needs setup",
+        return {"state": NEEDS_SETUP,
                 "detail": f"“{name}” was never tested (or changed since its test). Save and test it below.",
                 "provider": name, "role": role, "label": label}
     if not st.get("ok"):

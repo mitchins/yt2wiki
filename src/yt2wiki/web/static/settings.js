@@ -99,7 +99,8 @@
         } else {
           const models = (d.models ?? []).slice(0, 3).join(", ");
           const quals = caps.length ? ` · ${caps.join(" · ")}` : " · no qualification";
-          out.textContent = `Reachable · ${d.latency_ms} ms${models ? ` · ${models}` : ""}${quals}`;
+          const modelPart = models ? ` · ${models}` : "";
+          out.textContent = `Reachable · ${d.latency_ms} ms${modelPart}${quals}`;
         }
         const model = $("[data-k=model]", p);
         if (d.models && d.models.length === 1 && !model.value) {

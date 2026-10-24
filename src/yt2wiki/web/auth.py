@@ -71,7 +71,10 @@ def _write_sessions(paths, data: dict[str, Any]) -> None:
     path = _sessions_path(paths)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")
+    # False positive (pythonsecurity:S2083): the path is a fixed literal
+    # (config/operator_sessions.json), never request-derived, and the content
+    # is server-generated session metadata serialized as JSON.
+    tmp.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")  # NOSONAR
     tmp.replace(path)
 
 
