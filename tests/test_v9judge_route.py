@@ -318,6 +318,80 @@ def test_rubric_mismatch_falls_back_to_veto_loop(tiny_pngs, no_ocr):
     assert record["z1_fallback"] == "v9z-veto"
 
 
+def test_remote_backend_adapts_when_server_rejects_schemas_with_images(monkeypatch):
+    import json
+    import httpx
+    from yt2wiki.backends.remote_openai import RemoteOpenAIBackend
+    from yt2wiki.config import ModelSpec
+
+    seen: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        seen.append(body.get("response_format", {}).get("type"))
+        if body.get("response_format"):
+            return httpx.Response(400, json={"error": {"message":
+                "the engine refused this request: SCHEMA on a request with images is not supported"}})
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"best": [1], "reason": "x"}'},
+                         "finish_reason": "stop"}]})
+
+    real_client = httpx.Client
+
+    def patched(*a, **k):
+        k["transport"] = httpx.MockTransport(handler)
+        return real_client(*a, **k)
+
+    monkeypatch.setattr("httpx.Client", patched)
+    spec = ModelSpec(key="remote-t", role="vision", engine="remote-openai", repo="m")
+    be = RemoteOpenAIBackend(spec, {}, "cpu", None,
+                             base_url="http://x.test/v1", model="m",
+                             timeout=5.0)
+    be.load()
+    from PIL import Image
+    im = Image.new("RGB", (32, 32), (9, 9, 9))
+    schema = {"type": "object", "properties": {"best": {"type": "array"}},
+              "required": ["best"]}
+    out = be.rank_images([im], "rank", max_new_tokens=50,
+                         response_schema=schema, schema_name="rank")
+    assert json.loads(out)["best"] == [1]
+    # First call tried schema then retried plain; the verdict is remembered.
+    assert seen[0] == "json_schema"
+    assert seen[1] is None
+    out2 = be.rank_images([im], "rank", max_new_tokens=50,
+                          response_schema=schema, schema_name="rank")
+    assert json.loads(out2)["best"] == [1]
+    assert seen[2] is None, "remembered: no second schema attempt"
+
+
+def test_remote_backend_propagates_non_schema_400(monkeypatch):
+    import json
+    import httpx
+    from yt2wiki.backends.remote_openai import RemoteOpenAIBackend
+    from yt2wiki.config import ModelSpec
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "bad image bytes"}})
+
+    real_client = httpx.Client
+
+    def patched(*a, **k):
+        k["transport"] = httpx.MockTransport(handler)
+        return real_client(*a, **k)
+
+    monkeypatch.setattr("httpx.Client", patched)
+    spec = ModelSpec(key="remote-t", role="vision", engine="remote-openai", repo="m")
+    be = RemoteOpenAIBackend(spec, {}, "cpu", None,
+                             base_url="http://x.test/v1", model="m",
+                             timeout=5.0)
+    be.load()
+    from PIL import Image
+    im = Image.new("RGB", (32, 32), (9, 9, 9))
+    with pytest.raises(httpx.HTTPStatusError):
+        be.rank_images([im], "rank", max_new_tokens=50,
+                       response_schema={"type": "object"}, schema_name="rank")
+
+
 def test_remote_backend_sends_strict_json_schema(monkeypatch):
     import json
     import httpx

@@ -17,12 +17,23 @@ from .base import BaseBackend
 log = logging.getLogger("yt2wiki.remote")
 
 class RemoteOpenAIBackend(BaseBackend):
-    # The server speaks modern structured outputs (json_schema / strict).
+    # The server speaks modern structured outputs (json_schema/strict).
     # Callers check this flag before requesting a response schema; backends
     # without it keep today's behaviour and rely on downstream validation.
     supports_structured_schema = True
 
     def __init__(self, spec: ModelSpec, variant: dict[str, Any], device: str, index: int | None, *, base_url: str, model: str = "", api_key_env: str = "", timeout: float = 60.0):
+        super().__init__(spec, variant, device, index)
+        self.base_url = base_url.rstrip("/")
+        self.model_name = model
+        self.api_key_env = api_key_env
+        self.timeout = timeout
+        self._headers = {}
+        # Per-endpoint verdict: does this server accept schemas alongside
+        # images? None = untested. Some engines (observed) accept json_schema
+        # for text but refuse any schema on image requests; the judge adapts
+        # once and remembers, instead of failing every multi-image call.
+        self._schema_with_images: bool | None = None
         super().__init__(spec, variant, device, index)
         self.base_url = base_url.rstrip("/")
         self.model_name = model
@@ -145,10 +156,33 @@ class RemoteOpenAIBackend(BaseBackend):
         payload: dict[str, Any] = {"messages": msgs, "max_tokens": max_new_tokens, "temperature": temperature}
         if self.model_name:
             payload["model"] = self.model_name
-        fmt = self._response_format(False, response_schema, schema_name)
+        want_schema = response_schema is not None and self._schema_with_images is not False
+        fmt = self._response_format(False, response_schema if want_schema else None, schema_name)
         if fmt is not None:
             payload["response_format"] = fmt
-        data = self._post(payload)
+        try:
+            data = self._post(payload)
+        except httpx.HTTPStatusError as exc:
+            body = ""
+            try:
+                body = (exc.response.text or "").lower() if exc.response is not None else ""
+            except Exception:  # noqa: BLE001 - best-effort body read
+                pass
+            if (want_schema and response_schema is not None
+                    and exc.response is not None and exc.response.status_code == 400
+                    and "schema" in body):
+                # This endpoint refuses schemas alongside images: retry once
+                # plain and remember, so the judge degrades to validated
+                # plain JSON instead of failing every multi-image call.
+                log.warning("endpoint rejects schemas with images; retrying plain")
+                self._schema_with_images = False
+                payload.pop("response_format", None)
+                data = self._post(payload)
+            else:
+                raise
+        else:
+            if want_schema and response_schema is not None:
+                self._schema_with_images = True
         try:
             content = data["choices"][0]["message"]["content"]
             if content is None:

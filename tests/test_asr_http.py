@@ -774,6 +774,31 @@ def test_qualify_vision_list_content_and_retry_error(monkeypatch):
     assert inf._qualify_vision("http://x", {}, "m", 5.0) is True
 
 
+def test_qualify_vision_adapts_when_server_rejects_schemas_with_images(monkeypatch):
+    import httpx as _h
+
+    from yt2wiki.web import inference as inf
+
+    def _msg(content):
+        return {"choices": [{"message": {"content": content}}]}
+
+    def _schema_refuser(*a, **k):
+        payload = k.get("json", {})
+        if payload.get("response_format"):
+            return _h.Response(400, json={
+                "error": {"message": "SCHEMA on a request with images is not supported"}})
+        return _h.Response(200, json=_msg(
+            '{"scores": [{"idx": 1, "relevance": 2, "clarity": 2, '
+            '"instructional": 2, "payoff": 2, "weakness": "ok", '
+            '"veto": false, "context_ok": false}], '
+            '"decision": "KEEP", "winner": 1, "explanation": "fine", '
+            '"images_received": 2}'))
+
+    monkeypatch.setattr(_h, "post", _schema_refuser)
+    # Same runtime adaptation: schema first, validated plain JSON after.
+    assert inf._qualify_vision("http://x", {}, "m", 5.0) is True
+
+
 def test_detect_language_head_failure_returns_none(tmp_path, monkeypatch):
     from yt2wiki.backends import asr_http as _m
     wav = _wav(tmp_path, seconds=60.0)

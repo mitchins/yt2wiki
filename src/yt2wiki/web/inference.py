@@ -499,17 +499,31 @@ def _qualify_vision(url: str, headers: dict[str, str], model: str, timeout: floa
     # probe must verify schema enforcement — not just prompt-shaped JSON.
     # A server that rejects the schema (or hallucinates past it) cannot
     # serve the judge: NO_IMAGE and images_received mismatches fail closed.
+    # Servers that refuse schemas alongside images (observed engine
+    # behaviour) are re-probed plain, exactly as the runtime adapts;
+    # anything else failing stays a failure.
     # (vLLM >= 0.32 silently ignores the legacy guided_json field; the
     # OpenAI-standard json_schema form is the supported mechanism.)
     schema_format = {"type": "json_schema",
                      "json_schema": {"name": "rubric", "schema": RUBRIC_SCHEMA,
                                      "strict": True}}
-    for _ in range(2):
-        payload["response_format"] = schema_format
+    plain_fallback = False
+    for _ in range(3):
+        if plain_fallback:
+            payload.pop("response_format", None)
+        else:
+            payload["response_format"] = schema_format
         try:
             r = httpx.post(f"{url}/chat/completions", json=payload, headers=headers, timeout=timeout + 30)
-            if r.status_code != 200:
-                continue
+        except Exception:
+            continue
+        if (r.status_code == 400 and not plain_fallback
+                and "schema" in r.text.lower()):
+            plain_fallback = True
+            continue
+        if r.status_code != 200:
+            continue
+        try:
             data = r.json()
             raw = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
             if isinstance(raw, list):
