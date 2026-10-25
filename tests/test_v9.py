@@ -367,11 +367,13 @@ def test_write_article_uses_cite_rule(tmp_path):
             seen["prompt"] = msgs[-1]["content"]
             if "Video title" in msgs[-1]["content"] or "First transcript" in msgs[-1]["content"]:
                 return '{"title": "T", "summary": "S", "kind": "procedure"}'
-            return ('{"heading": "H", "body": "Do it [0:04].", '
+            # Bodies below the usable-substance minimum are rejected, so the
+            # stub returns a short but substantive section here.
+            return ('{"heading": "H", "body": "Do it now following each step [0:04] carefully.", '
                     '"key_points": [], "warnings": []}')
 
     out = v9writer.write_article(settings, db, sid, backend=StubBackend())
-    assert out["sections"][0]["body"] == "Do it [0:04]."
+    assert out["sections"][0]["body"] == "Do it now following each step [0:04] carefully."
     assert "no source URL" in seen["prompt"]
 
 

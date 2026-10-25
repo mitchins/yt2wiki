@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,137 @@ log = logging.getLogger("yt2wiki.v9.run")
 
 V9_STAGES = ("v9_write", "v9_discover", "v9_select", "v9_caption", "v9_publish")
 BASE_STAGES = ("acquisition", "inspect", "transcribe", "frame_candidates")
+
+
+# Decision-trace vocabulary that must never reach reader-facing captions or
+# alt text (§4). Ranking scores, vetoes and judge reasons stay in
+# v9_report.json diagnostics; captions describe the frame or reference it
+# neutrally. Matched case-insensitively with word boundaries.
+_DECISION_TRACE = re.compile(
+    r"\b(candidate|incumbent|margin|veto|shortlist|refinement|"
+    r"re-?verification|adjudicat\w*|rank_reason|judge_reason|"
+    r"judge advised|subject probe|z1_fallback|\bz1\b)\w*",
+    re.IGNORECASE)
+
+
+def looks_like_decision_trace(text: str) -> bool:
+    """True when a caption/alt carries internal judge/rank reasoning."""
+    return bool(text and _DECISION_TRACE.search(text))
+
+
+def neutral_caption(heading: str) -> tuple[str, str]:
+    """Reader-safe caption and alt for a frame with no grounded description.
+
+    References the section subject (a neutral frame reference), never judge
+    reasoning and never invented visual details.
+    """
+    subject = (heading or "").strip()[:100] or "Illustration"
+    if subject.lower() == "source frame":
+        subject = "Illustration"
+    return f"Illustration for {subject}", subject
+
+
+def load_prev_captions(db, article_id: str) -> dict[str, dict[str, str]]:
+    """Captions worth preserving when their frame stays installed.
+
+    Human edits and benign earlier captions are kept verbatim; captions that
+    carry legacy decision-trace leakage are dropped so they regenerate
+    neutrally instead of republishing judge reasoning.
+    """
+    prev: dict[str, dict[str, str]] = {}
+    try:
+        prev_rows = db.query(
+            "SELECT frame_id, caption, alt_text FROM article_assets "
+            "WHERE article_id=?", (f"art9-{article_id}",))
+    except Exception:  # noqa: BLE001
+        return prev
+    for r in prev_rows:
+        cap = (r["caption"] or "").strip()
+        if not cap or cap.lower() == "source frame":
+            continue
+        if looks_like_decision_trace(cap):
+            continue
+        alt = (r["alt_text"] or "").strip()
+        prev[r["frame_id"]] = {"caption": cap, "alt_text": alt}
+    return prev
+
+
+def assign_captions(sections: list[dict[str, Any]],
+                    picks: dict[str, list[dict[str, Any]]],
+                    prev_captions: dict[str, dict[str, str]],
+                    *, enable_captions: bool) -> None:
+    """Attach reader-safe captions/alt text to the selected picks (in place).
+
+    Priority: preserved human/benign captions, then genuine vision
+    descriptions from the opt-in captioning pass, otherwise a neutral
+    section-subject reference. Internal judge/rank reasoning is never used.
+    """
+    for sec in sections:
+        plist = picks.get(sec["section_id"]) or []
+        if not plist:
+            continue
+        heading = sec.get("heading") or "Illustration"
+        for pick in plist:
+            prev = (prev_captions or {}).get(pick.get("frame_id"))
+            if prev:
+                pick["caption"] = prev["caption"]
+                pick["alt_text"] = prev.get("alt_text") or ""
+                pick["caption_source"] = "edited"
+                continue
+            if enable_captions and pick.get("caption") \
+                    and pick.get("caption_source") == "vision":
+                # Genuine vision description (opt-in pass): grounded, keep.
+                if not pick.get("alt_text"):
+                    pick["alt_text"] = (pick["caption"].split(".")[0]
+                                        or pick["caption"])[:120]
+                continue
+            cap, alt = neutral_caption(heading)
+            pick["caption"] = cap
+            pick["caption_source"] = "auto"
+            pick["alt_text"] = alt
+
+
+def effective_models(inference_snapshot: dict | None, db,
+                     source_id: str) -> dict[str, dict[str, Any] | None]:
+    """Job-captured provider identities behind each role (§5).
+
+    Answers "who actually did the work": the writer/vision entries come from
+    the inference snapshot captured at submission; the ASR entry prefers the
+    recorded identity behind the stored transcript (which survives transcript
+    reuse), falling back to the snapshot. Roles without trustworthy
+    information read None — the reader renders those as Unknown, never as a
+    guessed registry default.
+    """
+    snap = inference_snapshot or {}
+    out: dict[str, dict[str, Any] | None] = {}
+    for role in ("writer", "vision"):
+        entry = snap.get(role) or {}
+        if entry.get("provider") or entry.get("url") or entry.get("model"):
+            out[role] = {"provider": str(entry.get("provider") or "unknown"),
+                         "model": str(entry.get("model") or "unknown"),
+                         "url": str(entry.get("url") or ""),
+                         "remote": bool(str(entry.get("url") or "").startswith("http"))}
+        else:
+            out[role] = None
+    recorded = _recorded_asr_identity(db, source_id)
+    asr_entry = snap.get("asr") or {}
+    if isinstance(recorded, dict) and recorded.get("mode") == "captions":
+        out["asr"] = {"provider": "captions", "model": "", "url": "", "remote": False}
+    elif isinstance(recorded, dict) and (recorded.get("url") or recorded.get("model")):
+        out["asr"] = {
+            "provider": str(asr_entry.get("provider") or "unknown"),
+            "model": str(recorded.get("model") or asr_entry.get("model") or "unknown"),
+            "url": str(recorded.get("url") or asr_entry.get("url") or ""),
+            "remote": True,
+        }
+    elif asr_entry.get("provider") or asr_entry.get("url") or asr_entry.get("model"):
+        out["asr"] = {"provider": str(asr_entry.get("provider") or "unknown"),
+                      "model": str(asr_entry.get("model") or "unknown"),
+                      "url": str(asr_entry.get("url") or ""),
+                      "remote": bool(str(asr_entry.get("url") or "").startswith("http"))}
+    else:
+        out["asr"] = None
+    return out
 
 
 def _record(db, job_id: str, stage: str, state: str, metrics: dict | None = None,
@@ -306,9 +438,21 @@ def run_source(settings, db, service, source_id: str, *,
             return _rec
 
         stage("v9_write")
-        article = v9writer.write_article(settings, db, source_id,
-                                         inference_snapshot=inference_snapshot,
-                                         recorder=_v9_rec("v9_write"))
+        try:
+            article = v9writer.write_article(settings, db, source_id,
+                                             inference_snapshot=inference_snapshot,
+                                             recorder=_v9_rec("v9_write"))
+        except v9writer.SectionWriteError as exc:
+            # A required section is unusable after its bounded retries: the
+            # stage and the job fail visibly, naming the exact section. No
+            # selection or publication starts; any prior publication stays
+            # untouched because persist() is never reached.
+            _record(db, v9job, "v9_write", "failed", exc.metrics(),
+                    error=str(exc)[:500], started=t)
+            _finish_job(db, v9job, "failed", error=str(exc)[:500])
+            result.update({"ok": False, "error": str(exc)[:500],
+                           "failed_section": exc.metrics()})
+            return result
         _record(db, v9job, "v9_write", "done",
                 {"sections": len(article["sections"]), "kind": article["kind"],
                  "coverage": article["coverage"]}, started=t)
@@ -359,71 +503,13 @@ def run_source(settings, db, service, source_id: str, *,
                  "images": sum(len(v) for v in picks.values()),
                  "decisions": decisions}, started=t)
         result["selection"] = decisions
-        # Caption policy (A3/A4): reuse judge explanations as the "why" and
-        # section context as visible grounding, without asserting unseen text.
-        # This does not call the vision model anew; fresh descriptions would
-        # use the already-assigned provider (not enabled by default until
-        # the A5 sample qualifies). Preserve author edits for same frame ids.
-        decision_by_section = {d["section_id"]: d for d in decisions}
-        # Preserve edited captions/alt for frames that stay installed
-        prev_captions: dict[str, dict[str, str]] = {}
-        try:
-            prev_rows = db.query(
-                "SELECT frame_id, caption, alt_text FROM article_assets "
-                "WHERE article_id=?", (f"art9-{source_id}",))
-            for r in prev_rows:
-                # Only treat non-generic captions as edits worth keeping
-                cap = (r["caption"] or "").strip()
-                alt = (r["alt_text"] or "").strip()
-                if cap and cap.lower() != "source frame":
-                    prev_captions[r["frame_id"]] = {"caption": cap, "alt_text": alt}
-        except Exception:  # noqa: BLE001
-            pass
-        for sec in sections:
-            plist = picks.get(sec["section_id"]) or []
-            if not plist:
-                continue
-            dec = decision_by_section.get(sec["section_id"]) or {}
-            # Judge reason is pixel-grounded; rank reason is fallback
-            why = (dec.get("judge_reason") or dec.get("rank_reason") or "").strip()
-            # First sentence of why, truncated for caption
-            why_sent = why.split(".")[0].strip()[:160] if why else ""
-            for pick in plist:
-                if pick["frame_id"] in prev_captions:
-                    pick["caption"] = prev_captions[pick["frame_id"]]["caption"]
-                    pick["alt_text"] = prev_captions[pick["frame_id"]].get("alt_text") or ""
-                    pick["caption_source"] = "edited"
-                    continue
-                if enable_captions and pick.get("caption"):
-                    # Already captioned via vision in a prior run; keep but ensure alt
-                    if not pick.get("alt_text"):
-                        pick["alt_text"] = (pick["caption"].split(".")[0] or pick["caption"])[:120]
-                    pick["caption_source"] = pick.get("caption_source") or "vision"
-                    continue
-                # Auto caption from judge + section heading (no new inference)
-                heading = sec.get("heading") or "Illustration"
-                if why_sent:
-                    # Caption expresses visible content + why it illustrates
-                    cap = f"{why_sent} — illustrates {heading.lower()}"
-                else:
-                    cap = f"Illustration for {heading}"
-                # Keep concise, one sentence where possible
-                if len(cap) > 180:
-                    cap = cap[:177].rsplit(" ", 1)[0] + "…"
-                pick["caption"] = cap
-                pick["caption_source"] = "auto"
-                # Alt: concise visible description, no timestamps, no generic duplicate
-                alt = why_sent or heading
-                alt = alt.split(".")[0][:120]
-                # Strip timestamps if any slipped in
-                import re as _re
-                alt = _re.sub(r"\[\d{1,2}:\d{2}(?::\d{2})?\]", "", alt).strip(" –-")
-                pick["alt_text"] = alt if alt and alt.lower() != "source frame" else heading[:100]
-        if not enable_captions:
-            # Captions above are derived from already-available judge outputs,
-            # not fresh vision calls. The old per-frame caption generator stays
-            # opt-in until the A5 sample qualifies.
-            pass
+        # Caption policy (§4): judge/rank reasoning is diagnostics, never
+        # reader prose. Human edits and genuine vision descriptions are kept
+        # verbatim; everything else gets a neutral subject reference. This
+        # calls no vision model.
+        prev_captions = load_prev_captions(db, source_id)
+        assign_captions(sections, picks, prev_captions,
+                        enable_captions=enable_captions)
 
         # --- captions (optional feature, opt-in; failure never fatal) ---
         t = time.time()
@@ -468,9 +554,14 @@ def run_source(settings, db, service, source_id: str, *,
                   "settings_fingerprint": settings.fingerprint(),
                   "device_index": settings.device_index,
                   "device_map": _device_map(),
+                  # Registry assignments are diagnostics only: they can name
+                  # local models that never ran when remote inference served
+                  # the role (§5). The reader shows models_effective.
                   "models": {r: {"repo": settings.model(r).repo,
                                   "revision": settings.model(r).revision}
                              for r in ("asr", "vision", "text")},
+                  "models_effective": effective_models(
+                      inference_snapshot, db, source_id),
                   "git_commit": _git_commit(),
                   "timings": {"total_s": round(time.time() - t0, 3)},
                   "vram": _vram_snapshot(),

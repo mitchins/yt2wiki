@@ -15,22 +15,90 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from ..article import timestamp_url, timestamp_url_pattern
+from ..backends.remote_openai import TruncatedResponseError
 
 log = logging.getLogger("yt2wiki.v9.writer")
 
-TITLE_PROMPT = """You write concise technical documentation from a tutorial transcript.
+# Publication-correctness contract (editorial integrity, §1): a section gets
+# at most two writer attempts — the initial call plus one bounded retry.
+# Anything still unusable fails the writing stage and the job; a raw
+# transcript excerpt must never be published as article prose.
+WRITER_MAX_ATTEMPTS = 2
+
+# A section body shorter than this has no usable substance (the no-speech
+# path never reaches the model, so every model-written section must clear it).
+MIN_BODY_CHARS = 40
+
+
+class WriterError(RuntimeError):
+    """A writing failure with structured fields for stage metrics and the job log."""
+
+
+class SectionWriteError(WriterError):
+    """A required section (or the title) could not be generated.
+
+    Carries the stable plan identity and timestamp interval so the failure
+    names the exact section, plus the sanitised failure category, the attempt
+    count and a short diagnostic transcript excerpt (evidence only — never
+    published prose).
+    """
+
+    def __init__(self, section_id: str, heading: str, t_start: float, t_end: float,
+                 category: str, attempts: int, detail: str = "",
+                 excerpt: str = ""):
+        super().__init__(
+            f"section {section_id} ({t_start:.0f}s-{t_end:.0f}s) failed "
+            f"after {attempts} attempt(s): {category}"
+            + (f": {detail[:200]}" if detail else ""))
+        self.section_id = section_id
+        self.heading = heading
+        self.t_start = t_start
+        self.t_end = t_end
+        self.category = category
+        self.attempts = attempts
+        self.detail = detail
+        self.excerpt = excerpt
+
+    def metrics(self) -> dict[str, Any]:
+        return {
+            "section_id": self.section_id,
+            "heading": self.heading,
+            "t_start": self.t_start,
+            "t_end": self.t_end,
+            "category": self.category,
+            "attempts": self.attempts,
+            "detail": self.detail[:300],
+            # Diagnostic evidence for the failure: the input that could not be
+            # written. Stored in stage metrics, never published as prose.
+            "excerpt": self.excerpt[:1000],
+        }
+
+
+class _SectionInvalid(Exception):
+    """One writer response failed validation (retried or fatal at the call site)."""
+
+    def __init__(self, category: str, detail: str):
+        super().__init__(detail)
+        self.category = category
+        self.detail = detail
+
+TITLE_PROMPT = """You write concise technical documentation about a tutorial video's SUBJECT, for a reader who has not watched it.
+
+You are given chapter titles plus representative excerpts from the beginning, middle and end of the video. Do not summarise only the opening: represent the whole video, including later substantive chapters. Never describe the video, the creator or their community; describe what the subject achieves and how.
 
 Return JSON only: {"title": "...", "summary": "2-3 sentences", "kind": "procedure|explainer|experimental"}.
-Rules: title under 90 chars, no clickbait, summary states what the video achieves."""
+Rules: title under 90 chars, no clickbait, summary states what the reader will be able to do or understand. kind is "procedure" only when the video teaches concrete actions or instructions; otherwise "explainer"."""
 
-SECTION_PROMPT = """Write ONE documentation section from the transcript span below.
+SECTION_PROMPT = """Write ONE documentation section about the technical subject below, for a reader who has not watched the video.
+
+Your subject is the TOPIC of this span — not the video, the transcript, the speaker or the demonstration. Never narrate what the video, transcript, speaker or demonstration says, shows or covers. Write directly about the subject: what it is, how it is configured, what it does, what to expect.
 
 Context:
-- video title: {video_title}
-- section heading: {heading}
+- article title: {video_title}
+- section heading: {heading} (you may return a better subject-specific heading of at most 8 words; never a sentence about the video)
 - transcript span: {t_start:.1f}s - {t_end:.1f}s
 
-Transcript (timestamps in seconds):
+Transcript (evidence — quote exact commands, values, paths and timestamps from it; never invent steps, commands, settings or results):
 \"\"\"
 {transcript}
 \"\"\"
@@ -41,7 +109,9 @@ Return JSON only:
   "key_points": ["..."],
   "warnings": ["..."]}}
 Rules:
-- Only use what the narration states or clearly implies. Never invent commands, settings or steps.
+- Use only what the narration states or clearly implies. Never invent commands, settings, steps or results.
+- Explain supported concepts, configuration, operations, outcomes and limitations directly.
+- Omit sponsor pitches, community promotions, audience appeals and introductory filler.
 - Preserve prerequisites, corrections and failed attempts mentioned in the span.
 - Prefer specific source-supported detail over generic advice. No marketing language."""
 
@@ -73,13 +143,25 @@ def slug(text: str) -> str:
     return (s or "section")[:40]
 
 
+# Leading filler a transcript-fragment heading must skip: greetings, channel
+# business, "in this video" throat-clearing and hype openers carry no subject.
+_FILLER_OPENERS = re.compile(
+    r"^(hey|hi|hello|welcome|thanks|thank you|okay so|so |now |alright|"
+    r"in this video|today we|today i|let'?s (dive|jump|get)|make sure (you |to )?"
+    r"(like|subscribe)|don'?t forget to (like|subscribe)|before we (start|begin)|"
+    r"you guys|what'?s up|the (hottest|best|ultimate|coolest) (new )?"
+    r"(device|product|thing|gadget|video))\b",
+    re.IGNORECASE)
+
+
 def _heading_from_transcript(transcript: Sequence[dict[str, Any]],
                                t_start: float, t_end: float) -> str:
-    """Derive a concise heading from the transcript slice when no chapter exists.
+    """Derive a subject heading from the transcript slice when no chapter exists.
 
-    Uses the first substantive sentence in the window, trimmed to 5–7 words.
-    Falls back to 'Introduction' / 'Overview' style labels only when the
-    slice has no speech, preserving chronological structure without
+    Skips leading filler sentences (greetings, channel business, "in this
+    video" openers) and takes the first substantive sentence, trimmed to 5–7
+    content words. Falls back to 'Introduction' / 'Overview' style labels only
+    when the slice has no speech, preserving chronological structure without
     inventing operations.
     """
     # Collect text in window
@@ -90,10 +172,10 @@ def _heading_from_transcript(transcript: Sequence[dict[str, Any]],
         text = (r.get("text") or "").strip()
         if not text:
             continue
-        # Split into sentences, take first substantive one
+        # Split into sentences, take the first substantive non-filler one
         for sent in re.split(r"[.!?]+", text):
             sent = sent.strip()
-            if len(sent.split()) >= 4:
+            if len(sent.split()) >= 4 and not _FILLER_OPENERS.search(sent):
                 words = sent.split()
                 break
         if words:
@@ -134,6 +216,286 @@ def cite_rule(url: str | None) -> str:
     return ("cite timestamps ONLY as plain [m:ss] with no link, e.g. "
             "[0:04] (this upload has no source URL). Never write seconds "
             "like [159] or [159:0], never invent a URL")
+
+
+def _classify_error(exc: BaseException) -> tuple[str, bool]:
+    """Map a writer-call failure to (sanitised category, retryable).
+
+    Categories distinguish what the evidence permits: HTTP timeout,
+    transport/server errors, invalid JSON, server-side truncation and invalid
+    content. Unknown failures are labelled "error" and get one retry; a
+    persistent failure then fails the section loudly.
+    """
+    if isinstance(exc, TruncatedResponseError):
+        return "truncated", True
+    if isinstance(exc, _SectionInvalid):
+        # Editorial failures are corrected with a reinforced prompt; anything
+        # else structural gets one plain retry.
+        return exc.category, True
+    mod = type(exc).__module__ or ""
+    name = type(exc).__name__
+    if mod.startswith("httpx"):
+        if "Timeout" in name:
+            return "timeout", True
+        if name == "HTTPStatusError":
+            status = getattr(getattr(exc, "response", None), "status_code", 0) or 0
+            if status == 429 or status >= 500:
+                return "server", True
+            return "transport", False
+        return "transport", True
+    if isinstance(exc, ValueError):
+        # JSON extraction (extract_json) failures land here.
+        return "invalid_json", True
+    return "error", True
+
+
+def validate_section_response(out: Any, *, section_id: str, heading_fallback: str,
+                               excerpt: str = "") -> dict[str, Any]:
+    """Validate one writer response; return the normalised section fields.
+
+    Raises _SectionInvalid("invalid_content", ...) when the response is not a
+    usable section: not an object, empty body, leaked fallback marker, a raw
+    transcript dump, or structurally broken Markdown. Repaired or truncated
+    JSON is accepted only when every required field and content check passes.
+    """
+    if not isinstance(out, dict):
+        raise _SectionInvalid("invalid_content",
+                              f"response is {type(out).__name__}, not a JSON object")
+    body = str(out.get("body") or "").strip()
+    if len(body) < MIN_BODY_CHARS:
+        raise _SectionInvalid("invalid_content",
+                              f"empty body ({len(body)} chars)")
+    if "_Transcript excerpt" in body or "(model unavailable)" in body:
+        raise _SectionInvalid("invalid_content",
+                              "raw-transcript fallback marker leaked into body")
+    if body.count("```") % 2:
+        raise _SectionInvalid("invalid_content", "unclosed fenced code block")
+    if excerpt and _is_verbatim_dump(body, excerpt):
+        raise _SectionInvalid("invalid_content",
+                              "body is a raw transcript dump, not a section")
+    heading = str(out.get("heading") or "").strip()[:120] or heading_fallback
+
+    def _str_list(value: Any, limit: int) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(x).strip() for x in value if str(x).strip()][:limit]
+
+    return {"heading": heading, "body": body,
+            "key_points": _str_list(out.get("key_points"), 8),
+            "warnings": _str_list(out.get("warnings"), 6)}
+
+
+def validate_title_response(out: Any, **ignored: Any) -> dict[str, Any]:
+    """Validate the title-writer response; title itself is non-negotiable."""
+    if not isinstance(out, dict):
+        raise _SectionInvalid("invalid_content",
+                              f"response is {type(out).__name__}, not a JSON object")
+    if not str(out.get("title") or "").strip():
+        raise _SectionInvalid("invalid_content", "empty title")
+    return {"title": str(out["title"]).strip(),
+            "summary": str(out.get("summary") or "").strip(),
+            "kind": str(out.get("kind") or "explainer").strip().lower()}
+
+
+def _normalise_text(text: str) -> str:
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    text = re.sub(r"`[^`]*`", " ", text)
+    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"[#>*_\-]", " ", text)
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _is_verbatim_dump(body: str, excerpt: str) -> bool:
+    """True when the body is the input transcript, not a written section."""
+    nb, ne = _normalise_text(body), _normalise_text(excerpt)
+    if not nb or not ne:
+        return False
+    if nb in ne or ne in nb:
+        return True
+    if abs(len(nb) - len(ne)) > max(len(nb), len(ne)) * 0.2:
+        return False
+    import difflib
+    return difflib.SequenceMatcher(None, nb, ne, autojunk=True).ratio() > 0.9
+
+
+# Deterministic editorial check (§2): obvious metanarration and placeholder
+# leakage that must never ship in a standalone technical article. Code spans
+# are stripped before matching, and each pattern names the violated rule so a
+# bounded correction attempt can address it. Deliberately narrow: words like
+# "video" or "transcript" alone are legitimate technical subjects.
+_EDITORIAL_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bthe transcript (also )?(gives|shows|mentions|says|states|explains|"
+                r"describes|demonstrates|provides|covers|walks|notes|highlights|"
+                r"points out|examines|explores|details|looks at)\b", re.IGNORECASE),
+     "narrates the transcript instead of writing about the subject"),
+    (re.compile(r"\bthe video (covers|shows|demonstrates|explains|walks|is about|starts|"
+                r"begins|ends|also mentions|examines|explores|details|looks at|"
+                r"takes? a look at)\b", re.IGNORECASE),
+     "narrates the video instead of writing about the subject"),
+    (re.compile(r"\b(this video|the demonstration|the speaker|the creator|the narrator|"
+                r"the demonstrator) (covers|shows|demonstrates|explains|gives|walks|"
+                r"says|states|is about|examines|explores|details|looks at|"
+                r"takes? a look at)\b", re.IGNORECASE),
+     "narrates the speaker/demonstration instead of writing about the subject"),
+    (re.compile(r"\bin this video\b", re.IGNORECASE),
+     "locates content in the video rather than in the subject"),
+    (re.compile(r"\b(like and subscribe|subscribe to (the|this|my|our) channel|"
+                r"smash (that|the) (like|subscribe)|ring the bell)\b", re.IGNORECASE),
+     "audience appeal that does not belong in a technical article"),
+    (re.compile(r"\b(free school community|join (our|the|my) community|"
+                r"today'?s sponsor|sponsor(ed)? by|link in the description)\b",
+                re.IGNORECASE),
+     "promotion or sponsor pitch that does not belong in a technical article"),
+    (re.compile(r"\b(TODO|FIXME|XXX|Lorem ipsum|\[insert\b|\(insert\b|as an AI\b|"
+                r"as a language model\b)"),
+     "placeholder or test leakage"),
+]
+
+
+def editorial_violations(body: str) -> list[str]:
+    """Distinct violated editorial rules in a section body (empty when clean)."""
+    prose = _normalise_text(body)
+    found: list[str] = []
+    for pattern, rule in _EDITORIAL_PATTERNS:
+        if pattern.search(prose) and rule not in found:
+            found.append(rule)
+    return found
+
+
+def _correction_instruction(violations: list[str]) -> str:
+    items = "\n".join(f"- {v}" for v in violations)
+    return (
+        "Rewrite the section body to fix these editorial problems, keeping "
+        "every technical fact, command, value, path and timestamp exactly intact:\n"
+        f"{items}\n"
+        "Write about the technical SUBJECT for a reader who has not watched "
+        "the video. Do not narrate what the video, transcript, speaker or "
+        "demonstration says, shows or covers. Return JSON only with the same schema.")
+
+
+# A title that promises construction the transcript never shows (the "build
+# an agent from scratch" promotional intro) must not ship as a how-to title.
+_CONSTRUCTION_PROMISE = re.compile(
+    r"\b(build(?:ing)?|creat(?:e|ing)|mak(?:e|ing)|set ?up|setting ?up|"
+    r"from scratch|step.by.step|"
+    r"how to (build|create|make|set ?up|deploy|install))\b", re.IGNORECASE)
+
+
+def _title_promises_construction(title: str) -> bool:
+    return bool(_CONSTRUCTION_PROMISE.search(title or ""))
+
+
+def _title_context(segs: Sequence[dict[str, Any]],
+                   chapters: Sequence[dict[str, Any]] | None,
+                   duration_s: float | None) -> str:
+    """Bounded whole-video context for the title writer (no extra LLM pass).
+
+    Meaningful chapter labels plus sampled excerpts from the beginning, middle
+    and end, so later substantive chapters are represented — never just the
+    promotional opening.
+    """
+    parts: list[str] = []
+    if duration_s:
+        parts.append(f"Duration: {duration_s:.0f}s.")
+    if chapters:
+        lines = []
+        for ch in chapters[:20]:
+            try:
+                lo, hi = float(ch.get("start_time", 0)), float(ch.get("end_time", 0))
+                title = str(ch.get("title") or "").strip()
+            except (TypeError, ValueError):
+                continue
+            if title:
+                lines.append(f"- [{lo:.0f}s-{hi:.0f}s] {title[:80]}")
+        if lines:
+            parts.append("Chapters:\n" + "\n".join(lines))
+    n = len(segs)
+    # One sample per chapter midpoint (so later substantive chapters are
+    # always represented), plus the very first and last segments.
+    idxs = {0, 1, n - 2, n - 1}
+    starts = []
+    for r in segs:
+        try:
+            starts.append(float(r["start"]))
+        except (KeyError, TypeError, ValueError):
+            starts.append(float("inf"))
+    for ch in chapters or []:
+        try:
+            mid = (float(ch.get("start_time", 0)) + float(ch.get("end_time", 0))) / 2
+        except (TypeError, ValueError):
+            continue
+        best = min(range(n), key=lambda i: abs(starts[i] - mid)
+                   if starts[i] != float("inf") else float("inf"))
+        idxs.add(best)
+    picks = sorted(i for i in idxs if 0 <= i < n)[:16]
+    for i in picks:
+        r = segs[i]
+        try:
+            parts.append(f"[{float(r['start']):.0f}s] {(r.get('text') or '').strip()[:160]}")
+        except (KeyError, TypeError, ValueError):
+            continue
+    out = "\n".join(parts)
+    return out[:3000]
+
+
+_ACTION_VERBS = frozenset([
+    "run", "install", "configure", "set", "create", "open", "click", "type",
+    "paste", "copy", "download", "upload", "enable", "disable", "connect",
+    "select", "choose", "enter", "add", "remove", "delete", "edit", "save",
+    "build", "deploy", "start", "stop", "restart", "execute", "use", "go",
+    "navigate", "launch", "create", "update", "change", "switch", "toggle",
+    "check", "verify", "test", "send", "receive", "write", "read",
+    "import", "export"])
+_IMPERATIVE = None
+
+
+def _imperative_re():
+    global _IMPERATIVE
+    if _IMPERATIVE is None:
+        verb = "(?:{})".format("|".join(sorted(_ACTION_VERBS)))
+        _IMPERATIVE = re.compile(
+            rf"^(?:\d+[.)]\s*|[-*\u2022]\s*)?"
+            rf"(?:(?:then|next|now|also|just|simply|please)\s+)?{verb}\b",
+            re.IGNORECASE)
+    return _IMPERATIVE
+
+
+def _action_hits(sections: Sequence[dict[str, Any]]) -> int:
+    """Count source-supported action evidence in section bodies.
+
+    Imperative instruction sentences, fenced command blocks and explicit step
+    markers — the justification a `procedure` classification must stand on.
+    Sentences (not lines) are the unit, so a compact two-sentence 30-second
+    instruction still counts as actionable.
+    """
+    hits = 0
+    imperative = _imperative_re()
+    stepmark = re.compile(r"\bstep\s+\d+\b", re.IGNORECASE)
+    for sec in sections:
+        body = str(sec.get("body") or "")
+        prose = re.sub(r"```.*?```", "", body, flags=re.DOTALL)
+        for sent in re.split(r"[.!?]+\s*", prose):
+            if imperative.match(sent.strip()):
+                hits += 1
+        hits += len(stepmark.findall(prose))
+        hits += body.count("```") // 2  # each fenced block shows an action
+    return hits
+
+
+def justify_kind(kind: str, sections: Sequence[dict[str, Any]]) -> tuple[str, str]:
+    """Downgrade an unjustified `procedure` to `explainer`.
+
+    A procedure classification must be earned by actual source-supported
+    actions in the resulting content — a promotional introduction with no
+    instructions is an explainer, however useful-sounding. Returns the
+    (kind, note) pair; note is empty when the kind stands.
+    """
+    if kind != "procedure":
+        return kind, ""
+    if _action_hits(sections) >= 2:
+        return kind, ""
+    return ("explainer",
+            "downgraded from procedure: no source-supported actions in content")
 
 
 def plan_sections(transcript: Sequence[dict[str, Any]],
@@ -238,50 +600,170 @@ def write_article(settings, db, source_id: str, *, backend=None,
         with manager.acquire("text") as b:
             return b.chat_json(payload_msgs, **kw)
 
-    head = _chat(
-        [{"role": "system", "content": "Return JSON only."},
-         {"role": "user", "content": TITLE_PROMPT + f"\n\nVideo title: {video_title}\nFirst transcript lines:\n" +
-          "\n".join(f"[{float(r['start']):.1f}] {r['text'][:120]}" for r in segs[:12])}],
-        max_new_tokens=400, temperature=0.1)
-    title = str(head.get("title") or video_title)[:120]
-    summary = str(head.get("summary") or "")
-    kind = str(head.get("kind") or "explainer")
+    def _attempt(call, *, validate, editorial: bool, section_id: str, heading: str,
+                 t_start: float, t_end: float, excerpt: str = "") -> dict[str, Any]:
+        """One section through at most WRITER_MAX_ATTEMPTS writer calls.
+
+        Transport failures, invalid JSON, truncation and correctable editorial
+        problems get a single bounded retry; the second failure (or a
+        non-retryable one) raises SectionWriteError with the exact section,
+        interval, attempt count and sanitised category. The original plan
+        input, timestamp interval and stable section ID are preserved on the
+        error for stage metrics — never substituted with fallback prose.
+        """
+        last: tuple[str, str] | None = None
+        calls = 0
+        correction = ""
+        while calls < WRITER_MAX_ATTEMPTS:
+            calls += 1
+            try:
+                out = call(correction) if calls > 1 else call("")
+            except Exception as exc:  # noqa: BLE001 - classified below
+                category, retryable = _classify_error(exc)
+                last = (category, f"{type(exc).__name__}: {exc}"[:300])
+                log.warning("section %s attempt %d failed (%s): %s",
+                            section_id, calls, category, exc)
+                if retryable and calls < WRITER_MAX_ATTEMPTS:
+                    continue
+                break
+            try:
+                checked = validate(
+                    out, section_id=section_id, heading_fallback=heading,
+                    excerpt=excerpt)
+            except _SectionInvalid as bad:
+                last = (bad.category, bad.detail)
+                log.warning("section %s attempt %d invalid (%s): %s",
+                            section_id, calls, bad.category, bad.detail)
+                if calls < WRITER_MAX_ATTEMPTS:
+                    continue
+                break
+            problems = editorial_violations(checked["body"]) if editorial else []
+            if problems and calls < WRITER_MAX_ATTEMPTS:
+                # Bounded correction: one reinforced rewrite, facts intact.
+                correction = _correction_instruction(problems)
+                last = ("editorial", "; ".join(problems)[:300])
+                log.info("section %s attempt %d needs editorial correction: %s",
+                         section_id, calls, problems)
+                continue
+            if problems:
+                last = ("editorial", "; ".join(problems)[:300])
+                break
+            checked["attempts"] = calls
+            return checked
+        category, detail = last or ("error", "unknown failure")
+        raise SectionWriteError(section_id, heading, t_start, t_end,
+                                category, calls, detail, excerpt)
+
+    def _title_call(extra: str) -> dict[str, Any]:
+        context = _title_context(segs, chapters, srow["duration_s"])
+        user = (TITLE_PROMPT + f"\n\nVideo title: {video_title}\n{context}")
+        if extra:
+            user += ("\n\nCorrection: the previous reply was unusable. "
+                     "Return ONLY a JSON object with title, summary and kind.")
+        return _chat(
+            [{"role": "system", "content": "Return JSON only."},
+             {"role": "user", "content": user}],
+            max_new_tokens=400, temperature=0.1)
+
+    # Action evidence in the raw transcript: a title that promises
+    # construction while the transcript shows no actions is a promotional
+    # artefact, not a how-to title (§3).
+    transcript_hits = _action_hits([{"body": str(r.get("text") or "")}
+                                     for r in segs])
+
+    # The best title seen so far: a persistently narrating summary must not
+    # take a valid title down with it — the summary blanks, the title stands.
+    saved_title: dict[str, Any] = {"title": "", "kind": "explainer"}
+
+    def _title_validate(out: Any, **ignored: Any) -> dict[str, Any]:
+        checked = validate_title_response(out)
+        if transcript_hits == 0 and _title_promises_construction(checked["title"]):
+            raise _SectionInvalid(
+                "invalid_content",
+                "title promises construction the transcript never shows")
+        problems = editorial_violations(checked["summary"] or "")
+        if problems:
+            if str(checked["title"]).strip():
+                saved_title["title"] = str(checked["title"]).strip()[:120]
+                saved_title["kind"] = checked["kind"]
+            raise _SectionInvalid("editorial", "; ".join(problems))
+        return checked
+
+    title_fallback = ""
+    try:
+        thead = _attempt(_title_call, validate=_title_validate, editorial=False,
+                         section_id="title", heading="title",
+                         t_start=0.0, t_end=0.0)
+    except SectionWriteError as exc:
+        if exc.section_id == "title" and exc.category == "editorial" and saved_title["title"]:
+            # Valid title, unfixable summary narration: keep the title, drop
+            # the summary rather than fail the job over two sentences.
+            log.warning("summary neutralised after editorial failure: %s", exc)
+            thead = {"title": saved_title["title"], "summary": "",
+                     "kind": saved_title["kind"]}
+            title_fallback = "summary blanked after editorial failure"
+        elif transcript_hits == 0 and exc.section_id == "title":
+            # Nothing actionable to title: fall back to the source's own title
+            # rather than publish an invented construction promise.
+            log.warning("title neutralised to source title: %s", exc)
+            title_fallback = "neutralised to source title: transcript shows no actions"
+            thead = {"title": video_title, "summary": "", "kind": "explainer"}
+        else:
+            raise
+    title = str(thead.get("title") or video_title)[:120]
+    summary = str(thead.get("summary") or "")
+    kind = str(thead.get("kind") or "explainer").strip().lower()
+    if kind not in ("procedure", "explainer", "experimental"):
+        kind = "explainer"
 
     sections: list[V9Section] = []
     represented: list[tuple[float, float]] = []
     for p in plan:
         text = section_transcript(segs, p["t_start"], p["t_end"])
         if not text.strip():
-            body = "_No speech in this span._"
-            out = {"heading": p["heading"], "body": body, "key_points": [], "warnings": []}
+            out = {"heading": p["heading"], "body": "_No speech in this span._",
+                   "key_points": [], "warnings": [], "attempts": 0}
         else:
-            try:
-                out = _chat(
+            def _section_call(extra: str, _p=p, _text=text) -> dict[str, Any]:
+                user = SECTION_PROMPT.format(
+                    video_title=video_title, heading=_p["heading"],
+                    t_start=_p["t_start"], t_end=_p["t_end"], transcript=_text,
+                    cite_rule=rule)
+                if extra:
+                    user += "\n\n" + extra
+                return _chat(
                     [{"role": "system", "content": "Return JSON only."},
-                      {"role": "user", "content": SECTION_PROMPT.format(
-                          video_title=video_title, heading=p["heading"],
-                          t_start=p["t_start"], t_end=p["t_end"], transcript=text,
-                          cite_rule=rule)}],
+                     {"role": "user", "content": user}],
                     max_new_tokens=1600, temperature=0.15)
-                if not isinstance(out, dict) or not str(out.get("body", "")).strip():
-                    raise ValueError("empty section body")
-            except Exception as exc:  # noqa: BLE001 - article must survive model hiccups
-                log.warning("section %s fallback: %s", p["section_id"], exc)
-                out = {"heading": p["heading"],
-                       "body": f"_Transcript excerpt (model unavailable):_\n\n{text[:1500]}",
-                       "key_points": [], "warnings": []}
+
+            out = _attempt(_section_call, validate=validate_section_response,
+                           editorial=True, section_id=p["section_id"],
+                           heading=p["heading"], t_start=p["t_start"],
+                           t_end=p["t_end"], excerpt=text)
+        # A writer-suggested heading must itself be subject-specific; a
+        # narrating heading falls back to the stable plan heading.
+        heading = str(out.get("heading") or p["heading"])
+        if heading != p["heading"] and editorial_violations(heading):
+            heading = p["heading"]
         sections.append(V9Section(
-            section_id=p["section_id"], heading=str(out.get("heading") or p["heading"]),
+            section_id=p["section_id"], heading=heading,
             body=str(out.get("body", "")).strip(), t_start=p["t_start"], t_end=p["t_end"],
             key_points=[str(x) for x in (out.get("key_points") or [])][:8],
             warnings=[str(x) for x in (out.get("warnings") or [])][:6]))
         represented.append((p["t_start"], p["t_end"]))
 
+    kind, kind_note = justify_kind(kind, [s.to_dict() for s in sections])
+    coverage: dict[str, Any] = {
+        "admitted_windows": admitted, "represented_windows": represented,
+        "n_sections": len(sections),
+        "transcript_chars": sum(len(r["text"]) for r in segs)}
+    if kind_note:
+        coverage["kind_adjusted"] = kind_note
+    if title_fallback:
+        coverage["title_adjusted"] = title_fallback
     return {
-        "title": title, "summary": summary, "kind": kind if kind in ("procedure", "explainer", "experimental") else "explainer",
+        "title": title, "summary": summary, "kind": kind,
         "sections": [s.to_dict() for s in sections],
-        "coverage": {"admitted_windows": admitted, "represented_windows": represented,
-                     "n_sections": len(sections),
-                     "transcript_chars": sum(len(r["text"]) for r in segs)},
+        "coverage": coverage,
         "elapsed_s": round(time.time() - started, 3),
     }

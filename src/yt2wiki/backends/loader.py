@@ -413,6 +413,13 @@ def _role_timeout(role: str, raw: Any) -> float:
             return max(60.0, float(os.environ.get("YT2WIKI_ASR_TIMEOUT") or 300.0))
         except ValueError:
             return 300.0
+    if role == "text":
+        # Long structured sections can take a minute on a shared server; the
+        # operator may tune this, but it stays a bounded per-request timeout.
+        try:
+            return float(os.environ.get("YT2WIKI_WRITER_TIMEOUT") or 90.0)
+        except ValueError:
+            return 90.0
     return 90.0
 
 

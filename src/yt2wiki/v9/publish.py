@@ -17,6 +17,7 @@ from ..generations import (
     prepare_generation,
     promoted_stage,
 )
+from .run import looks_like_decision_trace, neutral_caption
 
 log = logging.getLogger("yt2wiki.v9.publish")
 
@@ -144,6 +145,19 @@ def _strip_inline_timestamp_links(body: str) -> str:
     return body.strip()
 
 
+def _reader_safe_caption(cap: str, alt: str, heading: str) -> tuple[str, str]:
+    """Final guard: no decision-trace language in reader-facing image text.
+
+    The caption policy already assigns neutral captions; this catches anything
+    stale that slipped through (e.g. a persisted pick from an older build).
+    Markdown, reader HTML, standalone HTML and ZIP exports all render these
+    same strings, so one guard covers every export.
+    """
+    if looks_like_decision_trace(cap) or looks_like_decision_trace(alt):
+        return neutral_caption(heading)
+    return cap, alt
+
+
 def assemble_markdown(article_title: str, summary: str, sections: list[dict[str, Any]],
                       picks: dict[str, list[dict[str, Any]]],
                       provenance: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
@@ -192,8 +206,11 @@ def assemble_markdown(article_title: str, summary: str, sections: list[dict[str,
             body = _strip_bare_float_ranges(body, t0, t1)
             # Separate data from prose: pull per-sentence citations into one section ref
             body = _strip_inline_timestamp_links(body)
-            # Collapse any blank lines that stripping left behind
             import re as _re
+            # Writer-emitted ## subheadings would escape their section and
+            # pollute the outline/TOC: demote one level (structure fix only).
+            body = _re.sub(r"(?m)^## ", "### ", body)
+            # Collapse any blank lines that stripping left behind
             body = _re.sub(r"\n{3,}", "\n\n", body).strip()
             if body:
                 lines.append(body)
@@ -218,6 +235,7 @@ def assemble_markdown(article_title: str, summary: str, sections: list[dict[str,
             alt = alt_raw.replace("]", ")").replace("[", "(")[:180] or cap.replace("]", ")").replace("[", "(")
             if not alt.strip() or alt.lower() == "source frame":
                 alt = f"Illustration for {sec['heading']}"[:120]
+            cap, alt = _reader_safe_caption(cap, alt, sec["heading"])
             lines.append(f"![{alt}](assets/{fname})")
             lines.append("")
             if link := timestamp_url(provenance.get("url"), pick.get("t")):

@@ -14,7 +14,20 @@ from ..config import ModelSpec
 from ..gpu import BackendReport
 from .base import BaseBackend
 
-log = logging.getLogger("yt2wiki.remote")
+log = logging.getLogger("yt2w.remote")
+
+
+class TruncatedResponseError(RuntimeError):
+    """The server stopped generation at its token limit (`finish_reason="length"`).
+
+    Carries the partial text for diagnostics. Callers must not publish the
+    partial content as a complete answer; the writer treats this as a
+    recoverable failure with a bounded retry, then fails the section loudly.
+    """
+
+    def __init__(self, partial: str = ""):
+        super().__init__(f"remote generation truncated at token limit ({len(partial)} chars partial)")
+        self.partial = partial
 
 class RemoteOpenAIBackend(BaseBackend):
     def __init__(self, spec: ModelSpec, variant: dict[str, Any], device: str, index: int | None, *, base_url: str, model: str = "", api_key_env: str = "", timeout: float = 60.0):
@@ -24,6 +37,7 @@ class RemoteOpenAIBackend(BaseBackend):
         self.api_key_env = api_key_env
         self.timeout = timeout
         self._headers = {}
+        self.last_finish_reason: str | None = None
         if api_key_env:
             key = os.environ.get(api_key_env, "")
             if key:
@@ -68,7 +82,14 @@ class RemoteOpenAIBackend(BaseBackend):
         data = self._post(payload)
         # OpenAI-compatible response
         try:
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            self.last_finish_reason = choice.get("finish_reason")
+            if self.last_finish_reason == "length":
+                partial = choice.get("message", {}).get("content") or ""
+                if isinstance(partial, list):
+                    partial = "\n".join(p.get("text", "") for p in partial if isinstance(p, dict))
+                raise TruncatedResponseError(str(partial or "").strip())
+            content = choice["message"]["content"]
             if isinstance(content, list):
                 # multimodal content list
                 parts = [p.get("text","") for p in content if isinstance(p, dict)]
@@ -80,6 +101,8 @@ class RemoteOpenAIBackend(BaseBackend):
                 # If model put answer in reasoning (rare), fall back
                 text = reasoning.strip()
             return text
+        except TruncatedResponseError:
+            raise
         except Exception as exc:
             raise RuntimeError(f"remote chat parse failed: {exc} payload={data}") from exc
 
