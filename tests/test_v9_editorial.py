@@ -911,3 +911,130 @@ def test_writer_timeout_configurable(monkeypatch):
     assert _role_timeout("text", None) == 90.0
     monkeypatch.delenv("YT2WIKI_WRITER_TIMEOUT", raising=False)
     assert _role_timeout("text", None) == 90.0
+
+
+# --------------------------------------------------------------------------
+# RC01 dispositions: CodeRabbit findings reproduced before fixing.
+
+def test_rc01_writer_timeout_rejects_nonfinite_and_nonpositive(monkeypatch):
+    from yt2wiki.backends.loader import _role_timeout
+    for bad in ("0", "-5", "inf", "-inf", "nan"):
+        monkeypatch.setenv("YT2WIKI_WRITER_TIMEOUT", bad)
+        assert _role_timeout("text", None) == 90.0
+    monkeypatch.setenv("YT2WIKI_WRITER_TIMEOUT", "12.5")
+    assert _role_timeout("text", None) == 12.5
+
+
+def test_rc01_heading_demotion_preserves_fenced_code():
+    from yt2wiki.v9 import publish as P
+    body = ("Intro line.\n\n```bash\n## not a heading\ndeploy --flag\n```\n\n"
+            "## Real sub\n\nMore prose.")
+    sections = [{"section_id": "s1", "heading": "H", "body": body,
+                 "t_start": 0.0, "t_end": 10.0}]
+    md, _ = P.assemble_markdown("T", "", sections, {}, {"url": None})
+    assert "```bash\n## not a heading" in md
+    assert "\n### Real sub" in md
+
+
+def test_rc01_persist_sanitizes_asset_captions_at_boundary(tmp_path):
+    from yt2wiki.v9 import publish as P
+    from yt2wiki.v9 import run as R
+    settings, db = _mkdb(tmp_path, "s-leak",
+                         [(0.0, 60.0, "Open the dashboard and click the settings tab.")],
+                         chapters=[(0, 60, "Setup")], duration=60.0,
+                         origin_url=None)
+    jid = _mkjob(db, "s-leak")
+    frame = settings.paths.root / "frame-f-9.jpg"
+    frame.write_bytes(b"\xff\xd8\xff\xe0fake-jpeg\xff\xd9")
+    sections = [{"section_id": "sec-01-setup", "heading": "Setup",
+                 "body": "Open the dashboard and click the settings tab.",
+                 "t_start": 0.0, "t_end": 60.0, "key_points": [], "warnings": []}]
+    picks = {"sec-01-setup": [{"frame_id": "f-9", "t": 5.0, "path": str(frame),
+                               "caption": _LEAK, "alt_text": _LEAK}]}
+    md, _ = P.assemble_markdown("T", "", sections, picks, {"url": None})
+    P.persist(settings, db, article_id="art9-s-leak", source_id="s-leak",
+              job_id=jid, title="T", markdown=md, sections=sections,
+              picks=picks, provenance={"url": None, "fingerprint": "fp",
+                                       "profile": "compact"},
+              report={"profile": "compact"}, inference_snapshot=None)
+    row = db.query_one("SELECT caption, alt_text FROM article_assets "
+                       "WHERE article_id=?", ("art9-s-leak",))
+    assert not R.looks_like_decision_trace(row["caption"])
+    assert not R.looks_like_decision_trace(row["alt_text"])
+    assert row["caption"] == "Illustration for Setup"
+
+
+def test_rc01_neutral_caption_replaced_on_regeneration(tmp_path):
+    from yt2wiki.v9 import run as R
+    settings = Settings.load(data_dir=tmp_path, profile="compact", device_index=None)
+    db = Database(settings.paths.db_path)
+    db.migrate()
+    db.execute("INSERT INTO sources(source_id, kind, title, created_at) VALUES(?,?,?,?)",
+               ("s-neu", "youtube", "T", time.time()))
+    db.execute("INSERT INTO articles(article_id, source_id, title, markdown, html, version, "
+               "status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+               ("art9-s-neu", "s-neu", "T", "# T\n", "<h1>T</h1>", 1, "published",
+                time.time(), time.time()))
+    db.execute("INSERT INTO article_assets(asset_id, article_id, frame_id, path, caption, "
+               "alt_text, created_at) VALUES(?,?,?,?,?,?,?)",
+               ("a1", "art9-s-neu", "f1", "/p", "Illustration for Old heading",
+                "Old heading", time.time()))
+    prev = R.load_prev_captions(db, "s-neu")
+    assert "f1" not in prev  # minted placeholder, not a human edit
+    sections = [{"section_id": "s", "heading": "New heading"}]
+    picks = {"s": [{"frame_id": "f1"}]}
+    R.assign_captions(sections, picks, prev, enable_captions=False)
+    assert picks["s"][0]["caption"] == "Illustration for New heading"
+    assert picks["s"][0]["caption_source"] == "auto"
+
+
+def test_rc01_verbatim_dump_ignores_timestamp_prefixes():
+    rows = [{"start": a, "end": b, "text": t} for a, b, t in HERMES_TWO_SETTINGS]
+    excerpt = W.section_transcript(rows, 630.0, 740.0)
+    assert "[634.0-639.3]" in excerpt  # prefixes really present
+    body = " ".join(t for _, _, t in HERMES_TWO_SETTINGS)
+    assert W._is_verbatim_dump(body, excerpt) is True
+    other = ("Open the dashboard and click the settings tab to configure it. "
+             "Then save and restart the service.")
+    assert W._is_verbatim_dump(other, excerpt) is False
+
+
+def test_rc01_placeholder_case_insensitive():
+    assert W.editorial_violations("TODO: fill in the command later") != []
+    assert W.editorial_violations("FIXME handle the empty case") != []
+    assert W.editorial_violations("Lorem ipsum dolor sit amet") != []
+    assert W.editorial_violations("As an AI, I will help") != []
+    assert W.editorial_violations(
+        "Open the dashboard and click save.") == []
+
+
+def test_rc01_title_context_retains_final_segments():
+    segs = [{"start": float(i * 10), "text": f"segment {i} content here yes"}
+            for i in range(100)]
+    chapters = [{"start_time": i * 70.0, "end_time": (i + 1) * 70.0,
+                 "title": f"Chapter {i} topic"} for i in range(14)]
+    ctx = W._title_context(segs, chapters, 1000.0)
+    assert "segment 99" in ctx
+    assert "Chapter 13" in ctx
+    assert len(ctx) <= 3000
+
+
+def test_rc01_unknown_report_identity_yields_to_manifest(tmp_path):
+    from yt2wiki.web import views
+    settings = Settings.load(data_dir=tmp_path, profile="compact", device_index=None)
+    db = Database(settings.paths.db_path)
+    db.migrate()
+    gdir = settings.paths.article_dir("art9-x") / "generations" / "gen-1"
+    gdir.mkdir(parents=True)
+    (gdir / "manifest.json").write_text(json.dumps(
+        {"providers": {"writer": {"provider": "halogen",
+                                 "model": "halogen-qwen3.8-flash-next",
+                                 "url": "http://192.0.2.10:8731/v1"}}}),
+        encoding="utf-8")
+    report = {"models_effective": {
+        "text": {"provider": "unknown", "model": "unknown"},
+        "vision": {"provider": "unknown", "model": "unknown"},
+        "asr": {"provider": "unknown", "model": "unknown"}}}
+    eff = views.effective_models_for_report(db, settings.paths, "art9-x", report)
+    assert eff["text"]["provider"] == "halogen"
+    assert eff["text"]["model"] == "halogen-qwen3.8-flash-next"

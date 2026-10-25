@@ -31,6 +31,18 @@ def looks_like_decision_trace(text: str) -> bool:
     return bool(text and _DECISION_TRACE.search(text))
 
 
+# Placeholder captions minted by assign_captions when no grounded description
+# exists. They carry the section heading they were minted for, so a stored
+# one is stale by definition on regeneration: it keeps the old heading and
+# — worse — blocks the opt-in vision caption pass. Dropped on load so the
+# frame is recaptioned for its current section.
+_NEUTRAL_CAPTION = re.compile(r"^illustration for .+", re.IGNORECASE)
+
+
+def _is_neutral_caption(cap: str) -> bool:
+    return bool(cap and _NEUTRAL_CAPTION.match(cap.strip()))
+
+
 def neutral_caption(heading: str) -> tuple[str, str]:
     """Reader-safe caption and alt for a frame with no grounded description.
 
@@ -62,6 +74,10 @@ def load_prev_captions(db, article_id: str) -> dict[str, dict[str, str]]:
         if not cap or cap.lower() == "source frame":
             continue
         if looks_like_decision_trace(cap):
+            continue
+        if _is_neutral_caption(cap):
+            # Minted placeholder, not a human edit: recaption for the
+            # current heading (and stay replaceable by the vision pass).
             continue
         alt = (r["alt_text"] or "").strip()
         prev[r["frame_id"]] = {"caption": cap, "alt_text": alt}

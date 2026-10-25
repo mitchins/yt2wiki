@@ -158,6 +158,19 @@ def _reader_safe_caption(cap: str, alt: str, heading: str) -> tuple[str, str]:
     return cap, alt
 
 
+def _demote_headings_outside_fences(body: str) -> str:
+    """Demote writer-emitted ## subheadings one level, leaving code verbatim.
+
+    Fenced blocks (even unclosed ones) are preserved untouched: only the
+    even-indexed spans outside ``` fences are rewritten.
+    """
+    import re as _re
+    parts = body.split("```")
+    for i in range(0, len(parts), 2):
+        parts[i] = _re.sub(r"(?m)^## ", "### ", parts[i])
+    return "```".join(parts)
+
+
 def assemble_markdown(article_title: str, summary: str, sections: list[dict[str, Any]],
                       picks: dict[str, list[dict[str, Any]]],
                       provenance: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
@@ -209,7 +222,7 @@ def assemble_markdown(article_title: str, summary: str, sections: list[dict[str,
             import re as _re
             # Writer-emitted ## subheadings would escape their section and
             # pollute the outline/TOC: demote one level (structure fix only).
-            body = _re.sub(r"(?m)^## ", "### ", body)
+            body = _demote_headings_outside_fences(body)
             # Collapse any blank lines that stripping left behind
             body = _re.sub(r"\n{3,}", "\n\n", body).strip()
             if body:
@@ -411,7 +424,9 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
     # a missing or failed copy must fail visibly, not publish a broken article.
     # Rows reference the canonical paths they will occupy after promotion.
     asset_rows = _asset_rows(settings, stage_assets, picks, article_id,
-                             record_dir=canonical_assets)
+                              record_dir=canonical_assets,
+                              headings={s["section_id"]: s.get("heading") or "Illustration"
+                                        for s in sections})
     (stage / "article.md").write_text(markdown, encoding="utf-8")
     body_html = markdown_to_html(markdown)
     html = render_html(article, body_html, embed_images=False, asset_dir=stage_assets)
@@ -500,10 +515,13 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
 
 
 def _asset_rows(settings, assets: Path, picks: dict[str, list[dict[str, Any]]],
-                article_id: str, record_dir: Path | None = None):
+                article_id: str, record_dir: Path | None = None,
+                headings: dict[str, str] | None = None):
     rows = []
     record = record_dir if record_dir is not None else assets
-    for plist in picks.values():
+    by_section = headings or {}
+    for section_id, plist in picks.items():
+        heading = by_section.get(section_id) or "Illustration"
         for pick in plist[:2]:
             fid = pick["frame_id"]
             src = Path(pick.get("path", ""))
@@ -519,7 +537,12 @@ def _asset_rows(settings, assets: Path, picks: dict[str, list[dict[str, Any]]],
                 raise RuntimeError(f"asset {fname} not installed at {dest}")
             # Rows always reference the canonical location the file will
             # occupy after promotion, even when installing into a stage.
+            # Same reader-safe guard as the markdown path: the reader loads
+            # captions from article_assets, so raw decision-trace text must
+            # never be persisted here either.
+            cap, alt = _reader_safe_caption(pick.get("caption", ""),
+                                            pick.get("alt_text", ""), heading)
             rows.append({"asset_id": f"{article_id}-asset-{fid}",
                          "frame_id": fid, "path": str(record / fname),
-                         "caption": pick.get("caption", ""), "alt_text": pick.get("alt_text", "")})
+                         "caption": cap, "alt_text": alt})
     return rows

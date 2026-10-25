@@ -297,18 +297,33 @@ def validate_title_response(out: Any, **ignored: Any) -> dict[str, Any]:
             "kind": str(out.get("kind") or "explainer").strip().lower()}
 
 
-def _normalise_text(text: str) -> str:
+# section_transcript prefixes every line with its span ([633.9-639.3] ...).
+# A body that copies the narration without those prefixes is still a raw
+# dump, so both sides are compared with the prefixes removed.
+_TS_PREFIX = re.compile(r"(?m)^\[\d+(?:\.\d+)?-\d+(?:\.\d+)?\]\s*")
+
+
+def _normalise_text(text: str, lower: bool = True) -> str:
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     text = re.sub(r"`[^`]*`", " ", text)
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"[#>*_\-]", " ", text)
-    return re.sub(r"\s+", " ", text).strip().lower()
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.lower() if lower else text
 
 
 def _is_verbatim_dump(body: str, excerpt: str) -> bool:
     """True when the body is the input transcript, not a written section."""
-    nb, ne = _normalise_text(body), _normalise_text(excerpt)
+    # Strip span prefixes first: normalisation collapses newlines, so the
+    # line-anchored pattern would no longer match afterwards.
+    nb = _normalise_text(_TS_PREFIX.sub("", body or ""))
+    ne = _normalise_text(_TS_PREFIX.sub("", excerpt or ""))
     if not nb or not ne:
+        return False
+    # Scale floor: below ~500 excerpt chars a near-verbatim body is
+    # legitimate concise writing (a short span restated), not a section-scale
+    # transcript dump. Containment/similarity cannot tell them apart.
+    if len(ne) < 500:
         return False
     if nb in ne or ne in nb:
         return True
@@ -347,14 +362,14 @@ _EDITORIAL_PATTERNS: list[tuple[re.Pattern, str]] = [
                 re.IGNORECASE),
      "promotion or sponsor pitch that does not belong in a technical article"),
     (re.compile(r"\b(TODO|FIXME|XXX|Lorem ipsum|\[insert\b|\(insert\b|as an AI\b|"
-                r"as a language model\b)"),
+                r"as a language model\b)", re.IGNORECASE),
      "placeholder or test leakage"),
 ]
 
 
 def editorial_violations(body: str) -> list[str]:
     """Distinct violated editorial rules in a section body (empty when clean)."""
-    prose = _normalise_text(body)
+    prose = _normalise_text(body, lower=False)
     found: list[str] = []
     for pattern, rule in _EDITORIAL_PATTERNS:
         if pattern.search(prose) and rule not in found:
@@ -385,6 +400,22 @@ def _title_promises_construction(title: str) -> bool:
     return bool(_CONSTRUCTION_PROMISE.search(title or ""))
 
 
+# Character budgets for the bounded title context: chapters get their own
+# share so sampled excerpts always fit, and the 3000-char total is a
+# backstop, never the mechanism that silently drops the video's tail.
+_TITLE_BUDGET = 3000
+_TITLE_CHAPTER_BUDGET = 1200
+_TITLE_SAMPLES = 16
+
+
+def _thin_middle(items: list, limit: int) -> list:
+    """Drop middle items evenly until len fits, always keeping both ends."""
+    items = list(items)
+    while len(items) > limit and len(items) > 2:
+        del items[len(items) // 2]
+    return items[:limit]
+
+
 def _title_context(segs: Sequence[dict[str, Any]],
                    chapters: Sequence[dict[str, Any]] | None,
                    duration_s: float | None) -> str:
@@ -408,7 +439,12 @@ def _title_context(segs: Sequence[dict[str, Any]],
             if title:
                 lines.append(f"- [{lo:.0f}s-{hi:.0f}s] {title[:80]}")
         if lines:
-            parts.append("Chapters:\n" + "\n".join(lines))
+            # Own character budget: thin middle chapters evenly so the
+            # sampled excerpts below still fit and the tail is never cut.
+            while len("Chapters:\n" + "\n".join(lines)) > _TITLE_CHAPTER_BUDGET \
+                    and len(lines) > 2:
+                lines = _thin_middle(lines, len(lines) - 1)
+            parts.append(("Chapters:\n" + "\n".join(lines))[:_TITLE_CHAPTER_BUDGET])
     n = len(segs)
     # One sample per chapter midpoint (so later substantive chapters are
     # always represented), plus the very first and last segments.
@@ -427,15 +463,33 @@ def _title_context(segs: Sequence[dict[str, Any]],
         best = min(range(n), key=lambda i: abs(starts[i] - mid)
                    if starts[i] != float("inf") else float("inf"))
         idxs.add(best)
-    picks = sorted(i for i in idxs if 0 <= i < n)[:16]
+    # Even subsample across the whole video — never an earliest-prefix
+    # truncation that drops the final chapters/segments first.
+    ordered = sorted(i for i in idxs if 0 <= i < n)
+    if len(ordered) > _TITLE_SAMPLES:
+        inner = _thin_middle(ordered[1:-1], _TITLE_SAMPLES - 2)
+        picks = sorted(set([ordered[0]] + inner + [ordered[-1]]))
+    else:
+        picks = ordered
+    rendered = []
     for i in picks:
         r = segs[i]
         try:
-            parts.append(f"[{float(r['start']):.0f}s] {(r.get('text') or '').strip()[:160]}")
+            rendered.append(f"[{float(r['start']):.0f}s] "
+                            f"{(r.get('text') or '').strip()[:160]}")
         except (KeyError, TypeError, ValueError):
             continue
+    # Samples share the remaining budget after duration + chapters; thin
+    # middles first so the final segment excerpt always survives. Joining
+    # costs one newline per rendered line.
+    head = "\n".join(parts)
+    room = _TITLE_BUDGET - len(head)
+    while len(rendered) > 2 and \
+            sum(len(x) for x in rendered) + len(rendered) > room:
+        rendered = _thin_middle(rendered, len(rendered) - 1)
+    parts.extend(_thin_middle(rendered, _TITLE_SAMPLES))
     out = "\n".join(parts)
-    return out[:3000]
+    return out[:_TITLE_BUDGET]
 
 
 _ACTION_VERBS = frozenset([

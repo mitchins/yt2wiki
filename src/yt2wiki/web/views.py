@@ -69,7 +69,10 @@ def effective_models_for_report(db, paths, article_id: str,
     if isinstance(eff, dict):
         for role, entry in eff.items():
             key = _ROLE_ALIASES.get(role)
-            if key and key not in merged:
+            # An "unknown" report entry carries no information: leave the
+            # role empty so the manifest fallback below can supply the
+            # recorded identity instead of blocking it.
+            if key and key not in merged and _coerce_identity(entry) is not None:
                 merged[key] = entry
     if not all(merged.get(r) for r in ("text", "vision", "asr")):
         for role, entry in _manifest_providers(db, paths, article_id).items():
