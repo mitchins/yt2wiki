@@ -37,7 +37,7 @@ Transcript (timestamps in seconds):
 
 Return JSON only:
 {{"heading": {heading!r},
-  "body": "markdown: short paragraphs and bullets; keep exact commands, values, paths verbatim; {cite_rule}",
+  "body": "short paragraphs and bullets; keep exact commands, values, paths verbatim; {cite_rule}",
   "key_points": ["..."],
   "warnings": ["..."]}}
 Rules:

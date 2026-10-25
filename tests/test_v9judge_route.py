@@ -208,6 +208,16 @@ def test_vision_projectors_are_model_specific():
     assert LlamaServerVLM is not None  # backend importable; resolution is by filename
 
 
+def test_assemble_strips_schema_example_leakage():
+    from yt2wiki.v9 import publish as P
+    sections = [{"section_id": "s", "heading": "H",
+                 "body": "markdown: Do the thing with the widget.",
+                 "t_start": 0.0, "t_end": 60.0}]
+    md, _ = P.assemble_markdown("T", "S", sections, {}, {"url": None})
+    assert "markdown:" not in md
+    assert "Do the thing with the widget." in md
+
+
 def test_drop_far_links_keeps_window_and_assets():
     from yt2wiki.v9.publish import drop_far_links, assemble_markdown
     url = "https://youtube.com/watch?v=XvaXemGDSpk"

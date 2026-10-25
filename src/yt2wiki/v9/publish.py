@@ -194,6 +194,10 @@ def assemble_markdown(article_title: str, summary: str, sections: list[dict[str,
             body = _strip_inline_timestamp_links(body)
             # Collapse any blank lines that stripping left behind
             import re as _re
+            # Schema-instruction leakage: models sometimes echo the prompt's
+            # shape example ("markdown: ...") as a literal body prefix. Strip
+            # that single marker; the prose itself is untouched.
+            body = _re.sub(r"(?i)^markdown\s*:\s*", "", body)
             body = _re.sub(r"\n{3,}", "\n\n", body).strip()
             if body:
                 lines.append(body)
