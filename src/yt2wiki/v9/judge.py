@@ -384,11 +384,61 @@ clearer (unobstructed/closer/more legible), result (completed action or resultin
 
 Reply COMPACT JSON only: no markdown fences, no prose outside the JSON, one
 line per candidate, weakness <= 12 words, explanation <= 30 words. Score ALL
-{n} images, then stop immediately after the final closing brace:
+{n} images, then stop immediately after the final closing brace.
+First report images_received as the number of images numbered 1..{n} above.
+If you received no images at all, reply {{"scores": [], "decision": "NO_IMAGE", "winner": 0,
+"pair": [], "explanation": "NO_IMAGE", "refinement": {{"direction": "none", "detail": ""}},
+"images_received": 0}}:
 {{"scores": [{{"idx": 1, "relevance": 2, "clarity": 2, "instructional": 2, "payoff": 1, "veto": false, \
 "veto_reason": "", "context_ok": false, "weakness": "..."}}],
 "decision": "KEEP", "winner": 1, "pair": [], "explanation": "...",
-"refinement": {{"direction": "none", "detail": "..."}}}}"""
+"refinement": {{"direction": "none", "detail": "..."}}, "images_received": {n}}}"""
+
+# Server-enforced shape for the rubric reply (json_schema/strict). The client
+# still verifies images_received against the images actually shown and treats
+# NO_IMAGE as unusable: a schema alone cannot stop a made-up verdict on a
+# malformed (e.g. imageless) prompt.
+RUBRIC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "scores": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "idx": {"type": "integer"},
+                "relevance": {"type": "integer"},
+                "clarity": {"type": "integer"},
+                "instructional": {"type": "integer"},
+                "payoff": {"type": "integer"},
+                "veto": {"type": "boolean"},
+                "veto_reason": {"type": "string"},
+                "context_ok": {"type": "boolean"},
+                "weakness": {"type": "string"},
+            },
+            "required": ["idx", "relevance", "clarity", "instructional",
+                         "payoff", "veto", "context_ok", "weakness"],
+            "additionalProperties": False,
+        }},
+        "decision": {"type": "string",
+                     "enum": ["KEEP", "REPLACE", "EXPAND", "USE_PAIR",
+                              "OMIT", "NO_IMAGE"]},
+        "winner": {"type": "integer"},
+        "pair": {"type": "array", "items": {"type": "integer"}},
+        "explanation": {"type": "string"},
+        "refinement": {
+            "type": "object",
+            "properties": {
+                "direction": {"type": "string"},
+                "detail": {"type": "string"},
+            },
+            "required": ["direction", "detail"],
+            "additionalProperties": False,
+        },
+        "images_received": {"type": "integer"},
+    },
+    "required": ["scores", "decision", "winner", "pair", "explanation",
+                 "refinement", "images_received"],
+    "additionalProperties": False,
+}
 
 # A single strong frame must normally show exactly what the section describes.
 # Diagrams / context images may pass with relevance 1 via context_ok.
@@ -533,7 +583,20 @@ def _parse_rubric(raw: str, n: int) -> dict[str, Any] | None:
         clean.append(entry)
     if not clean:
         return None
+    # Grounding check: the verdict must account for exactly the images
+    # shown. A schema cannot stop a made-up verdict on a malformed prompt,
+    # so a missing or mismatched count fails the round outright and the
+    # caller falls back to the veto loop.
+    try:
+        received = int(data.get("images_received", -1))
+    except (TypeError, ValueError):
+        return None
+    if received != n:
+        return None
     decision = str(data.get("decision") or "").upper()
+    if decision == "NO_IMAGE":
+        # The model reports it saw no images: never install on this verdict.
+        return None
     if decision not in ("KEEP", "REPLACE", "EXPAND", "USE_PAIR", "OMIT"):
         decision = "KEEP"
     try:
@@ -588,13 +651,17 @@ def score_candidates(backend, section: dict[str, Any],
         n=len(ordered), current_pos=current_pos)
     calls = 0
     parsed = None
+    schema_kw: dict[str, Any] = {}
+    if getattr(backend, "supports_structured_schema", False):
+        schema_kw = {"response_schema": RUBRIC_SCHEMA, "schema_name": "rubric"}
     for attempt in range(2):
         try:
             raw = backend.rank_images(
                 images, prompt,
                 max_new_tokens=1100,
                 temperature=0.0 if attempt == 0 else 0.3,
-                system="You judge images for technical documentation. Reply JSON only.")
+                system="You judge images for technical documentation. Reply JSON only.",
+                **schema_kw)
             calls += 1
         except Exception as exc:  # noqa: BLE001
             log.warning("rubric scoring failed: %s", exc)

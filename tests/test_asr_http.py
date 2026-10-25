@@ -765,7 +765,8 @@ def test_qualify_vision_list_content_and_retry_error(monkeypatch):
             '{"scores": [{"idx": 1, "relevance": 2, "clarity": 2, '
             '"instructional": 2, "payoff": 2, "weakness": "ok", '
             '"veto": false, "context_ok": false}], '
-            '"decision": "KEEP", "winner": 1, "explanation": "fine"}'))
+            '"decision": "KEEP", "winner": 1, "explanation": "fine", '
+            '"images_received": 2}'))
 
     monkeypatch.setattr(_h, "post", _list_resp)
     assert inf._qualify_vision("http://x", {}, "m", 5.0) is False

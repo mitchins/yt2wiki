@@ -328,7 +328,8 @@ def _valid_rubric():
                      "instructional": 2, "payoff": 2},
                     {"idx": 2, "relevance": 1, "clarity": 1,
                      "instructional": 0, "payoff": 0}],
-         "decision": "KEEP", "winner": 1, "explanation": "first frame is clearer"})
+         "decision": "KEEP", "winner": 1, "explanation": "first frame is clearer",
+         "images_received": 2})
 
 
 def _mock_handler(*, models=200, writer="json", vision="rubric", asr="missing"):
