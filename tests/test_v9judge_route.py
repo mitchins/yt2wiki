@@ -210,12 +210,19 @@ def test_vision_projectors_are_model_specific():
 
 def test_assemble_strips_schema_example_leakage():
     from yt2wiki.v9 import publish as P
+    # Bare echoed label (own line / end of marker): stripped.
     sections = [{"section_id": "s", "heading": "H",
-                 "body": "markdown: Do the thing with the widget.",
+                 "body": "markdown:\nDo the thing with the widget.",
                  "t_start": 0.0, "t_end": 60.0}]
     md, _ = P.assemble_markdown("T", "S", sections, {}, {"url": None})
     assert "markdown:" not in md
     assert "Do the thing with the widget." in md
+    # Same-line prose beginning with the word is legitimate content: kept.
+    sections = [{"section_id": "s", "heading": "H",
+                 "body": "markdown: Do the thing with the widget.",
+                 "t_start": 0.0, "t_end": 60.0}]
+    md, _ = P.assemble_markdown("T", "S", sections, {}, {"url": None})
+    assert "markdown: Do the thing with the widget." in md
 
 
 def test_drop_far_links_keeps_window_and_assets():
@@ -436,3 +443,160 @@ def test_remote_backend_sends_strict_json_schema(monkeypatch):
     assert fmt.get("type") == "json_schema"
     assert fmt["json_schema"]["name"] == "rank"
     assert fmt["json_schema"]["strict"] is True
+
+
+# --- RC01: structured-vision findings ---------------------------------------
+
+def _rubric_doc(n, idxs, **over):
+    import json as _json
+    scores = [
+        {"idx": i, "relevance": 2, "clarity": 2, "instructional": 2,
+         "payoff": 1, "veto": False, "veto_reason": "", "context_ok": False,
+         "weakness": "view"}
+        for i in idxs]
+    doc = {"scores": scores, "decision": "KEEP", "winner": idxs[0] if idxs else 0,
+           "pair": [], "explanation": "fits the section",
+           "refinement": {"direction": "none", "detail": ""},
+           "images_received": n}
+    doc.update(over)
+    return _json.dumps(doc)
+
+
+def test_rc01_rank_schema_requires_all_properties():
+    from yt2wiki.v9.select import RANK_SCHEMA
+    assert set(RANK_SCHEMA["required"]) == set(RANK_SCHEMA["properties"])
+
+
+def test_rc01_rubric_schema_requires_veto_reason():
+    from yt2wiki.v9.judge import RUBRIC_SCHEMA
+    item = RUBRIC_SCHEMA["properties"]["scores"]["items"]
+    assert set(item["required"]) == set(item["properties"])
+
+
+def test_rc01_rank_rejects_non_integer_images_received(tiny_pngs, no_ocr):
+    import json as _json
+    from yt2wiki.v9 import select as S
+    frames = _frames(tiny_pngs[:1])
+    for bad in (True, 1.0, "1"):
+        class CoercibleBackend(StubVLM):
+            def rank_images(self, images, prompt, **kw):
+                return ('{"best": [1], "reason": "x", "second": 0, '
+                        '"second_reason": "", "images_received": '
+                        + _json.dumps(bad) + '}')
+        out = S.rank_section(CoercibleBackend(), _sec(), frames)
+        assert "fallback" in (out["reason"] or ""), bad
+
+
+def test_rc01_rubric_rejects_partial_score_coverage():
+    from yt2wiki.v9.judge import _parse_rubric
+    assert _parse_rubric(_rubric_doc(2, [1]), 2) is None
+
+
+def test_rc01_rubric_rejects_duplicate_and_out_of_range_idx():
+    from yt2wiki.v9.judge import _parse_rubric
+    assert _parse_rubric(_rubric_doc(2, [1, 1]), 2) is None
+    assert _parse_rubric(_rubric_doc(2, [1, 3]), 2) is None
+    assert _parse_rubric(_rubric_doc(2, [1, 2]), 2) is not None
+
+
+def test_rc01_rubric_rejects_non_integer_images_received():
+    from yt2wiki.v9.judge import _parse_rubric
+    assert _parse_rubric(_rubric_doc(2, [1, 2], images_received=2.0), 2) is None
+    assert _parse_rubric(_rubric_doc(2, [1, 2], images_received=True), 2) is None
+    assert _parse_rubric(_rubric_doc(2, [1, 2], images_received="2"), 2) is None
+
+
+def test_rc01_rubric_no_image_is_unusable():
+    from yt2wiki.v9.judge import _parse_rubric
+    assert _parse_rubric(_rubric_doc(2, [1, 2], decision="NO_IMAGE",
+                                    images_received=0), 2) is None
+
+
+def test_rc01_no_image_verdict_falls_back_to_veto_loop(tiny_pngs, no_ocr):
+    frames = _frames(tiny_pngs[:4])
+
+    class BlindJudge(StubVLM):
+        def rank_images(self, images, prompt, **kw):
+            self.calls.append(("rank_images", len(images)))
+            import json as _json
+            if "editorial image judge" in prompt:
+                return _json.dumps(
+                    {"scores": [{"idx": i, "relevance": 0, "clarity": 0,
+                                 "instructional": 0, "payoff": 0, "veto": False,
+                                 "veto_reason": "", "context_ok": False,
+                                 "weakness": "nothing visible"}
+                                for i in range(1, len(images) + 1)],
+                     "decision": "NO_IMAGE", "winner": 0, "pair": [],
+                     "explanation": "no images seen",
+                     "refinement": {"direction": "none", "detail": ""},
+                     "images_received": 0})
+            return self.rank
+
+    used: set[str] = set()
+    chosen, record = V9.adjudicate_section_with_judge(
+        BlindJudge(), _sec(), frames, used, seed=0)
+    assert record["z1_fallback"] == "v9z-veto"
+
+
+def test_rc01_schema_refusal_retry_still_validates(monkeypatch):
+    import json
+    import httpx
+    from yt2wiki.backends.remote_openai import RemoteOpenAIBackend
+    from yt2wiki.config import ModelSpec
+    from yt2wiki.v9 import select as S
+
+    seen: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        seen.append(body.get("response_format", {}).get("type") if body.get("response_format") else None)
+        if body.get("response_format"):
+            return httpx.Response(400, json={"error": {"message":
+                "the engine refused this request: SCHEMA on a request with images is not supported"}})
+        # Plain retry answered, but with a fabricated count: must not install.
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"best": [1], "reason": "x", '
+                                                 '"second": 0, "images_received": 99}'},
+                          "finish_reason": "stop"}]})
+
+    real_client = httpx.Client
+
+    def patched(*a, **k):
+        k["transport"] = httpx.MockTransport(handler)
+        return real_client(*a, **k)
+
+    monkeypatch.setattr("httpx.Client", patched)
+    spec = ModelSpec(key="remote-t", role="vision", engine="remote-openai", repo="m")
+    be = RemoteOpenAIBackend(spec, {}, "cpu", None,
+                             base_url="http://x.test/v1", model="m",
+                             timeout=5.0)
+    be.load()
+    from PIL import Image
+    frames = [{"frame_id": f"f{i}", "t": float(i * 10),
+               "path": None, "kind": "scene"} for i in range(3)]
+    ims = [Image.new("RGB", (16, 16), (i * 40, i * 40, i * 40)) for i in range(3)]
+    for f, im in zip(frames, ims):
+        import tempfile
+        p = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+        im.save(p)
+        f["path"] = p
+    out = S.rank_section(be, {"section_id": "s", "heading": "H",
+                              "body": "Do the thing.", "t_start": 0.0,
+                              "t_end": 30.0}, frames)
+    assert seen[0] == "json_schema" and seen[1] is None
+    assert "fallback" in (out["reason"] or "")
+
+
+def test_rc01_bare_markdown_label_stripped_but_prose_preserved():
+    from yt2wiki.v9 import publish as P
+    leak = [{"section_id": "s", "heading": "H",
+             "body": "markdown:\nDo the thing with the widget.",
+             "t_start": 0.0, "t_end": 60.0}]
+    md, _ = P.assemble_markdown("T", "S", leak, {}, {"url": None})
+    assert "markdown:" not in md
+    assert "Do the thing with the widget." in md
+    legit = [{"section_id": "s", "heading": "H",
+              "body": "Markdown: a lightweight markup language used here.",
+              "t_start": 0.0, "t_end": 60.0}]
+    md2, _ = P.assemble_markdown("T", "S", legit, {}, {"url": None})
+    assert "Markdown: a lightweight markup language used here." in md2

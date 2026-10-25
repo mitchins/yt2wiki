@@ -415,7 +415,7 @@ RUBRIC_SCHEMA = {
                 "weakness": {"type": "string"},
             },
             "required": ["idx", "relevance", "clarity", "instructional",
-                         "payoff", "veto", "context_ok", "weakness"],
+                         "payoff", "veto", "veto_reason", "context_ok", "weakness"],
             "additionalProperties": False,
         }},
         "decision": {"type": "string",
@@ -560,9 +560,12 @@ def _parse_rubric(raw: str, n: int) -> dict[str, Any] | None:
         return None
     clean = []
     for s in scores:
-        try:
-            idx = int(s.get("idx", 0))
-        except (TypeError, ValueError):
+        if not isinstance(s, dict):
+            continue
+        idx = s.get("idx")
+        # Scores must be real JSON integers: bool/float/str approximations
+        # (true, 1.9, "1") are skipped, never coerced into an index.
+        if isinstance(idx, bool) or not isinstance(idx, int):
             continue
         if not 1 <= idx <= n:
             continue
@@ -581,17 +584,18 @@ def _parse_rubric(raw: str, n: int) -> dict[str, Any] | None:
             total += v
         entry["total"] = total
         clean.append(entry)
-    if not clean:
+    # Grounding check: the verdict must score every shown image exactly
+    # once — no missing, duplicate, or out-of-range entries. A schema
+    # cannot stop a made-up verdict on a malformed prompt, so a partial
+    # or padded score set fails the round outright and the caller falls
+    # back to the veto loop.
+    if sorted(e["idx"] for e in clean) != list(range(1, n + 1)):
         return None
-    # Grounding check: the verdict must account for exactly the images
-    # shown. A schema cannot stop a made-up verdict on a malformed prompt,
-    # so a missing or mismatched count fails the round outright and the
-    # caller falls back to the veto loop.
-    try:
-        received = int(data.get("images_received", -1))
-    except (TypeError, ValueError):
-        return None
-    if received != n:
+    # The count must be a real JSON integer: bool/float/str approximations
+    # (true, 2.9, "2") fail even when they would coerce to the right number.
+    received = data.get("images_received")
+    if (not isinstance(received, int) or isinstance(received, bool)
+            or received != n):
         return None
     decision = str(data.get("decision") or "").upper()
     if decision == "NO_IMAGE":

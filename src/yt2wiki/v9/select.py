@@ -45,7 +45,7 @@ RANK_SCHEMA = {
         "second_reason": {"type": "string"},
         "images_received": {"type": "integer"},
     },
-    "required": ["best", "second", "reason", "images_received"],
+    "required": ["best", "second", "reason", "second_reason", "images_received"],
     "additionalProperties": False,
 }
 
@@ -109,9 +109,13 @@ def rank_section(backend, section: dict[str, Any],
             # Grounding check: the verdict must account for exactly the
             # images sent. A schema cannot stop a made-up verdict on a
             # malformed prompt, so a mismatch fails the rank outright and
-            # the heuristic fallback below takes over.
+            # the heuristic fallback below takes over. The count must be a
+            # real JSON integer: bool/float/str approximations (True, 2.9,
+            # "2") fail even when they would coerce to the right number.
             received = payload.get("images_received")
-            if received is None or int(received) != len(valid):
+            if (received is None or isinstance(received, bool)
+                    or not isinstance(received, int)
+                    or received != len(valid)):
                 raise ValueError(
                     f"images_received={received!r} for {len(valid)} sent")
             if str(payload.get("reason") or "") == "NO_IMAGE":

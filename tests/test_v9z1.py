@@ -128,7 +128,7 @@ def test_decide_weak_best_expands_then_omits():
 # --- parsing -----------------------------------------------------------------
 
 def test_parse_rubric_clamps_and_computes_totals():
-    raw = _rubric_json([(1, 2, 9, -4, 1)], received=2)
+    raw = _rubric_json([(1, 2, 9, -4, 1), (2, 2, 2, 2, 2)], received=2)
     p = J._parse_rubric(raw, 2)
     assert p["scores"][0]["clarity"] == 2
     assert p["scores"][0]["instructional"] == 0
@@ -226,7 +226,8 @@ def test_z1_omit_when_all_vetoed_no_rounds(tiny_pngs, no_ocr):
     alts = [_cand("f-a1", tiny_pngs[1], 20)]
     frames = [init, *alts]
     be = StubVLM(labels=["talking_head", "promo_or_sales"],
-                 rubric=_rubric_json([(1, 0, 0, 0, 0, True)]))
+                 rubric=_rubric_json([(1, 0, 0, 0, 0, True),
+                                      (2, 0, 0, 0, 0, True)]))
     rec = J.adjudicate_section_z1(be, _sec(), init, alts, frames,
                                   max_rounds=0, seed=3)
     assert rec["decision"] == "OMIT"
@@ -338,7 +339,10 @@ def test_parse_rubric_rejects_nested_verdict():
 def test_parse_rubric_tolerates_fences_and_trailing_prose():
     raw = ('```json\n{"scores": [{"idx": 1, "relevance": 2, "clarity": 1,'
            '"instructional": 2, "payoff": 1, "veto": false, "veto_reason": "",'
-           ' "context_ok": false, "weakness": "clear view of the widget"}],'
+           ' "context_ok": false, "weakness": "clear view of the widget"},'
+           ' {"idx": 2, "relevance": 1, "clarity": 2,'
+           '"instructional": 1, "payoff": 1, "veto": false, "veto_reason": "",'
+           ' "context_ok": false, "weakness": "plain view"}],'
            ' "decision": "KEEP", "winner": 1, "pair": [], "explanation": "fine",'
            ' "refinement": {"direction": "none", "detail": ""},'
            ' "images_received": 2}\n```\nSome trailing prose.')
