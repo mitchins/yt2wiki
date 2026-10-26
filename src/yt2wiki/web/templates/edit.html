@@ -5,7 +5,7 @@
 {% if operator %}
 <div class="editbar" data-editor="{{ article.article_id }}" data-source="{{ article.source_id }}" data-version="{{ article.version }}">
   <div class="wrap">
-    <a class="btn btn-ghost btn-sm" href="/articles/{{ article.article_id }}" aria-label="Back to the guide">{{ icon("arrow-left") }}</a>
+    <a class="btn btn-ghost btn-sm" href="/articles/{{ article.article_id }}" title="Back to the guide">{{ icon("arrow-left") }}<span>Back</span></a>
     <h1><span class="muted">Editing</span> {{ article.title }}</h1>
     <span class="status" data-status role="status">Version {{ article.version }}</span>
     <label class="sr-only" for="note">What changed</label>
@@ -51,7 +51,7 @@
               {% for h in headings %}{% if h != a.section %}<option value="{{ h }}">{{ h }}</option>{% endif %}{% endfor %}
             </select>
             {% endif %}
-            <button class="btn btn-danger btn-sm" type="button" data-act="remove" aria-label="Remove this image" title="Remove this image">{{ icon("trash") }}</button>
+            <button class="btn btn-danger btn-sm" type="button" data-act="remove" title="Remove this image">{{ icon("trash") }}<span>Remove</span></button>
           </div>
           <div class="alts" hidden data-alts>
             <span class="muted" style="font-size:.8rem">Other frames from this part of the video</span>

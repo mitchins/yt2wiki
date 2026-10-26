@@ -22,6 +22,8 @@ from .. import StageContext
 
 log = logging.getLogger("yt2wiki.stage.publish")
 
+_STANDALONE_HTML_NAME = "article.standalone.html"
+
 
 def run(ctx: StageContext) -> dict[str, Any]:
     article_id = ctx.artifacts.get("article_id")
@@ -53,7 +55,7 @@ def run(ctx: StageContext) -> dict[str, Any]:
 
     body_html = markdown_to_html(md)
     standalone = render_html(article, body_html, embed_images=True, asset_dir=assets)
-    (out_dir / "article.standalone.html").write_text(standalone, encoding="utf-8")
+    (out_dir / _STANDALONE_HTML_NAME).write_text(standalone, encoding="utf-8")
 
     bundle = ctx.paths.export_bundle(article_id)
     bundle.mkdir(parents=True, exist_ok=True)
@@ -96,13 +98,13 @@ def run(ctx: StageContext) -> dict[str, Any]:
             (article_id, time.time(), ctx.job_id),
         )
     ctx.artifacts["published"] = True
-    ctx.artifacts["standalone_html"] = str(out_dir / "article.standalone.html")
+    ctx.artifacts["standalone_html"] = str(out_dir / _STANDALONE_HTML_NAME)
     ctx.artifacts["export_bundle"] = str(bundle)
     ctx.artifacts["export_zip"] = str(zip_path)
     return {
         "article_id": article_id,
         "markdown_bytes": len(md.encode()),
-        "standalone_html_bytes": (out_dir / "article.standalone.html").stat().st_size,
+        "standalone_html_bytes": (out_dir / _STANDALONE_HTML_NAME).stat().st_size,
         "db_html_bytes": len(row["html"] or ""),
         "zip_bytes": zip_path.stat().st_size,
         "assets": len(list(assets.glob('*.jpg'))) if assets.is_dir() else 0,

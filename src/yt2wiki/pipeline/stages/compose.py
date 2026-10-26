@@ -31,6 +31,8 @@ from .. import StageContext, CancelRequested
 
 log = logging.getLogger("yt2wiki.stage.compose")
 
+_ASSET_REF_RE = r"\]\(assets/([^)]+)\)"
+
 PROMPT_VERSION = "v2"
 SYSTEM = (
     "You write the short prose blocks of a technical wiki article. "
@@ -680,7 +682,7 @@ def _gallery_section(
 
 def article_frames(markdown: str) -> list[str]:
     """Frame filenames the article references."""
-    return re.findall(r"\]\(assets/([^)]+)\)", markdown)
+    return re.findall(_ASSET_REF_RE, markdown)
 
 
 def _frame_score(frame: dict[str, Any], evidence: Sequence[Evidence]) -> int:
@@ -721,7 +723,9 @@ def _provenance_section(ctx: StageContext, article: Article) -> Section:
 
         body.append(
             "- **Source retrieved:** "
-            + datetime.datetime.utcfromtimestamp(float(prov["retrieved_at"])).isoformat() + "Z"
+            + datetime.datetime.fromtimestamp(
+                float(prov["retrieved_at"]), tz=datetime.timezone.utc
+            ).replace(tzinfo=None).isoformat() + "Z"
         )
     return Section(heading="Source and provenance", level=2, body=body)
 
@@ -755,7 +759,7 @@ def _store(ctx: StageContext, article: Article, article_id: str, md: str) -> Non
         profile=getattr(ctx.settings, "profile", None),
         snapshot=getattr(ctx, "inference_snapshot", None),
         frame_ids=[n.rsplit(".", 1)[0]
-                   for n in re.findall(r"\]\(assets/([^)]+)\)", md)],
+                   for n in re.findall(_ASSET_REF_RE, md)],
         source_dir=stage)
     _manifest = _prep["manifest"]
     # Promote staged files over canonical paths, then commit the article, its
@@ -813,7 +817,7 @@ def _stage_asset_files(ctx: StageContext, article_id: str, staging_assets: Path,
 
     rows = []
     canonical_assets = ctx.paths.article_assets(article_id)
-    for name in re.findall(r"\]\(assets/([^)]+)\)", md):
+    for name in re.findall(_ASSET_REF_RE, md):
         fid = name.rsplit(".", 1)[0]
         row = ctx.db.query_one("SELECT path FROM frames WHERE frame_id=?", (fid,))
         if not row:

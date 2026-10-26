@@ -35,6 +35,15 @@ _HERE = Path(__file__).resolve().parent
 
 ACTIVE_STATES = ("queued", "running")
 
+# Shared route/error vocabulary (kept next to the routes that raise them).
+_ADD_PAGE = "add.html"
+_MSG_JOB_NOT_FOUND = "job not found"
+_MSG_ARTICLE_NOT_FOUND = "article not found"
+_MSG_INVALID_FILENAME = "invalid filename"
+_ARTICLE_BY_ID_SQL = "SELECT * FROM articles WHERE article_id=?"
+_CAPTION_SQL = "UPDATE article_assets SET caption=? WHERE article_id=? AND frame_id=?"
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.load()
@@ -131,7 +140,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/add", response_class=HTMLResponse)
     def add_page(request: Request, mode: str = Query("url")) -> Any:
-        return page(request, "add.html", {"nav": "add", "mode": mode, "error": "",
+        return page(request, _ADD_PAGE, {"nav": "add", "mode": mode, "error": "",
                                           "url": "", "jobs": active_jobs()})
 
     @app.post("/add/url")
@@ -145,7 +154,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if back == "library":
                 from urllib.parse import quote
                 return RedirectResponse(f"/?error={quote(str(exc.detail))}#add", status_code=303)
-            return page(request, "add.html", {"nav": "add", "mode": "url", "error": exc.detail,
+            return page(request, _ADD_PAGE, {"nav": "add", "mode": "url", "error": exc.detail,
                                               "url": url, "jobs": active_jobs()},
                         status_code=exc.status_code)
         return RedirectResponse(f"/jobs/{job_id}", status_code=303)
@@ -158,7 +167,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             _require_operator_form(request, csrf_token)
             job_id = await submit_upload(file, "")
         except HTTPException as exc:
-            return page(request, "add.html", {"nav": "add", "mode": "upload",
+            return page(request, _ADD_PAGE, {"nav": "add", "mode": "upload",
                                               "error": exc.detail, "url": "",
                                               "jobs": active_jobs()},
                         status_code=exc.status_code)
@@ -189,7 +198,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def job_page(request: Request, job_id: str, error: str = Query("")) -> Any:
         job = service.get_job(job_id)
         if job is None:
-            raise HTTPException(404, "job not found")
+            raise HTTPException(404, _MSG_JOB_NOT_FOUND)
         view = views.job_view(job, live=set(app.state.runner.live()))
         logs = [dict(r) for r in db.query(
             "SELECT level, message, ts FROM app_log WHERE job_id=? ORDER BY id DESC LIMIT 40",
@@ -226,7 +235,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def read_article(request: Request, article_id: str) -> Any:
         ctx = views.article_context(db, settings.paths, article_id)
         if ctx is None:
-            raise HTTPException(404, "article not found")
+            raise HTTPException(404, _MSG_ARTICLE_NOT_FOUND)
         source_id = ctx["article"]["source_id"]
         frames = db.query(
             """SELECT f.frame_id, f.t, f.kind, f.reason, p.payload_json FROM frames f
@@ -256,9 +265,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/articles/{article_id}/edit", response_class=HTMLResponse)
     def edit_article(request: Request, article_id: str) -> Any:
-        row = db.query_one("SELECT * FROM articles WHERE article_id=?", (article_id,))
+        row = db.query_one(_ARTICLE_BY_ID_SQL, (article_id,))
         if row is None:
-            raise HTTPException(404, "article not found")
+            raise HTTPException(404, _MSG_ARTICLE_NOT_FOUND)
         article = dict(row)
         assets = [dict(a) for a in db.query(
             """SELECT a.frame_id, a.caption, f.t AS t FROM article_assets a
@@ -340,17 +349,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/assets/{article_id}/{filename}")
     def asset(article_id: str, filename: str) -> Any:
         if "/" in filename or ".." in filename or "/" in article_id or ".." in article_id:
-            raise HTTPException(400, "invalid filename")
+            raise HTTPException(400, _MSG_INVALID_FILENAME)
         path = settings.paths.article_assets(article_id) / filename
-        if not path.is_file() or path.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
+        if not path.is_file() or path.suffix.lower() not in _IMAGE_EXTS:
             raise HTTPException(404, "asset not found")
         return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
     @app.get("/frames/{source_id}/{filename}")
     def source_frame(source_id: str, filename: str) -> Any:
         if ("/" in filename or ".." in filename or ".." in source_id
-                or not filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
-            raise HTTPException(400, "invalid filename")
+                or not filename.lower().endswith(_IMAGE_EXTS)):
+            raise HTTPException(400, _MSG_INVALID_FILENAME)
         path = _frame_file(settings, db, source_id, filename)
         if path is None:
             raise HTTPException(404, "frame not found")
@@ -490,7 +499,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def retry_job(job_id: str) -> str:
         job = service.get_job(job_id)
         if job is None:
-            raise HTTPException(404, "job not found")
+            raise HTTPException(404, _MSG_JOB_NOT_FOUND)
         return enqueue(job["source_id"], job["profile"] if job["profile"] in PROFILE_NAMES
                        else _default_profile(settings),
                        has_captions=_job_captions(job),
@@ -522,7 +531,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_job(job_id: str) -> Any:
         job = service.get_job(job_id)
         if job is None:
-            raise HTTPException(404, "job not found")
+            raise HTTPException(404, _MSG_JOB_NOT_FOUND)
         stages = {s["stage"]: s for s in job["stages"]}
         out = {k: v for k, v in job.items() if k != "stages"}
         out["stages"] = stages
@@ -547,7 +556,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _require_operator(request)
         job = service.get_job(job_id)
         if job is None:
-            raise HTTPException(404, "job not found")
+            raise HTTPException(404, _MSG_JOB_NOT_FOUND)
         profile = _profile(payload.get("profile") or job["profile"])
         if payload.get("pipeline") == "legacy":
             force = bool(payload.get("force"))
@@ -630,7 +639,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not isinstance(md, str):
             raise HTTPException(400, "markdown is required")
         if db.query_one("SELECT 1 FROM articles WHERE article_id=?", (article_id,)) is None:
-            raise HTTPException(404, "article not found")
+            raise HTTPException(404, _MSG_ARTICLE_NOT_FOUND)
         view = views.render_reader(settings.paths, article_id, md)
         return {"title": view["title"], "lead_html": view["lead_html"],
                 "body_html": view["body_html"]}
@@ -642,7 +651,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         heading = (payload.get("section") or "").strip()
         row = db.query_one("SELECT markdown FROM articles WHERE article_id=?", (article_id,))
         if row is None:
-            raise HTTPException(404, "article not found")
+            raise HTTPException(404, _MSG_ARTICLE_NOT_FOUND)
         try:
             md = _move_image(row["markdown"], fid, heading)
         except ValueError as exc:
@@ -655,7 +664,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_export_md(article_id: str) -> Any:
         path = settings.paths.article_markdown(article_id)
         if not path.is_file():
-            raise HTTPException(404, "article not found")
+            raise HTTPException(404, _MSG_ARTICLE_NOT_FOUND)
         return FileResponse(path, media_type="text/markdown",
                             filename=f"{article_id}.md")
 
@@ -682,9 +691,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         note = (payload.get("note") or "").strip()
         if not isinstance(markdown, str) or len(markdown) < 20:
             raise HTTPException(400, "markdown is required")
-        row = db.query_one("SELECT * FROM articles WHERE article_id=?", (article_id,))
+        row = db.query_one(_ARTICLE_BY_ID_SQL, (article_id,))
         if row is None:
-            raise HTTPException(404, "article not found")
+            raise HTTPException(404, _MSG_ARTICLE_NOT_FOUND)
         version = _save_article_markdown(settings, db, article_id, markdown,
                                           note or "edited by user")
         return {"ok": True, "version": version, "note": note}
@@ -761,7 +770,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cap = _caption_for(fid)
             if fid in existing:
                 db.execute(
-                    "UPDATE article_assets SET caption=? WHERE article_id=? AND frame_id=?",
+                    _CAPTION_SQL,
                     (cap, article_id, fid))
             elif (assets / f"{fid}.jpg").is_file():
                 db.execute(
@@ -789,7 +798,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_v9_sections(article_id: str) -> Any:
         row = db.query_one("SELECT outline_json FROM articles WHERE article_id=?", (article_id,))
         if row is None:
-            raise HTTPException(404, "article not found")
+            raise HTTPException(404, _MSG_ARTICLE_NOT_FOUND)
         import json as _json
         try:
             secs = _json.loads(row["outline_json"] or "[]")
@@ -801,9 +810,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v9/articles/{article_id}/alternatives")
     def api_v9_alternatives(article_id: str, section_id: str = Query(""),
                                   limit: int = Query(8)) -> Any:
-        row = db.query_one("SELECT * FROM articles WHERE article_id=?", (article_id,))
+        row = db.query_one(_ARTICLE_BY_ID_SQL, (article_id,))
         if row is None:
-            raise HTTPException(404, "article not found")
+            raise HTTPException(404, _MSG_ARTICLE_NOT_FOUND)
         import json as _json
         secs = []
         try:
@@ -865,9 +874,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         caption = (payload.get("caption") or "").strip()
         if not fid:
             raise HTTPException(400, "frame_id required")
-        row = db.query_one("SELECT * FROM articles WHERE article_id=?", (article_id,))
+        row = db.query_one(_ARTICLE_BY_ID_SQL, (article_id,))
         if row is None:
-            raise HTTPException(404, "article not found")
+            raise HTTPException(404, _MSG_ARTICLE_NOT_FOUND)
         md = row["markdown"]
         md = _set_caption(md, fid, caption)
         import re as _re2
@@ -877,7 +886,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             md)
         _save_article_markdown(settings, db, article_id, md, "caption edited by user")
         with db.transaction() as conn:
-            conn.execute("UPDATE article_assets SET caption=? WHERE article_id=? AND frame_id=?",
+            conn.execute(_CAPTION_SQL,
                          (caption, article_id, fid))
         return {"ok": True}
 
@@ -988,7 +997,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/media/{source_id}/{filename}")
     def media(source_id: str, filename: str) -> Any:
         if "/" in filename or ".." in filename:
-            raise HTTPException(400, "invalid filename")
+            raise HTTPException(400, _MSG_INVALID_FILENAME)
         row = db.query_one("SELECT source_id FROM sources WHERE source_id=?", (source_id,))
         if row is None:
             raise HTTPException(404, "unknown source")
@@ -1014,7 +1023,7 @@ def _save_article_markdown(settings, db, article_id: str, markdown: str, note: s
     from ..reader import split_markdown
     from ..services import new_id
 
-    row = db.query_one("SELECT * FROM articles WHERE article_id=?", (article_id,))
+    row = db.query_one(_ARTICLE_BY_ID_SQL, (article_id,))
     title = split_markdown(markdown).title or row["title"]
     article = Article(source_id=row["source_id"], title=title)
     html = render_html(article, markdown_to_html(markdown), embed_images=False,
@@ -1041,7 +1050,7 @@ def _save_article_markdown(settings, db, article_id: str, markdown: str, note: s
     with _zipfile.ZipFile(zp, "w", _zipfile.ZIP_DEFLATED) as zf:
         zf.write(settings.paths.article_markdown(article_id), "article.md")
         for fid in _image_order(markdown):
-            for ext in (".jpg", ".jpeg", ".png", ".webp"):
+            for ext in _IMAGE_EXTS:
                 p = assets / f"{fid}{ext}"
                 if p.is_file():
                     zf.write(p, f"assets/{p.name}")
@@ -1078,10 +1087,10 @@ def _swap_article_image(settings, db, article_id: str, old_fid: str,
                         new_fid: str | None, caption: str | None = None,
                         note: str = "image edited by user") -> dict[str, Any]:
     import shutil
-    row = db.query_one("SELECT * FROM articles WHERE article_id=?", (article_id,))
+    row = db.query_one(_ARTICLE_BY_ID_SQL, (article_id,))
     if row is None:
         from fastapi import HTTPException as _HE
-        raise _HE(404, "article not found")
+        raise _HE(404, _MSG_ARTICLE_NOT_FOUND)
     md = row["markdown"]
     import re as _re
     if not _re.fullmatch(r"[A-Za-z0-9_-]{1,64}", old_fid or ""):
@@ -1152,7 +1161,7 @@ def _swap_article_image(settings, db, article_id: str, old_fid: str,
             rf"!\[[^\]]*\]\(assets/{_re2.escape(new_fid)}\.jpg\)",
             f"![{caption}](assets/{new_fid}.jpg)" if caption else f"![Source frame](assets/{new_fid}.jpg)",
             md)
-        db.execute("UPDATE article_assets SET caption=? WHERE article_id=? AND frame_id=?",
+        db.execute(_CAPTION_SQL,
                    (caption or "", article_id, new_fid))
     version = _save_article_markdown(settings, db, article_id, md, note)
     return {"ok": True, "version": version}
