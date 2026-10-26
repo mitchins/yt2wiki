@@ -38,7 +38,7 @@ log = logging.getLogger("yt2wiki.generations")
 
 # V9 recipe version. Bump when the writer prompt, the judge prompt or the
 # selection policy changes in a way that alters published output.
-RECIPE_VERSION = 1
+RECIPE_VERSION = 2
 CLASSIC_RECIPE_VERSION = 1
 
 # Frozen selection policy descriptor for the V9 recipe. Part of the manifest
