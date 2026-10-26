@@ -48,6 +48,7 @@ class StubVLM:
     def __init__(self, rank=""):
         self.rank = rank
         self.calls = []
+        self.schemas = []
 
     def describe_batch(self, images, prompt, **kw):
         self.calls.append("describe_batch")
@@ -55,11 +56,22 @@ class StubVLM:
 
     def rank_images(self, images, prompt, **kw):
         self.calls.append(("rank_images", len(images)))
+        if kw.get("response_schema") is not None:
+            self.schemas.append(kw.get("schema_name"))
         if "Classify this single image" in prompt:
             return "instructional"
-        if "editorial image judge" in prompt:
-            return _RUBRIC_TIE_KEEP
-        return self.rank
+        # Ground canned verdicts in the actual request: judge and rank both
+        # reject responses whose images_received mismatches the sent count.
+        raw = _RUBRIC_TIE_KEEP if "editorial image judge" in prompt else self.rank
+        try:
+            import json as _json
+            doc = _json.loads(raw)
+            if isinstance(doc, dict):
+                doc["images_received"] = len(images)
+                return _json.dumps(doc)
+        except Exception:  # noqa: BLE001 - non-JSON canned reply passes through
+            pass
+        return raw
 
 
 def _frames(paths):
@@ -196,6 +208,23 @@ def test_vision_projectors_are_model_specific():
     assert LlamaServerVLM is not None  # backend importable; resolution is by filename
 
 
+def test_assemble_strips_schema_example_leakage():
+    from yt2wiki.v9 import publish as P
+    # Bare echoed label (own line / end of marker): stripped.
+    sections = [{"section_id": "s", "heading": "H",
+                 "body": "markdown:\nDo the thing with the widget.",
+                 "t_start": 0.0, "t_end": 60.0}]
+    md, _ = P.assemble_markdown("T", "S", sections, {}, {"url": None})
+    assert "markdown:" not in md
+    assert "Do the thing with the widget." in md
+    # Same-line prose beginning with the word is legitimate content: kept.
+    sections = [{"section_id": "s", "heading": "H",
+                 "body": "markdown: Do the thing with the widget.",
+                 "t_start": 0.0, "t_end": 60.0}]
+    md, _ = P.assemble_markdown("T", "S", sections, {}, {"url": None})
+    assert "markdown: Do the thing with the widget." in md
+
+
 def test_drop_far_links_keeps_window_and_assets():
     from yt2wiki.v9.publish import drop_far_links, assemble_markdown
     url = "https://youtube.com/watch?v=XvaXemGDSpk"
@@ -217,3 +246,357 @@ def test_drop_far_links_keeps_window_and_assets():
     assert "Verdict here" in md and "4:11" not in md.split("## H")[1].split("*Source")[0]
     assert "Source 6:50" in md and "&t=410" in md
     assert md.count("&t=") == 1  # only the consolidated reference
+
+
+# --- structured-output grounding (json_schema + images_received) ---------
+
+class SchemaBackend(StubVLM):
+    """Stub that honours the structured-schema flag like the remote backend."""
+
+    supports_structured_schema = True
+
+
+def test_rank_schema_requested_from_capable_backend(tiny_pngs, no_ocr):
+    from yt2wiki.v9 import select as S
+    frames = _frames(tiny_pngs[:3])
+    vb = SchemaBackend(rank='{"best": [1], "reason": "shows widget", '
+                            '"second": 0, "second_reason": ""}')
+    out = S.rank_section(vb, _sec(), frames)
+    assert out["best"] == [0]
+    assert vb.schemas, "capable backend must be asked for a schema"
+    assert out.get("candidates")
+
+
+def test_rank_rejects_mismatched_images_received(tiny_pngs, no_ocr):
+    from yt2wiki.v9 import select as S
+    frames = _frames(tiny_pngs[:3])
+
+    class LyingBackend(StubVLM):
+        def rank_images(self, images, prompt, **kw):
+            self.calls.append(("rank_images", len(images)))
+            return ('{"best": [1], "reason": "x", "second": 0, '
+                    '"second_reason": "", "images_received": 1}')
+
+    out = S.rank_section(LyingBackend(), _sec(), frames)
+    # 3 sent, 1 claimed: the rank is discarded for the heuristic fallback.
+    assert "fallback" in (out["reason"] or "")
+    assert out["best"] == [0] or out["best"]
+
+
+def test_rank_rejects_missing_images_received(tiny_pngs, no_ocr):
+    from yt2wiki.v9 import select as S
+    frames = _frames(tiny_pngs[:3])
+
+    class OldBackend(StubVLM):
+        def rank_images(self, images, prompt, **kw):
+            self.calls.append(("rank_images", len(images)))
+            return '{"best": [1], "reason": "x", "second": 0}'
+
+    out = S.rank_section(OldBackend(), _sec(), frames)
+    assert "fallback" in (out["reason"] or "")
+
+
+def test_rank_rejects_no_image_claim(tiny_pngs, no_ocr):
+    from yt2wiki.v9 import select as S
+    frames = _frames(tiny_pngs[:3])
+
+    class BlindBackend(StubVLM):
+        def rank_images(self, images, prompt, **kw):
+            self.calls.append(("rank_images", len(images)))
+            return ('{"best": [], "second": 0, "reason": "NO_IMAGE", '
+                    '"second_reason": "", "images_received": 0}')
+
+    out = S.rank_section(BlindBackend(), _sec(), frames)
+    assert "fallback" in (out["reason"] or "")
+
+
+def test_rubric_mismatch_falls_back_to_veto_loop(tiny_pngs, no_ocr):
+    frames = _frames(tiny_pngs[:4])
+
+    class FixedBackend(StubVLM):
+        def rank_images(self, images, prompt, **kw):
+            self.calls.append(("rank_images", len(images)))
+            import json as _json
+            return _json.dumps(
+                {"scores": [{"idx": 1, "relevance": 2, "clarity": 2,
+                             "instructional": 2, "payoff": 1, "veto": False,
+                             "veto_reason": "", "context_ok": False,
+                             "weakness": "clear widget view"}],
+                 "decision": "KEEP", "winner": 1, "pair": [],
+                 "explanation": "fine", "refinement": {"direction": "none", "detail": ""},
+                 "images_received": 99})
+
+    used: set[str] = set()
+    chosen, record = V9.adjudicate_section_with_judge(
+        FixedBackend(), _sec(), frames, used, seed=0)
+    # Grounded count (99) never matches the shown set: comparative scoring
+    # is unusable, so the V9-Z veto loop takes over instead of publishing
+    # a made-up verdict.
+    assert record["z1_fallback"] == "v9z-veto"
+
+
+def test_remote_backend_adapts_when_server_rejects_schemas_with_images(monkeypatch):
+    import json
+    import httpx
+    from yt2wiki.backends.remote_openai import RemoteOpenAIBackend
+    from yt2wiki.config import ModelSpec
+
+    seen: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        seen.append(body.get("response_format", {}).get("type"))
+        if body.get("response_format"):
+            return httpx.Response(400, json={"error": {"message":
+                "the engine refused this request: SCHEMA on a request with images is not supported"}})
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"best": [1], "reason": "x"}'},
+                         "finish_reason": "stop"}]})
+
+    real_client = httpx.Client
+
+    def patched(*a, **k):
+        k["transport"] = httpx.MockTransport(handler)
+        return real_client(*a, **k)
+
+    monkeypatch.setattr("httpx.Client", patched)
+    spec = ModelSpec(key="remote-t", role="vision", engine="remote-openai", repo="m")
+    be = RemoteOpenAIBackend(spec, {}, "cpu", None,
+                             base_url="http://x.test/v1", model="m",
+                             timeout=5.0)
+    be.load()
+    from PIL import Image
+    im = Image.new("RGB", (32, 32), (9, 9, 9))
+    schema = {"type": "object", "properties": {"best": {"type": "array"}},
+              "required": ["best"]}
+    out = be.rank_images([im], "rank", max_new_tokens=50,
+                         response_schema=schema, schema_name="rank")
+    assert json.loads(out)["best"] == [1]
+    # First call tried schema then retried plain; the verdict is remembered.
+    assert seen[0] == "json_schema"
+    assert seen[1] is None
+    out2 = be.rank_images([im], "rank", max_new_tokens=50,
+                          response_schema=schema, schema_name="rank")
+    assert json.loads(out2)["best"] == [1]
+    assert seen[2] is None, "remembered: no second schema attempt"
+
+
+def test_remote_backend_propagates_non_schema_400(monkeypatch):
+    import json
+    import httpx
+    from yt2wiki.backends.remote_openai import RemoteOpenAIBackend
+    from yt2wiki.config import ModelSpec
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "bad image bytes"}})
+
+    real_client = httpx.Client
+
+    def patched(*a, **k):
+        k["transport"] = httpx.MockTransport(handler)
+        return real_client(*a, **k)
+
+    monkeypatch.setattr("httpx.Client", patched)
+    spec = ModelSpec(key="remote-t", role="vision", engine="remote-openai", repo="m")
+    be = RemoteOpenAIBackend(spec, {}, "cpu", None,
+                             base_url="http://x.test/v1", model="m",
+                             timeout=5.0)
+    be.load()
+    from PIL import Image
+    im = Image.new("RGB", (32, 32), (9, 9, 9))
+    with pytest.raises(httpx.HTTPStatusError):
+        be.rank_images([im], "rank", max_new_tokens=50,
+                       response_schema={"type": "object"}, schema_name="rank")
+
+
+def test_remote_backend_sends_strict_json_schema(monkeypatch):
+    import json
+    import httpx
+    from yt2wiki.backends.remote_openai import RemoteOpenAIBackend
+    from yt2wiki.config import ModelSpec
+
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content.decode()))
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"best": [1]}'},
+                         "finish_reason": "stop"}]})
+
+    real_client = httpx.Client
+
+    def patched(*a, **k):
+        k["transport"] = httpx.MockTransport(handler)
+        return real_client(*a, **k)
+
+    monkeypatch.setattr("httpx.Client", patched)
+    spec = ModelSpec(key="remote-t", role="vision", engine="remote-openai", repo="m")
+    be = RemoteOpenAIBackend(spec, {}, "cpu", None,
+                             base_url="http://x.test/v1", model="m",
+                             timeout=5.0)
+    be.load()
+    from PIL import Image
+    im = Image.new("RGB", (32, 32), (9, 9, 9))
+    be.rank_images([im], "rank", max_new_tokens=50,
+                   response_schema={"type": "object"}, schema_name="rank")
+    fmt = seen.get("response_format", {})
+    assert fmt.get("type") == "json_schema"
+    assert fmt["json_schema"]["name"] == "rank"
+    assert fmt["json_schema"]["strict"] is True
+
+
+# --- RC01: structured-vision findings ---------------------------------------
+
+def _rubric_doc(n, idxs, **over):
+    import json as _json
+    scores = [
+        {"idx": i, "relevance": 2, "clarity": 2, "instructional": 2,
+         "payoff": 1, "veto": False, "veto_reason": "", "context_ok": False,
+         "weakness": "view"}
+        for i in idxs]
+    doc = {"scores": scores, "decision": "KEEP", "winner": idxs[0] if idxs else 0,
+           "pair": [], "explanation": "fits the section",
+           "refinement": {"direction": "none", "detail": ""},
+           "images_received": n}
+    doc.update(over)
+    return _json.dumps(doc)
+
+
+def test_rc01_rank_schema_requires_all_properties():
+    from yt2wiki.v9.select import RANK_SCHEMA
+    assert set(RANK_SCHEMA["required"]) == set(RANK_SCHEMA["properties"])
+
+
+def test_rc01_rubric_schema_requires_veto_reason():
+    from yt2wiki.v9.judge import RUBRIC_SCHEMA
+    item = RUBRIC_SCHEMA["properties"]["scores"]["items"]
+    assert set(item["required"]) == set(item["properties"])
+
+
+def test_rc01_rank_rejects_non_integer_images_received(tiny_pngs, no_ocr):
+    import json as _json
+    from yt2wiki.v9 import select as S
+    frames = _frames(tiny_pngs[:1])
+    for bad in (True, 1.0, "1"):
+        class CoercibleBackend(StubVLM):
+            def rank_images(self, images, prompt, **kw):
+                return ('{"best": [1], "reason": "x", "second": 0, '
+                        '"second_reason": "", "images_received": '
+                        + _json.dumps(bad) + '}')
+        out = S.rank_section(CoercibleBackend(), _sec(), frames)
+        assert "fallback" in (out["reason"] or ""), bad
+
+
+def test_rc01_rubric_rejects_partial_score_coverage():
+    from yt2wiki.v9.judge import _parse_rubric
+    assert _parse_rubric(_rubric_doc(2, [1]), 2) is None
+
+
+def test_rc01_rubric_rejects_duplicate_and_out_of_range_idx():
+    from yt2wiki.v9.judge import _parse_rubric
+    assert _parse_rubric(_rubric_doc(2, [1, 1]), 2) is None
+    assert _parse_rubric(_rubric_doc(2, [1, 3]), 2) is None
+    assert _parse_rubric(_rubric_doc(2, [1, 2]), 2) is not None
+
+
+def test_rc01_rubric_rejects_non_integer_images_received():
+    from yt2wiki.v9.judge import _parse_rubric
+    assert _parse_rubric(_rubric_doc(2, [1, 2], images_received=2.0), 2) is None
+    assert _parse_rubric(_rubric_doc(2, [1, 2], images_received=True), 2) is None
+    assert _parse_rubric(_rubric_doc(2, [1, 2], images_received="2"), 2) is None
+
+
+def test_rc01_rubric_no_image_is_unusable():
+    from yt2wiki.v9.judge import _parse_rubric
+    assert _parse_rubric(_rubric_doc(2, [1, 2], decision="NO_IMAGE",
+                                    images_received=0), 2) is None
+
+
+def test_rc01_no_image_verdict_falls_back_to_veto_loop(tiny_pngs, no_ocr):
+    frames = _frames(tiny_pngs[:4])
+
+    class BlindJudge(StubVLM):
+        def rank_images(self, images, prompt, **kw):
+            self.calls.append(("rank_images", len(images)))
+            import json as _json
+            if "editorial image judge" in prompt:
+                return _json.dumps(
+                    {"scores": [{"idx": i, "relevance": 0, "clarity": 0,
+                                 "instructional": 0, "payoff": 0, "veto": False,
+                                 "veto_reason": "", "context_ok": False,
+                                 "weakness": "nothing visible"}
+                                for i in range(1, len(images) + 1)],
+                     "decision": "NO_IMAGE", "winner": 0, "pair": [],
+                     "explanation": "no images seen",
+                     "refinement": {"direction": "none", "detail": ""},
+                     "images_received": 0})
+            return self.rank
+
+    used: set[str] = set()
+    chosen, record = V9.adjudicate_section_with_judge(
+        BlindJudge(), _sec(), frames, used, seed=0)
+    assert record["z1_fallback"] == "v9z-veto"
+
+
+def test_rc01_schema_refusal_retry_still_validates(monkeypatch):
+    import json
+    import httpx
+    from yt2wiki.backends.remote_openai import RemoteOpenAIBackend
+    from yt2wiki.config import ModelSpec
+    from yt2wiki.v9 import select as S
+
+    seen: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        seen.append(body.get("response_format", {}).get("type") if body.get("response_format") else None)
+        if body.get("response_format"):
+            return httpx.Response(400, json={"error": {"message":
+                "the engine refused this request: SCHEMA on a request with images is not supported"}})
+        # Plain retry answered, but with a fabricated count: must not install.
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"best": [1], "reason": "x", '
+                                                 '"second": 0, "images_received": 99}'},
+                          "finish_reason": "stop"}]})
+
+    real_client = httpx.Client
+
+    def patched(*a, **k):
+        k["transport"] = httpx.MockTransport(handler)
+        return real_client(*a, **k)
+
+    monkeypatch.setattr("httpx.Client", patched)
+    spec = ModelSpec(key="remote-t", role="vision", engine="remote-openai", repo="m")
+    be = RemoteOpenAIBackend(spec, {}, "cpu", None,
+                             base_url="http://x.test/v1", model="m",
+                             timeout=5.0)
+    be.load()
+    from PIL import Image
+    frames = [{"frame_id": f"f{i}", "t": float(i * 10),
+               "path": None, "kind": "scene"} for i in range(3)]
+    ims = [Image.new("RGB", (16, 16), (i * 40, i * 40, i * 40)) for i in range(3)]
+    for f, im in zip(frames, ims):
+        import tempfile
+        p = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+        im.save(p)
+        f["path"] = p
+    out = S.rank_section(be, {"section_id": "s", "heading": "H",
+                              "body": "Do the thing.", "t_start": 0.0,
+                              "t_end": 30.0}, frames)
+    assert seen[0] == "json_schema" and seen[1] is None
+    assert "fallback" in (out["reason"] or "")
+
+
+def test_rc01_bare_markdown_label_stripped_but_prose_preserved():
+    from yt2wiki.v9 import publish as P
+    leak = [{"section_id": "s", "heading": "H",
+             "body": "markdown:\nDo the thing with the widget.",
+             "t_start": 0.0, "t_end": 60.0}]
+    md, _ = P.assemble_markdown("T", "S", leak, {}, {"url": None})
+    assert "markdown:" not in md
+    assert "Do the thing with the widget." in md
+    legit = [{"section_id": "s", "heading": "H",
+              "body": "Markdown: a lightweight markup language used here.",
+              "t_start": 0.0, "t_end": 60.0}]
+    md2, _ = P.assemble_markdown("T", "S", legit, {}, {"url": None})
+    assert "Markdown: a lightweight markup language used here." in md2

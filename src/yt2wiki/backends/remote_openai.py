@@ -30,6 +30,11 @@ class TruncatedResponseError(RuntimeError):
         self.partial = partial
 
 class RemoteOpenAIBackend(BaseBackend):
+    # The server speaks modern structured outputs (json_schema/strict).
+    # Callers check this flag before requesting a response schema; backends
+    # without it keep today's behaviour and rely on downstream validation.
+    supports_structured_schema = True
+
     def __init__(self, spec: ModelSpec, variant: dict[str, Any], device: str, index: int | None, *, base_url: str, model: str = "", api_key_env: str = "", timeout: float = 60.0):
         super().__init__(spec, variant, device, index)
         self.base_url = base_url.rstrip("/")
@@ -37,6 +42,11 @@ class RemoteOpenAIBackend(BaseBackend):
         self.api_key_env = api_key_env
         self.timeout = timeout
         self._headers = {}
+        # Per-endpoint verdict: does this server accept schemas alongside
+        # images? None = untested. Some engines (observed) accept json_schema
+        # for text but refuse any schema on image requests; the judge adapts
+        # once and remembers, instead of failing every multi-image call.
+        self._schema_with_images: bool | None = None
         self.last_finish_reason: str | None = None
         if api_key_env:
             key = os.environ.get(api_key_env, "")
@@ -64,7 +74,23 @@ class RemoteOpenAIBackend(BaseBackend):
             r.raise_for_status()
             return r.json()
 
-    def chat(self, messages: Sequence[dict[str, str]], *, max_new_tokens: int = 2048, temperature: float = 0.1, top_p: float = 0.9, stop: Sequence[str] = (), json_mode: bool = False) -> str:
+    def _response_format(self, json_mode: bool,
+                           response_schema: dict[str, Any] | None,
+                           schema_name: str) -> dict[str, Any] | None:
+        # Preferred: OpenAI-standard json_schema with strict enforcement, so
+        # the server (not just the prompt) enforces enums, required fields and
+        # shapes. vLLM >= 0.32 honours this; the legacy guided_json field is
+        # silently ignored there, so it is not used.
+        if response_schema is not None:
+            return {"type": "json_schema",
+                    "json_schema": {"name": schema_name,
+                                    "schema": response_schema,
+                                    "strict": True}}
+        if json_mode:
+            return {"type": "json_object"}
+        return None
+
+    def chat(self, messages: Sequence[dict[str, str]], *, max_new_tokens: int = 2048, temperature: float = 0.1, top_p: float = 0.9, stop: Sequence[str] = (), json_mode: bool = False, response_schema: dict[str, Any] | None = None, schema_name: str = "response") -> str:
         if not self.loaded:
             raise RuntimeError("backend not loaded")
         payload: dict[str, Any] = {
@@ -75,8 +101,9 @@ class RemoteOpenAIBackend(BaseBackend):
         }
         if self.model_name:
             payload["model"] = self.model_name
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
+        fmt = self._response_format(json_mode, response_schema, schema_name)
+        if fmt is not None:
+            payload["response_format"] = fmt
         if stop:
             payload["stop"] = list(stop)
         data = self._post(payload)
@@ -106,8 +133,8 @@ class RemoteOpenAIBackend(BaseBackend):
         except Exception as exc:
             raise RuntimeError(f"remote chat parse failed: {exc} payload={data}") from exc
 
-    def chat_json(self, messages: Sequence[dict[str, str]], *, max_new_tokens: int = 2048, temperature: float = 0.1, **kw) -> Any:
-        raw = self.chat(messages, max_new_tokens=max_new_tokens, temperature=temperature, json_mode=True, **kw)
+    def chat_json(self, messages: Sequence[dict[str, str]], *, max_new_tokens: int = 2048, temperature: float = 0.1, response_schema: dict[str, Any] | None = None, schema_name: str = "response", **kw) -> Any:
+        raw = self.chat(messages, max_new_tokens=max_new_tokens, temperature=temperature, json_mode=True, response_schema=response_schema, schema_name=schema_name, **kw)
         from .llm import extract_json
         return extract_json(raw)
 
@@ -125,7 +152,9 @@ class RemoteOpenAIBackend(BaseBackend):
         im.convert("RGB").save(buf, format="JPEG", quality=85)
         return base64.b64encode(buf.getvalue()).decode()
 
-    def rank_images(self, images: Sequence[Any], prompt: str, *, max_new_tokens: int = 400, temperature: float = 0.0, system: str | None = None) -> str:
+    def rank_images(self, images: Sequence[Any], prompt: str, *, max_new_tokens: int = 400, temperature: float = 0.0, system: str | None = None, response_schema: dict[str, Any] | None = None, schema_name: str = "response") -> str:
+        if not self.loaded:
+            raise RuntimeError("backend not loaded")
         if not self.loaded:
             raise RuntimeError("backend not loaded")
         content: list[dict[str, Any]] = []
@@ -144,7 +173,33 @@ class RemoteOpenAIBackend(BaseBackend):
         payload: dict[str, Any] = {"messages": msgs, "max_tokens": max_new_tokens, "temperature": temperature}
         if self.model_name:
             payload["model"] = self.model_name
-        data = self._post(payload)
+        want_schema = response_schema is not None and self._schema_with_images is not False
+        fmt = self._response_format(False, response_schema if want_schema else None, schema_name)
+        if fmt is not None:
+            payload["response_format"] = fmt
+        try:
+            data = self._post(payload)
+        except httpx.HTTPStatusError as exc:
+            body = ""
+            try:
+                body = (exc.response.text or "").lower() if exc.response is not None else ""
+            except Exception:  # noqa: BLE001 - best-effort body read
+                pass
+            if (want_schema and response_schema is not None
+                    and exc.response is not None and exc.response.status_code == 400
+                    and "schema" in body):
+                # This endpoint refuses schemas alongside images: retry once
+                # plain and remember, so the judge degrades to validated
+                # plain JSON instead of failing every multi-image call.
+                log.warning("endpoint rejects schemas with images; retrying plain")
+                self._schema_with_images = False
+                payload.pop("response_format", None)
+                data = self._post(payload)
+            else:
+                raise
+        else:
+            if want_schema and response_schema is not None:
+                self._schema_with_images = True
         try:
             content = data["choices"][0]["message"]["content"]
             if content is None:

@@ -223,6 +223,13 @@ def assemble_markdown(article_title: str, summary: str, sections: list[dict[str,
             # Writer-emitted ## subheadings would escape their section and
             # pollute the outline/TOC: demote one level (structure fix only).
             body = _demote_headings_outside_fences(body)
+            # Schema-instruction leakage: models sometimes echo the prompt's
+            # shape example ("markdown: ...") as a literal body prefix. Strip
+            # that bare marker only: lowercase, at the very start, with
+            # nothing but a heading or a line break after it. Same-line
+            # prose ("Markdown: a lightweight ...") is legitimate content
+            # and is preserved verbatim.
+            body = _re.sub(r"^markdown:(?=[ \t]*(?:\n|#|$))", "", body)
             # Collapse any blank lines that stripping left behind
             body = _re.sub(r"\n{3,}", "\n\n", body).strip()
             if body:

@@ -46,8 +46,23 @@ def _mock_provider(monkeypatch, *, writer=True, vision=True):
             if "V9" in msgs or "image" in msgs.lower():
                 if not vision:
                     return httpx.Response(200, json={"choices": [{"message": {"content": "junk"}}]})
-                return httpx.Response(200, json={"choices": [{"message": {"content":
-                    '{"scores": [{"idx": 1, "relevance": 2, "clarity": 2, "instructional": 2, "payoff": 2, "veto": false}], "decision": "KEEP", "winner": 1, "explanation": "clear demo"}'}}]})
+                # Ground the canned verdict in the actual request: the probe
+                # sends 2 images and rejects a mismatched images_received.
+                # (One data: payload per image; "image_url" also names the part type.)
+                n_images = msgs.count("data:image")
+                verdict = {
+                    "scores": [
+                        {"idx": 1, "relevance": 2, "clarity": 2,
+                         "instructional": 2, "payoff": 2, "veto": False},
+                        {"idx": 2, "relevance": 1, "clarity": 2,
+                         "instructional": 1, "payoff": 1, "veto": False},
+                    ],
+                    "decision": "KEEP", "winner": 1,
+                    "explanation": "clear demo",
+                    "images_received": n_images,
+                }
+                return httpx.Response(200, json={"choices": [{"message": {
+                    "content": _json.dumps(verdict)}}]})
             if not writer:
                 return httpx.Response(200, json={"choices": [{"message": {"content": "junk"}}]})
             return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]})

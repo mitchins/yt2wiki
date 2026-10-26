@@ -46,6 +46,16 @@ class StubVLM:
             return self.labels.pop(0) if self.labels else "instructional"
         if "main subject" in prompt:
             return self.subject
+        # Ground the canned verdict in the actual request: the judge now
+        # rejects responses whose images_received mismatches the sent count.
+        try:
+            import json as _json
+            doc = _json.loads(self.rubric)
+            if isinstance(doc, dict):
+                doc["images_received"] = len(images)
+                return _json.dumps(doc)
+        except Exception:  # noqa: BLE001 - non-JSON canned reply passes through
+            pass
         return self.rubric
 
 
@@ -59,9 +69,10 @@ def _sec():
 
 
 def _rubric_json(entries, decision="KEEP", winner=1, pair=(),
-                 explanation="exp", direction="none", weakness="shows the widget clearly in place"):
+                 explanation="exp", direction="none", weakness="shows the widget clearly in place",
+                 received=None):
     import json
-    return json.dumps({
+    doc = {
         "scores": [{"idx": e[0], "relevance": e[1], "clarity": e[2],
                     "instructional": e[3], "payoff": e[4],
                     "veto": e[5] if len(e) > 5 else False,
@@ -69,7 +80,10 @@ def _rubric_json(entries, decision="KEEP", winner=1, pair=(),
                     "weakness": weakness} for e in entries],
         "decision": decision, "winner": winner, "pair": list(pair),
         "explanation": explanation,
-        "refinement": {"direction": direction, "detail": "d"}})
+        "refinement": {"direction": direction, "detail": "d"}}
+    if received is not None:
+        doc["images_received"] = received
+    return json.dumps(doc)
 
 
 # --- pure policy ------------------------------------------------------------
@@ -114,7 +128,7 @@ def test_decide_weak_best_expands_then_omits():
 # --- parsing -----------------------------------------------------------------
 
 def test_parse_rubric_clamps_and_computes_totals():
-    raw = _rubric_json([(1, 2, 9, -4, 1)])
+    raw = _rubric_json([(1, 2, 9, -4, 1), (2, 2, 2, 2, 2)], received=2)
     p = J._parse_rubric(raw, 2)
     assert p["scores"][0]["clarity"] == 2
     assert p["scores"][0]["instructional"] == 0
@@ -124,7 +138,16 @@ def test_parse_rubric_clamps_and_computes_totals():
 def test_parse_rubric_rejects_garbage():
     assert J._parse_rubric("not json at all", 2) is None
     assert J._parse_rubric('{"decision": "KEEP"}', 2) is None
-    assert J._parse_rubric(_rubric_json([(9, 2, 2, 2, 2)]), 2) is None
+    assert J._parse_rubric(_rubric_json([(9, 2, 2, 2, 2)], received=2), 2) is None
+    # Grounded but out of range stays rejected; mismatched or missing
+    # images_received is rejected even when the scores look fine.
+    assert J._parse_rubric(_rubric_json([(1, 2, 2, 2, 2)], received=3), 2) is None
+    assert J._parse_rubric(_rubric_json([(1, 2, 2, 2, 2)]), 2) is None
+
+
+def test_parse_rubric_rejects_no_image_verdict():
+    raw = _rubric_json([(1, 2, 2, 2, 2)], received=2, decision="NO_IMAGE")
+    assert J._parse_rubric(raw, 2) is None
 
 
 # --- refinement windows -------------------------------------------------------
@@ -203,7 +226,8 @@ def test_z1_omit_when_all_vetoed_no_rounds(tiny_pngs, no_ocr):
     alts = [_cand("f-a1", tiny_pngs[1], 20)]
     frames = [init, *alts]
     be = StubVLM(labels=["talking_head", "promo_or_sales"],
-                 rubric=_rubric_json([(1, 0, 0, 0, 0, True)]))
+                 rubric=_rubric_json([(1, 0, 0, 0, 0, True),
+                                      (2, 0, 0, 0, 0, True)]))
     rec = J.adjudicate_section_z1(be, _sec(), init, alts, frames,
                                   max_rounds=0, seed=3)
     assert rec["decision"] == "OMIT"
@@ -315,9 +339,13 @@ def test_parse_rubric_rejects_nested_verdict():
 def test_parse_rubric_tolerates_fences_and_trailing_prose():
     raw = ('```json\n{"scores": [{"idx": 1, "relevance": 2, "clarity": 1,'
            '"instructional": 2, "payoff": 1, "veto": false, "veto_reason": "",'
-           ' "context_ok": false, "weakness": "clear view of the widget"}],'
+           ' "context_ok": false, "weakness": "clear view of the widget"},'
+           ' {"idx": 2, "relevance": 1, "clarity": 2,'
+           '"instructional": 1, "payoff": 1, "veto": false, "veto_reason": "",'
+           ' "context_ok": false, "weakness": "plain view"}],'
            ' "decision": "KEEP", "winner": 1, "pair": [], "explanation": "fine",'
-           ' "refinement": {"direction": "none", "detail": ""}}\n```\nSome trailing prose.')
+           ' "refinement": {"direction": "none", "detail": ""},'
+           ' "images_received": 2}\n```\nSome trailing prose.')
     p = J._parse_rubric(raw, 2)
     assert p is not None and p["decision"] == "KEEP" and p["winner"] == 1
 
@@ -503,7 +531,8 @@ def test_subject_backstop_rescue_on_explanation_overlap(monkeypatch, tiny_pngs, 
               ' "veto_reason": "", "context_ok": false, "weakness": "None"}],'
               ' "decision": "KEEP", "winner": 1, "pair": [],'
               ' "explanation": "Shows the 250 MB/s transfer result.",'
-              ' "refinement": {"direction": "none", "detail": ""}}')
+              ' "refinement": {"direction": "none", "detail": ""},'
+              ' "images_received": 1}')
 
     class Stub:
         def __init__(self, subject, rubric):

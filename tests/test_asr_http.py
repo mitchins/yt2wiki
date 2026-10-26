@@ -764,13 +764,89 @@ def test_qualify_vision_list_content_and_retry_error(monkeypatch):
         return _h.Response(200, json=_msg(
             '{"scores": [{"idx": 1, "relevance": 2, "clarity": 2, '
             '"instructional": 2, "payoff": 2, "weakness": "ok", '
+            '"veto": false, "context_ok": false}, '
+            '{"idx": 2, "relevance": 1, "clarity": 2, '
+            '"instructional": 1, "payoff": 1, "weakness": "plain", '
             '"veto": false, "context_ok": false}], '
-            '"decision": "KEEP", "winner": 1, "explanation": "fine"}'))
+            '"decision": "KEEP", "winner": 1, "explanation": "fine", '
+            '"images_received": 2}'))
 
     monkeypatch.setattr(_h, "post", _list_resp)
     assert inf._qualify_vision("http://x", {}, "m", 5.0) is False
     monkeypatch.setattr(_h, "post", _flaky)
     assert inf._qualify_vision("http://x", {}, "m", 5.0) is True
+
+
+def test_qualify_vision_adapts_when_server_rejects_schemas_with_images(monkeypatch):
+    import httpx as _h
+
+    from yt2wiki.web import inference as inf
+
+    def _msg(content):
+        return {"choices": [{"message": {"content": content}}]}
+
+    def _schema_refuser(*a, **k):
+        payload = k.get("json", {})
+        if payload.get("response_format"):
+            return _h.Response(400, json={
+                "error": {"message": "SCHEMA on a request with images is not supported"}})
+        return _h.Response(200, json=_msg(
+            '{"scores": [{"idx": 1, "relevance": 2, "clarity": 2, '
+            '"instructional": 2, "payoff": 2, "weakness": "ok", '
+            '"veto": false, "context_ok": false}, '
+            '{"idx": 2, "relevance": 1, "clarity": 2, '
+            '"instructional": 1, "payoff": 1, "weakness": "plain", '
+            '"veto": false, "context_ok": false}], '
+            '"decision": "KEEP", "winner": 1, "explanation": "fine", '
+            '"images_received": 2}'))
+
+    monkeypatch.setattr(_h, "post", _schema_refuser)
+    # Same runtime adaptation: schema first, validated plain JSON after.
+    assert inf._qualify_vision("http://x", {}, "m", 5.0) is True
+
+
+def _qualify_reply(monkeypatch, content):
+    import httpx as _h
+
+    from yt2wiki.web import inference as inf
+
+    def _ok(*a, **k):
+        return _h.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    monkeypatch.setattr(_h, "post", _ok)
+    return inf._qualify_vision("http://x", {}, "m", 5.0)
+
+
+def _two_scores(idxs=(1, 2), **over):
+    import json as _json
+    scores = [{"idx": i, "relevance": 2, "clarity": 2, "instructional": 2,
+               "payoff": 1, "weakness": "ok", "veto": False,
+               "context_ok": False} for i in idxs]
+    doc = {"scores": scores, "decision": "KEEP", "winner": 1, "pair": [],
+           "explanation": "fine", "images_received": 2}
+    doc.update(over)
+    return _json.dumps(doc)
+
+
+def test_qualify_vision_rejects_partial_score_coverage(monkeypatch):
+    # One score for a two-image probe: the endpoint ignores the schema and
+    # must not qualify (the outdated c86087f-era mock shape).
+    assert _qualify_reply(monkeypatch, _two_scores(idxs=(1,))) is False
+
+
+def test_qualify_vision_rejects_coercible_images_received(monkeypatch):
+    assert _qualify_reply(monkeypatch, _two_scores(images_received=2.0)) is False
+    assert _qualify_reply(monkeypatch, _two_scores(images_received="2")) is False
+    assert _qualify_reply(monkeypatch, _two_scores(images_received=True)) is False
+
+
+def test_qualify_vision_rejects_no_image(monkeypatch):
+    assert _qualify_reply(monkeypatch, _two_scores(
+        decision="NO_IMAGE", images_received=0)) is False
+
+
+def test_qualify_vision_accepts_full_valid_verdict(monkeypatch):
+    assert _qualify_reply(monkeypatch, _two_scores()) is True
 
 
 def test_detect_language_head_failure_returns_none(tmp_path, monkeypatch):

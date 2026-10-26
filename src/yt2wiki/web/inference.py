@@ -466,7 +466,7 @@ def _qualify_vision(url: str, headers: dict[str, str], model: str, timeout: floa
     from PIL import Image, ImageDraw
 
     try:
-        from ..v9.judge import RUBRIC_PROMPT, _parse_rubric
+        from ..v9.judge import RUBRIC_PROMPT, RUBRIC_SCHEMA, _parse_rubric
     except Exception:
         return False
     # Two distinguishable frames; content must be real pixels
@@ -495,17 +495,35 @@ def _qualify_vision(url: str, headers: dict[str, str], model: str, timeout: floa
     }
     if model:
         payload["model"] = model
-    # Try with json_object first; V9-Z2 showed guided_json is ignored for 26B, so raw is the real test
-    for attempt in range(2):
-        if attempt == 1:
-            # Second try: no response_format, plain
+    # The publisher sends json_schema/strict to capable servers, so the
+    # probe must verify schema enforcement — not just prompt-shaped JSON.
+    # A server that rejects the schema (or hallucinates past it) cannot
+    # serve the judge: NO_IMAGE and images_received mismatches fail closed.
+    # Servers that refuse schemas alongside images (observed engine
+    # behaviour) are re-probed plain, exactly as the runtime adapts;
+    # anything else failing stays a failure.
+    # (vLLM >= 0.32 silently ignores the legacy guided_json field; the
+    # OpenAI-standard json_schema form is the supported mechanism.)
+    schema_format = {"type": "json_schema",
+                     "json_schema": {"name": "rubric", "schema": RUBRIC_SCHEMA,
+                                     "strict": True}}
+    plain_fallback = False
+    for _ in range(3):
+        if plain_fallback:
             payload.pop("response_format", None)
         else:
-            payload["response_format"] = {"type": "json_object"}
+            payload["response_format"] = schema_format
         try:
             r = httpx.post(f"{url}/chat/completions", json=payload, headers=headers, timeout=timeout + 30)
-            if r.status_code != 200:
-                continue
+        except Exception:
+            continue
+        if (r.status_code == 400 and not plain_fallback
+                and "schema" in r.text.lower()):
+            plain_fallback = True
+            continue
+        if r.status_code != 200:
+            continue
+        try:
             data = r.json()
             raw = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
             if isinstance(raw, list):
