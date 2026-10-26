@@ -50,13 +50,15 @@ _AUTH_RESPONSES = {
     401: {"description": "Operator login required (POST /api/auth/login)."},
     403: {"description": "Missing/invalid CSRF token, or operator password not configured."},
 }
+_D_NOT_READY = {"description": "Inference services not ready."}
+_D_UNKNOWN_ARTICLE = {"description": "Unknown article id."}
+_D_INVALID_FILENAME = {"description": "Invalid filename."}
 
 
 def _responses(*groups: dict[int, dict[str, str]]) -> dict[int, dict[str, str]]:
     out: dict[int, dict[str, str]] = {}
     for group in groups:
-        for code, doc in group.items():
-            out.setdefault(code, doc)
+        out.update(group)
     return out
 
 
@@ -161,7 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/add/url",
               responses=_responses(_AUTH_RESPONSES, {
                   400: {"description": "Missing/invalid URL, unknown profile or unreachable video."},
-                  409: {"description": "Inference services not ready."}}))
+                  409: _D_NOT_READY}))
     def add_url_form(request: Request, url: str = Form(""), back: str = Form(""),
                      csrf_token: str = Form("")) -> Any:
         try:
@@ -179,8 +181,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/add/upload",
               responses=_responses(_AUTH_RESPONSES, {
-                  400: {"description": "Missing/empty file, unknown profile or empty upload."},
-                  409: {"description": "Inference services not ready."}}))
+                  400: {"description": "Empty upload, unknown profile or unreachable video."},
+                  409: _D_NOT_READY}))
     async def add_upload_form(request: Request, file: UploadFile = File(None),
                               csrf_token: str = Form("")) -> Any:
         try:
@@ -235,7 +237,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                           "article": article, "error": error,
                                           "source": service.get_source(job["source_id"])})
 
-    @app.post("/jobs/{job_id}/retry")
+    @app.post("/jobs/{job_id}/retry", responses=_AUTH_RESPONSES)
     def job_retry(request: Request, job_id: str, csrf_token: str = Form("")) -> Any:
         _require_operator(request, csrf=False)
         _require_operator_form(request, csrf_token)
@@ -246,7 +248,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return RedirectResponse(f"/jobs/{job_id}?error={_quote(str(exc.detail))}",
                                     status_code=303)
 
-    @app.post("/jobs/{job_id}/cancel")
+    @app.post("/jobs/{job_id}/cancel", responses=_AUTH_RESPONSES)
     def job_cancel_form(request: Request, job_id: str, csrf_token: str = Form("")) -> Any:
         _require_operator(request, csrf=False)
         _require_operator_form(request, csrf_token)
@@ -254,7 +256,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return RedirectResponse("/jobs", status_code=303)
 
     @app.get("/articles/{article_id}", response_class=HTMLResponse,
-              responses={404: {"description": "Unknown article id."}})
+              responses={404: _D_UNKNOWN_ARTICLE})
     def read_article(request: Request, article_id: str) -> Any:
         ctx = views.article_context(db, settings.paths, article_id)
         if ctx is None:
@@ -287,7 +289,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         })
 
     @app.get("/articles/{article_id}/edit", response_class=HTMLResponse,
-              responses=_responses(_AUTH_RESPONSES, {404: {"description": "Unknown article id."}}))
+              responses={404: _D_UNKNOWN_ARTICLE})
     def edit_article(request: Request, article_id: str) -> Any:
         row = db.query_one(_ARTICLE_BY_ID_SQL, (article_id,))
         if row is None:
@@ -373,7 +375,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return resp
 
     @app.get("/assets/{article_id}/{filename}",
-              responses={400: {"description": "Invalid filename."},
+              responses={400: _D_INVALID_FILENAME,
                          404: {"description": "Asset missing or not an image."}})
     def asset(article_id: str, filename: str) -> Any:
         if "/" in filename or ".." in filename or "/" in article_id or ".." in article_id:
@@ -384,7 +386,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
     @app.get("/frames/{source_id}/{filename}",
-              responses={400: {"description": "Invalid filename."},
+              responses={400: _D_INVALID_FILENAME,
                          404: {"description": "Frame not found."}})
     def source_frame(source_id: str, filename: str) -> Any:
         if ("/" in filename or ".." in filename or ".." in source_id
@@ -540,7 +542,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/sources/url",
               responses=_responses(_AUTH_RESPONSES, {
                   400: {"description": "Missing/invalid URL, unknown profile or unreachable video."},
-                  409: {"description": "Inference services not ready."}}))
+                  409: _D_NOT_READY}))
     def api_add_url(request: Request, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         job = submit_url(payload.get("url") or "", payload.get("profile") or "")
@@ -548,8 +550,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/sources/upload",
               responses=_responses(_AUTH_RESPONSES, {
-                  400: {"description": "Missing/empty file, unknown profile or empty upload."},
-                  409: {"description": "Inference services not ready."}}))
+                  400: {"description": "Empty upload, unknown profile or unreachable video."},
+                  409: _D_NOT_READY}))
     async def api_upload(
         request: Request,
         file: UploadFile = File(...),
@@ -593,7 +595,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
               responses=_responses(_AUTH_RESPONSES, {
                   404: {"description": "Unknown job id."},
                   400: {"description": "Unknown profile."},
-                  409: {"description": "Inference services not ready."}}))
+                  409: _D_NOT_READY}))
     def api_reprocess(request: Request, job_id: str, payload: dict = Body(default={})) -> Any:
         _require_operator(request)
         job = service.get_job(job_id)
@@ -683,7 +685,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/preview",
               responses={400: {"description": "markdown is required."},
-                         404: {"description": "Unknown article id."}})
+                         404: _D_UNKNOWN_ARTICLE})
     def api_preview(payload: dict = Body(...)) -> Any:
         article_id = str(payload.get("article_id") or "")
         md = payload.get("markdown")
@@ -697,7 +699,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/articles/{article_id}/images/move",
               responses=_responses(_AUTH_RESPONSES, {
-                  404: {"description": "Unknown article id."},
+                  404: _D_UNKNOWN_ARTICLE,
                   400: {"description": "Move rejected: image missing or invalid target section."}}))
     def api_image_move(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
         _require_operator(request)
@@ -744,7 +746,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/articles/{article_id}",
               responses=_responses(_AUTH_RESPONSES, {
                   400: {"description": "markdown is required (min length 20)."},
-                  404: {"description": "Unknown article id."}}))
+                  404: _D_UNKNOWN_ARTICLE}))
     def api_edit_article(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         markdown = payload.get("markdown")
@@ -858,7 +860,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return dict(row)
 
     @app.get("/api/v9/articles/{article_id}/sections",
-              responses={404: {"description": "Unknown article id."}})
+              responses={404: _D_UNKNOWN_ARTICLE})
     def api_v9_sections(article_id: str) -> Any:
         row = db.query_one("SELECT outline_json FROM articles WHERE article_id=?", (article_id,))
         if row is None:
@@ -929,7 +931,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/articles/{article_id}/images/remove",
               responses=_responses(_AUTH_RESPONSES, {
                   400: {"description": "frame_id required or invalid."},
-                  404: {"description": "Unknown article id."}}))
+                  404: _D_UNKNOWN_ARTICLE}))
     def api_image_remove(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         old = (payload.get("frame_id") or "").strip()
@@ -941,7 +943,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/articles/{article_id}/images/caption",
               responses=_responses(_AUTH_RESPONSES, {
                   400: {"description": "frame_id required."},
-                  404: {"description": "Unknown article id."}}))
+                  404: _D_UNKNOWN_ARTICLE}))
     def api_image_caption(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         fid = (payload.get("frame_id") or "").strip()
@@ -1047,7 +1049,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
               responses=_responses(_AUTH_RESPONSES, {
                   404: {"description": "Unknown source id."},
                   400: {"description": "Unknown profile."},
-                  409: {"description": "Inference services not ready."}}))
+                  409: _D_NOT_READY}))
     def api_reprocess_source(request: Request, source_id: str, payload: dict = Body(default={})) -> Any:
         _require_operator(request)
         if service.get_source(source_id) is None:
@@ -1073,7 +1075,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return [dict(r) for r in rows]
 
     @app.get("/media/{source_id}/{filename}",
-              responses={400: {"description": "Invalid filename."},
+              responses={400: _D_INVALID_FILENAME,
                          404: {"description": "Unknown source or media file missing."}})
     def media(source_id: str, filename: str) -> Any:
         if "/" in filename or ".." in filename:
