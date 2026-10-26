@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Local, evidence-grounded compiler that turns a YouTube video into an illustrated wiki-style technical article."
 requires-python = ">=3.11"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 
 dependencies = [
     "yt-dlp>=2025.1",
