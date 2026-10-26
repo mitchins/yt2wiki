@@ -157,8 +157,6 @@ class RemoteOpenAIBackend(BaseBackend):
     def rank_images(self, images: Sequence[Any], prompt: str, *, max_new_tokens: int = 400, temperature: float = 0.0, system: str | None = None, response_schema: dict[str, Any] | None = None, schema_name: str = "response") -> str:
         if not self.loaded:
             raise RuntimeError(_NOT_LOADED_MSG)
-        if not self.loaded:
-            raise RuntimeError(_NOT_LOADED_MSG)
         content: list[dict[str, Any]] = []
         for i, im in enumerate(images):
             content.append({"type":"text","text":f"Image {i+1}:"})

@@ -18,7 +18,7 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from tests.conftest import login_client  # noqa: E402,F401
+from tests.conftest import login_client, post_json  # noqa: E402,F401
 from yt2wiki.config import Settings  # noqa: E402
 from yt2wiki.db.schema import Database  # noqa: E402
 from yt2wiki.pipeline import StageContext  # noqa: E402
@@ -168,3 +168,122 @@ def test_editor_controls_have_visible_labels(app, operator_password):
     assert ">Back</span>" in html
     assert ">Remove</span>" in html
     _no_stale_aria_labels(html, ["Back to the guide", "Remove this image"])
+
+
+# ---------------------------------------------------------------------
+# Error-path coverage for routes whose literal-to-constant swap touched
+# previously untested branches (404/400 handlers).
+
+def _rule_evidence():
+    from yt2wiki.records import Evidence
+
+    return [
+        Evidence(evidence_id="ev-aaa111", kind="action",
+                 text="Insert the USB drive into the Pi and boot it up",
+                 t_start=214.0, t_end=219.0),
+        Evidence(evidence_id="ev-bbb222", kind="config",
+                 text="Set arm frequency to 3000 megahertz",
+                 t_start=100.0, t_end=105.0),
+    ]
+
+
+def test_rule_unsupported_flags_broken_and_mismatched_citations():
+    from yt2wiki.pipeline.stages.verify import _rule_unsupported
+
+    ev = _rule_evidence()
+    md_broken = ("## Procedure\n\n1. **Boot.**\n\n"
+                 "   Insert the USB drive into the Pi and boot it up."
+                 " <!-- cite: step=1 ev=ev-zzz999 t=214-219 frames=- -->\n")
+    out = _rule_unsupported(None, md_broken, ev)
+    broken = [f for f in out if f["code"] == "broken_citation"]
+    assert broken and broken[0]["direction"] == "article->evidence"
+
+    md_mismatch = ("## Procedure\n\n1. **Boot.**\n\n"
+                   "   Run the installer from the USB drive and reboot."
+                   " <!-- cite: step=1 ev=ev-bbb222 t=100-105 frames=- -->\n")
+    out2 = _rule_unsupported(None, md_mismatch, ev)
+    mismatched = [f for f in out2 if f["code"] == "mismatched_citation"]
+    assert mismatched and "ev-aaa111" in mismatched[0]["message"]
+
+
+def test_classic_publish_stage_writes_standalone_bundle_and_zip(tmp_path):
+    from types import SimpleNamespace
+
+    from tests.test_generations import _seed_article, _seed_source_job
+    from yt2wiki.pipeline.stages import publish as publish_stage
+
+    settings = Settings.load(data_dir=tmp_path / "data", profile="compact",
+                             device_index=None)
+    db = Database(settings.paths.db_path)
+    db.migrate()
+    _seed_source_job(db)
+    _seed_article(db, article_id="art-yt-pub", source_id="yt-abc")
+    assets = settings.paths.article_assets("art-yt-pub")
+    assets.mkdir(parents=True, exist_ok=True)
+    (assets / "f-1.jpg").write_bytes(b"\xff\xd8fakejpg")
+    settings.paths.article_markdown("art-yt-pub").write_text("# T\n\nhello\n")
+    ctx = SimpleNamespace(job_id="job-1", source_id="yt-abc", settings=settings,
+                          db=db, paths=settings.paths, fingerprint="fp",
+                          artifacts={"article_id": "art-yt-pub"}, meta=lambda: {},
+                          inference_snapshot=None)
+    out = publish_stage.run(ctx)
+    assert ctx.artifacts["published"] is True
+    standalone = settings.paths.article_dir("art-yt-pub") / publish_stage._STANDALONE_HTML_NAME
+    assert standalone.is_file()
+    assert out["standalone_html_bytes"] == standalone.stat().st_size
+    assert (settings.paths.article_dir("art-yt-pub") / "article.zip").is_file()
+    assert db.query_one("SELECT status FROM articles WHERE article_id='art-yt-pub'"
+                        )["status"] == "published"
+
+
+def test_remote_backend_guards_raise_when_not_loaded():
+    from yt2wiki.backends.remote_openai import RemoteOpenAIBackend, _NOT_LOADED_MSG
+    from yt2wiki.config import ModelSpec
+
+    spec = ModelSpec(key="k", role="vision", engine="remote-openai", repo="r")
+    be = RemoteOpenAIBackend(spec, {}, "cpu", None, base_url="http://x:1/v1")
+    assert be.loaded is False
+    with pytest.raises(RuntimeError, match=_NOT_LOADED_MSG):
+        be.chat([{"role": "user", "content": "hi"}])
+    with pytest.raises(RuntimeError, match=_NOT_LOADED_MSG):
+        be.rank_images([], "pick one")
+
+
+def test_web_error_paths_after_constant_swap(app, operator_password):
+    settings, db, application = app
+    _seed_article(settings, db)
+    anon = TestClient(application)
+    client, csrf = login_client(application)
+
+    # anonymous 404s / 400s
+    assert anon.get("/jobs/missing").status_code == 404
+    assert anon.get("/api/jobs/missing").status_code == 404
+    assert anon.get("/assets/art9-yt-abc/%2E%2E").status_code == 400
+    assert anon.get("/frames/yt-abc/%2E%2E.jpg").status_code == 400
+    assert anon.get("/media/yt-abc/%2E%2E").status_code == 400
+    assert anon.get("/api/articles/missing/export.md").status_code == 404
+    assert anon.get("/api/v9/articles/missing/sections").status_code == 404
+    assert anon.get("/api/v9/articles/missing/alternatives").status_code == 404
+    assert anon.post("/api/preview",
+                     json={"article_id": "missing", "markdown": "text"}
+                     ).status_code == 404
+
+    # operator-gated error paths
+    assert client.get("/articles/missing/edit").status_code == 404
+    assert post_json(client, csrf, "/api/jobs/missing/reprocess", {}).status_code == 404
+    assert post_json(client, csrf, "/api/articles/missing", {"markdown": "x" * 20}
+                     ).status_code == 404
+    assert post_json(client, csrf, "/api/articles/missing/images/move",
+                     {"frame_id": "f-1", "section": "First part"}).status_code == 404
+    assert post_json(client, csrf, "/api/articles/missing/images/caption",
+                     {"frame_id": "f-1", "caption": "c"}).status_code == 404
+    assert post_json(client, csrf, "/api/articles/missing/images/replace",
+                     {"old_frame_id": "f-1", "new_frame_id": "f-2"}
+                     ).status_code == 404
+
+    # form flows render/redirect with the shared message strings
+    r = client.post("/jobs/missing/retry", data={"csrf_token": csrf},
+                    follow_redirects=False)
+    assert r.status_code == 303 and "error=job%20not%20found" in r.headers["location"]
+    r = client.post("/add/upload", data={"csrf_token": csrf})
+    assert r.status_code == 400 and "Choose a video file" in r.text
