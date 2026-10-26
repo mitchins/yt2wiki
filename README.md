@@ -15,9 +15,16 @@ yt2wiki is local-first and uses external inference services. No bundled models o
 ```bash
 git clone https://github.com/mitchins/yt2wiki.git
 cd yt2wiki
-docker compose pull
-docker compose up -d
+# Pin the release you want (never :latest; :main tracks the moving branch):
+YT2WIKI_IMAGE_TAG=v0.1.0 docker compose pull
+YT2WIKI_IMAGE_TAG=v0.1.0 docker compose up -d
 ```
+
+### Licence
+
+Apache-2.0 — see [LICENSE](LICENSE). Model weights are not bundled; ASR and
+inference run against services you configure. Generated articles derive from
+the videos you supply — respect those videos' own terms and rights.
 
 Open http://localhost:8080.
 

@@ -38,6 +38,21 @@ manifest digest from the `release-report` artifact instead of any tag:
 digests are content-addressed and cannot be moved at all. `:main` stays the
 moving tag for the latest qualified main build.
 
+### Version tags promote, never rebuild
+
+A `v*` tag names a commit. When that commit is already qualified (its
+`sha-<commit>` tag is published from the main build), the version-tag
+workflow **promotes** the existing manifest instead of rebuilding:
+`scripts/ci/promote-version.sh` re-labels `sha-<commit>` as `vX.Y.Z` after
+verifying the source manifest carries both release platforms
+(`linux/amd64` + `linux/arm64`). Promotion keeps the manifest digest — the
+version tag resolves to exactly the image the release report recorded. A
+version tag is never overwritten once published, and promoting never moves
+`:main` (or any other tag). If the commit is *not* yet published (a release
+cut directly from a commit without a main build), the workflow builds,
+qualifies and publishes it exactly like a main push. `docker-build` skips
+its per-platform rebuild when the commit's immutable tag already exists.
+
 ## Platforms
 
 The manifest qualifies one image per platform; Compose pulls the matching one:

@@ -178,7 +178,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check whether this exact commit is already published
+        id: published
+        run: |
+          if docker buildx imagetools inspect "ghcr.io/mitchins/yt2wiki:sha-${GITHUB_SHA::7}" >/dev/null 2>&1; then
+            echo "already=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "already=no" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push by digest
+        if: steps.published.outputs.already != 'yes'
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0, node24
         with:
@@ -190,9 +200,11 @@ jobs:
           cache-to: type=gha,mode=max,scope=image-${{ matrix.platform }}
 
       - name: Smoke-qualify the pushed image
+        if: steps.published.outputs.already != 'yes'
         run: bash scripts/ci/image-smoke.sh "ghcr.io/mitchins/yt2wiki@${{ steps.build.outputs.digest }}" "${{ matrix.platform }}"
 
       - name: Record digest (only a smoke-qualified image joins the manifest)
+        if: steps.published.outputs.already != 'yes'
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
@@ -200,6 +212,7 @@ jobs:
           echo "$digest" > "/tmp/digests/${digest//:/_}"
 
       - name: Upload digest
+        if: steps.published.outputs.already != 'yes'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, node24
         with:
           name: digests-${{ matrix.platform == 'linux/arm64' && 'arm64' || 'amd64' }}
@@ -233,14 +246,43 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download platform digests
+        if: steps.mode.outputs.mode == 'build'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1, node24
         with:
           pattern: digests-*
           path: /tmp/digests
           merge-multiple: true
 
+      - name: Decide publish mode
+        id: mode
+        run: |
+          short="${GITHUB_SHA::7}"
+          if docker buildx imagetools inspect "ghcr.io/mitchins/yt2wiki:sha-$short" >/dev/null 2>&1; then
+            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+              # The commit is already qualified: promote its manifest to the
+              # version tag instead of rebuilding unverifiable digests.
+              echo "mode=promote" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::sha-$short is already published; main pushes never move an immutable tag. Delete the tag explicitly or cut a new commit."
+              exit 1
+            fi
+          else
+            echo "mode=build" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Promote the already-qualified manifest (version tags only)
+        if: steps.mode.outputs.mode == 'promote'
+        run: |
+          short="${GITHUB_SHA::7}"
+          bash scripts/ci/promote-version.sh \
+            "ghcr.io/mitchins/yt2wiki:sha-$short" \
+            "ghcr.io/mitchins/yt2wiki:${GITHUB_REF#refs/tags/}" \
+            /tmp/p3-manifest.txt
+          grep -o 'linux/[a-z0-9/]*' /tmp/p3-manifest.txt | sort -u | tee /tmp/p3-platforms.txt
+
       - name: Create and verify the manifest
         id: manifest
+        if: steps.mode.outputs.mode == 'build'
         run: |
           refs=""
           for f in /tmp/digests/*_*; do
@@ -269,7 +311,7 @@ jobs:
           grep -o 'linux/[a-z0-9/]*' /tmp/p3-manifest.txt | sort -u | tee /tmp/p3-platforms.txt
 
       - name: Smoke-qualify the published tag
-        run: bash scripts/ci/image-smoke.sh "ghcr.io/mitchins/yt2wiki:sha-${{ steps.manifest.outputs.short }}" linux/amd64
+        run: bash scripts/ci/image-smoke.sh "ghcr.io/mitchins/yt2wiki:sha-${GITHUB_SHA::7}" linux/amd64
 
       - name: Probe anonymous pull (visibility check, non-blocking)
         id: anon
@@ -287,10 +329,11 @@ jobs:
           {
             echo "commit=${GITHUB_SHA}";
             echo "tag=${GITHUB_REF}";
+            echo "publish_mode=${{ steps.mode.outputs.mode }}";
             echo "manifest_digest=$(grep -m1 Digest: /tmp/p3-manifest.txt | awk '{print $2}')";
             echo "platforms=$(paste -sd, /tmp/p3-platforms.txt)";
             echo "anonymous_pull=${{ steps.anon.outputs.anonymous }}";
-            echo "digests:"; ls /tmp/digests;
+            echo "digests:"; ls /tmp/digests 2>/dev/null || true;
           } | tee "$GITHUB_WORKSPACE/release-report.txt"
 
       - name: Upload release report
