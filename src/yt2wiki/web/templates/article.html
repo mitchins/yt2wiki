@@ -81,7 +81,7 @@
                 {% if source.origin_url %}<dt>URL</dt><dd><a href="{{ source.origin_url }}" target="_blank" rel="noopener noreferrer">{{ source.origin_url }}</a></dd>{% endif %}
                 {% if source.duration_s %}<dt>Length</dt><dd>{{ source.duration_s|ts }}</dd>{% endif %}
                 {% if report.profile %}<dt>Profile</dt><dd>{{ report.profile }}</dd>{% endif %}
-                {% for role, m in (report.models or {}).items() %}<dt>{{ {'asr': 'Transcription', 'vision': 'Image judge', 'text': 'Writer'}.get(role, role) }}</dt><dd><code>{{ m.repo }}</code></dd>{% endfor %}
+                {% for role in ('text', 'vision', 'asr') %}<dt>{{ {'asr': 'Transcription', 'vision': 'Image judge', 'text': 'Writer'}.get(role, role) }}</dt><dd>{% set m = (report.models_effective or {}).get(role) %}{% if m and (m.provider or m.model) %}<code>{{ m.provider }}{% if m.model %} · {{ m.model }}{% endif %}</code>{% if m.remote %} <span class="muted">remote</span>{% endif %}{% else %}Unknown{% endif %}</dd>{% endfor %}
                 {% if report.timings %}<dt>Processing</dt><dd>{{ report.timings.total_s|duration }}</dd>{% endif %}
                 {% if report.git_commit %}<dt>Build</dt><dd><code>{{ report.git_commit }}</code></dd>{% endif %}
                 <dt>Article</dt><dd><code>{{ article.article_id }}</code> · version {{ article.version }}{% if revision_count %} · <a href="/articles/{{ article.article_id }}/edit#history">{{ revision_count }} earlier {{ 'revision' if revision_count == 1 else 'revisions' }}</a>{% endif %}</dd>

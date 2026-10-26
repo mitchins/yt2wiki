@@ -13,6 +13,75 @@ from typing import Any
 
 from .. import reader
 
+# Writer-role aliases to the reader's canonical role keys.
+_ROLE_ALIASES = {"writer": "text", "text": "text",
+                 "vision": "vision", "asr": "asr"}
+
+
+def _coerce_identity(entry: Any) -> dict[str, Any] | None:
+    """Normalise one effective-model entry for the template (None = Unknown)."""
+    if not isinstance(entry, dict):
+        return None
+    provider = str(entry.get("provider") or "").strip()
+    model = str(entry.get("model") or "").strip()
+    if provider.lower() in ("", "unknown") and model.lower() in ("", "unknown"):
+        return None
+    url = str(entry.get("url") or "")
+    return {"provider": provider or "unknown", "model": model or "",
+            "remote": bool(entry.get("remote") or url.startswith("http"))}
+
+
+def _manifest_providers(db, paths, article_id: str) -> dict[str, Any]:
+    """Job-captured providers from the current generation manifest (legacy)."""
+    try:
+        row = db.query_one(
+            "SELECT manifest_path FROM generations WHERE article_id=? "
+            "ORDER BY created_at DESC LIMIT 1", (article_id,))
+        rel = row["manifest_path"] if row else None
+        if not rel:
+            # Articles table carries the current generation pointer; fall back
+            # to the newest manifest file on disk.
+            gdir = paths.article_dir(article_id) / "generations"
+            cands = sorted(gdir.glob("*/manifest.json")) if gdir.is_dir() else []
+            if not cands:
+                return {}
+            data = json.loads(cands[-1].read_text(encoding="utf-8"))
+        else:
+            data = json.loads(
+                (paths.article_dir(article_id) / rel).read_text(encoding="utf-8"))
+        providers = data.get("providers")
+        return providers if isinstance(providers, dict) else {}
+    except Exception:  # noqa: BLE001 - legacy without provenance reads Unknown
+        return {}
+
+
+def effective_models_for_report(db, paths, article_id: str,
+                                report: dict[str, Any]) -> dict[str, Any | None]:
+    """Effective (actually-used) model identities for the reader (§5).
+
+    New reports carry models_effective from publish time; legacy reports are
+    resolved from the current generation manifest's job-captured providers.
+    Roles without trustworthy information read None so the template renders
+    Unknown instead of a guessed registry default.
+    """
+    merged: dict[str, Any] = {}
+    eff = report.get("models_effective") if isinstance(report, dict) else None
+    if isinstance(eff, dict):
+        for role, entry in eff.items():
+            key = _ROLE_ALIASES.get(role)
+            # An "unknown" report entry carries no information: leave the
+            # role empty so the manifest fallback below can supply the
+            # recorded identity instead of blocking it.
+            if key and key not in merged and _coerce_identity(entry) is not None:
+                merged[key] = entry
+    if not all(merged.get(r) for r in ("text", "vision", "asr")):
+        for role, entry in _manifest_providers(db, paths, article_id).items():
+            key = _ROLE_ALIASES.get(role)
+            if key and not merged.get(key):
+                merged[key] = entry
+    return {r: _coerce_identity(merged.get(r)) for r in ("text", "vision", "asr")}
+
+
 # Writer-assigned article kinds (v9_write metrics) -> reader-facing label.
 KIND_LABELS = {
     "procedure": "How-to",
@@ -263,6 +332,11 @@ def article_context(db, paths, article_id: str) -> dict[str, Any] | None:
     kind = _article_kinds(db, [article.get("job_id") or ""]).get(article.get("job_id") or "", "")
     view = render_reader(paths, article_id, article["markdown"], numbered=(kind == "procedure"))
     report = _loads(_read(paths.article_dir(article_id) / "v9_report.json"), {}) or {}
+    # Effective (actually-used) models: publish-time identities, else the
+    # current generation manifest; Unknown where nothing trustworthy exists.
+    report = dict(report)
+    report["models_effective"] = effective_models_for_report(
+        db, paths, article_id, report)
     others = [dict(r) for r in db.query(
         "SELECT article_id, title, created_at, updated_at FROM articles "
         "WHERE source_id=? AND article_id<>? ORDER BY created_at DESC",

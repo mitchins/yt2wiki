@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -406,13 +407,22 @@ class ModelManager:
 
 def _role_timeout(role: str, raw: Any) -> float:
     """Per-role default timeout: transcription of long audio needs minutes."""
-    if isinstance(raw, (int, float)) and raw > 0:
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool) \
+            and math.isfinite(raw) and raw > 0:
         return float(raw)
     if role == "asr":
         try:
             return max(60.0, float(os.environ.get("YT2WIKI_ASR_TIMEOUT") or 300.0))
         except ValueError:
             return 300.0
+    if role == "text":
+        # Long structured sections can take a minute on a shared server; the
+        # operator may tune this, but it stays a bounded per-request timeout.
+        try:
+            value = float(os.environ.get("YT2WIKI_WRITER_TIMEOUT") or 90.0)
+        except ValueError:
+            return 90.0
+        return value if math.isfinite(value) and value > 0 else 90.0
     return 90.0
 
 
