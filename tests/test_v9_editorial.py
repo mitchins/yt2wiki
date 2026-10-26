@@ -601,8 +601,11 @@ def test_genuine_short_instruction_stays_procedure(tmp_path):
         if _span_of(user) is None:
             return {"title": "Connect Your Account", "summary": "Link it.",
                     "kind": "procedure"}
+        # Concise rewriting, not an exact transcript copy: an exact
+        # normalised copy is rejected as a dump at any length.
         return {"heading": "Connect",
-                "body": ("Open the dashboard. Click the blue Connect button to link your account."),
+                "body": ("Open the dashboard first. Then click the blue "
+                         "Connect button to link your account."),
                 "key_points": [], "warnings": []}
 
     art = W.write_article(settings, db, "s-short", backend=ScriptBackend(route))
@@ -1038,3 +1041,21 @@ def test_rc01_unknown_report_identity_yields_to_manifest(tmp_path):
     eff = views.effective_models_for_report(db, settings.paths, "art9-x", report)
     assert eff["text"]["provider"] == "halogen"
     assert eff["text"]["model"] == "halogen-qwen3.8-flash-next"
+
+
+# --------------------------------------------------------------------------
+# RC02: exact short copies are dumps at any length; concise rewriting is not.
+
+def test_rc02_exact_short_copy_rejected_rewording_allowed():
+    rows = [(0.0, 15.0, "Open the dashboard."),
+            (15.0, 30.0, "Click the blue Connect button to link your account.")]
+    segs = [{"start": a, "end": b, "text": t} for a, b, t in rows]
+    excerpt = W.section_transcript(segs, 0.0, 30.0)
+    # Byte-identical to the span transcript (prefixes aside): rejected even
+    # though it is far below the approximate-similarity scale floor.
+    exact = "Open the dashboard. Click the blue Connect button to link your account."
+    assert W._is_verbatim_dump(exact, excerpt) is True
+    # Legitimate concise rewriting of the same short span: kept.
+    reworded = ("First, open the dashboard. Then click the blue Connect "
+                "button to link your account.")
+    assert W._is_verbatim_dump(reworded, excerpt) is False

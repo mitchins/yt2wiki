@@ -320,9 +320,13 @@ def _is_verbatim_dump(body: str, excerpt: str) -> bool:
     ne = _normalise_text(_TS_PREFIX.sub("", excerpt or ""))
     if not nb or not ne:
         return False
-    # Scale floor: below ~500 excerpt chars a near-verbatim body is
-    # legitimate concise writing (a short span restated), not a section-scale
-    # transcript dump. Containment/similarity cannot tell them apart.
+    # An exact normalised copy is a dump at any length: no written section
+    # is byte-identical to its span transcript.
+    if nb == ne:
+        return True
+    # Scale floor for approximate similarity only: below ~500 excerpt
+    # chars a near-verbatim body is legitimate concise writing (a short
+    # span restated in other words), not a section-scale transcript dump.
     if len(ne) < 500:
         return False
     if nb in ne or ne in nb:
