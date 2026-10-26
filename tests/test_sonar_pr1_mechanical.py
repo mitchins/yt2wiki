@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,10 @@ from yt2wiki.reader import enhance  # noqa: E402
 from yt2wiki.v9 import publish as v9pub  # noqa: E402
 from yt2wiki.web.app import create_app  # noqa: E402
 
+ARTICLE_ID = "art9-yt-abc"
+SOURCE_ID = "yt-abc"
+JOB_ID = "job-1"
+MISSING = "missing"
 MD = """# Install the thing
 
 > Compiled from the video **Thing** by Someone
@@ -49,7 +54,7 @@ def app(tmp_path):
     return settings, db, create_app(settings)
 
 
-def _seed_article(settings, db, *, article_id="art9-yt-abc", source_id="yt-abc"):
+def _seed_article(settings, db, *, article_id=ARTICLE_ID, source_id=SOURCE_ID):
     from PIL import Image
 
     now = time.time()
@@ -203,7 +208,8 @@ def test_rule_unsupported_flags_broken_and_mismatched_citations():
                    " <!-- cite: step=1 ev=ev-bbb222 t=100-105 frames=- -->\n")
     out2 = _rule_unsupported(None, md_mismatch, ev)
     mismatched = [f for f in out2 if f["code"] == "mismatched_citation"]
-    assert mismatched and "ev-aaa111" in mismatched[0]["message"]
+    assert mismatched and mismatched[0]["detail"]["supported_by"] == "ev-aaa111"
+    assert mismatched[0]["detail"]["cited"] == ["ev-bbb222"]
 
 
 def test_classic_publish_stage_writes_standalone_bundle_and_zip(tmp_path):
@@ -217,23 +223,28 @@ def test_classic_publish_stage_writes_standalone_bundle_and_zip(tmp_path):
     db = Database(settings.paths.db_path)
     db.migrate()
     _seed_source_job(db)
-    _seed_article(db, article_id="art-yt-pub", source_id="yt-abc")
-    assets = settings.paths.article_assets("art-yt-pub")
+    _seed_article(db, article_id=ARTICLE_ID, source_id=SOURCE_ID)
+    db.execute("UPDATE articles SET status='draft' WHERE article_id=?", (ARTICLE_ID,))
+    assets = settings.paths.article_assets(ARTICLE_ID)
     assets.mkdir(parents=True, exist_ok=True)
     (assets / "f-1.jpg").write_bytes(b"\xff\xd8fakejpg")
-    settings.paths.article_markdown("art-yt-pub").write_text("# T\n\nhello\n")
-    ctx = SimpleNamespace(job_id="job-1", source_id="yt-abc", settings=settings,
+    settings.paths.article_markdown(ARTICLE_ID).write_text("# T\n\nhello\n")
+    ctx = SimpleNamespace(job_id="job-1", source_id=SOURCE_ID, settings=settings,
                           db=db, paths=settings.paths, fingerprint="fp",
-                          artifacts={"article_id": "art-yt-pub"}, meta=lambda: {},
+                          artifacts={"article_id": ARTICLE_ID}, meta=lambda: {},
                           inference_snapshot=None)
     out = publish_stage.run(ctx)
     assert ctx.artifacts["published"] is True
-    standalone = settings.paths.article_dir("art-yt-pub") / publish_stage._STANDALONE_HTML_NAME
+    adir = settings.paths.article_dir(ARTICLE_ID)
+    standalone = adir / "article.standalone.html"
     assert standalone.is_file()
     assert out["standalone_html_bytes"] == standalone.stat().st_size
-    assert (settings.paths.article_dir("art-yt-pub") / "article.zip").is_file()
-    assert db.query_one("SELECT status FROM articles WHERE article_id='art-yt-pub'"
-                        )["status"] == "published"
+    bundle_files = sorted(p.name for p in (adir / "export").rglob("*") if p.is_file())
+    assert {"article.md", "article.html", "verification.json", "provenance.json"} <= set(bundle_files)
+    with zipfile.ZipFile(adir / "article.zip") as zf:
+        assert "article.md" in zf.namelist()
+    assert db.query_one("SELECT status FROM articles WHERE article_id=?",
+                        (ARTICLE_ID,))["status"] == "published"
 
 
 def test_remote_backend_guards_raise_when_not_loaded():
@@ -256,33 +267,33 @@ def test_web_error_paths_after_constant_swap(app, operator_password):
     client, csrf = login_client(application)
 
     # anonymous 404s / 400s
-    assert anon.get("/jobs/missing").status_code == 404
-    assert anon.get("/api/jobs/missing").status_code == 404
+    assert anon.get(f"/jobs/{MISSING}").status_code == 404
+    assert anon.get(f"/api/jobs/{MISSING}").status_code == 404
     assert anon.get("/assets/art9-yt-abc/%2E%2E").status_code == 400
     assert anon.get("/frames/yt-abc/%2E%2E.jpg").status_code == 400
     assert anon.get("/media/yt-abc/%2E%2E").status_code == 400
-    assert anon.get("/api/articles/missing/export.md").status_code == 404
-    assert anon.get("/api/v9/articles/missing/sections").status_code == 404
-    assert anon.get("/api/v9/articles/missing/alternatives").status_code == 404
+    assert anon.get(f"/api/articles/{MISSING}/export.md").status_code == 404
+    assert anon.get(f"/api/v9/articles/{MISSING}/sections").status_code == 404
+    assert anon.get(f"/api/v9/articles/{MISSING}/alternatives").status_code == 404
     assert anon.post("/api/preview",
-                     json={"article_id": "missing", "markdown": "text"}
+                     json={"article_id": MISSING, "markdown": "text"}
                      ).status_code == 404
 
     # operator-gated error paths
-    assert client.get("/articles/missing/edit").status_code == 404
-    assert post_json(client, csrf, "/api/jobs/missing/reprocess", {}).status_code == 404
-    assert post_json(client, csrf, "/api/articles/missing", {"markdown": "x" * 20}
+    assert client.get(f"/articles/{MISSING}/edit").status_code == 404
+    assert post_json(client, csrf, f"/api/jobs/{MISSING}/reprocess", {}).status_code == 404
+    assert post_json(client, csrf, f"/api/articles/{MISSING}", {"markdown": "x" * 20}
                      ).status_code == 404
-    assert post_json(client, csrf, "/api/articles/missing/images/move",
+    assert post_json(client, csrf, f"/api/articles/{MISSING}/images/move",
                      {"frame_id": "f-1", "section": "First part"}).status_code == 404
-    assert post_json(client, csrf, "/api/articles/missing/images/caption",
+    assert post_json(client, csrf, f"/api/articles/{MISSING}/images/caption",
                      {"frame_id": "f-1", "caption": "c"}).status_code == 404
-    assert post_json(client, csrf, "/api/articles/missing/images/replace",
+    assert post_json(client, csrf, f"/api/articles/{MISSING}/images/replace",
                      {"old_frame_id": "f-1", "new_frame_id": "f-2"}
                      ).status_code == 404
 
     # form flows render/redirect with the shared message strings
-    r = client.post("/jobs/missing/retry", data={"csrf_token": csrf},
+    r = client.post(f"/jobs/{MISSING}/retry", data={"csrf_token": csrf},
                     follow_redirects=False)
     assert r.status_code == 303 and "error=job%20not%20found" in r.headers["location"]
     r = client.post("/add/upload", data={"csrf_token": csrf})
