@@ -871,7 +871,7 @@ def adjudicate_section_z1(backend, section: dict[str, Any], initial: dict[str, A
 
     decision, reason, pair_ids = _z1_policy_loop(
         backend, section, frames, seen, verdict, cache, _expects,
-        max_rounds, state, rounds, score_round, refine)
+        max_rounds, state, rounds, score_round, refine, counters)
 
     final_ids = _z1_final_ids(decision, pair_ids, state, initial)
     # re-verify finals through the single-frame veto (never publish knowingly poor)
@@ -987,8 +987,8 @@ def _z1_eligible_strong(s: dict[str, Any] | None) -> bool:
 
 
 def _z1_policy_loop(backend, section, frames, seen, verdict, cache, _expects,
-                    max_rounds, state: _Z1State, rounds, score_round,
-                    refine):
+                    max_rounds, state: _Z1State, rounds, score_round, refine,
+                    counters):
     """Threshold policy (KEEP/REPLACE/USE_PAIR/OMIT) with EXPAND refinement.
 
     Returns (decision, reason, pair_ids). The loop only iterates through
@@ -1012,7 +1012,7 @@ def _z1_policy_loop(backend, section, frames, seen, verdict, cache, _expects,
         if policy["action"] == "EXPAND" and state.refinement_rounds < max_rounds:
             outcome = _z1_expand_round(
                 backend, section, frames, seen, verdict, cache, _expects,
-                state, rounds, by_idx, policy, refine)
+                state, rounds, by_idx, policy, refine, counters)
             if outcome is None:
                 continue  # rescored: policy re-runs on the new state
             kind, payload = outcome
@@ -1034,7 +1034,7 @@ def _z1_policy_loop(backend, section, frames, seen, verdict, cache, _expects,
 
 
 def _z1_expand_round(backend, section, frames, seen, verdict, cache, _expects,
-                     state: _Z1State, rounds, by_idx, policy, refine
+                     state: _Z1State, rounds, by_idx, policy, refine, counters
                      ) -> tuple[str, str] | None:
     """Handle an EXPAND policy: overrule, omit, or refine and rescore.
 
@@ -1060,6 +1060,8 @@ def _z1_expand_round(backend, section, frames, seen, verdict, cache, _expects,
         seen.add(c["frame_id"])
     new_pre = classify_many(backend, [c["path"] for c in new],
                             cache=cache, expects_text=_expects)
+    counters["vlm"] += 1
+    counters["inspected"] += len(new)
     for c, v in zip(new, new_pre):
         verdict[c["frame_id"]] = v
     clean_new = [c for c, v in zip(new, new_pre) if not v["veto"]][:2]

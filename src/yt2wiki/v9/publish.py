@@ -463,7 +463,7 @@ def _stage_outputs(stage: Path, stage_assets: Path, article, markdown: str,
     return html, outline
 
 
-def _commit_publication(db, conn, *, settings, article_id: str, source_id: str,
+def _commit_publication(conn, *, settings, article_id: str, source_id: str,
                         job_id: str, title: str, markdown: str, html: str,
                         outline: list, asset_rows: list,
                         manifest: dict[str, Any],
@@ -513,8 +513,6 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
             picks: dict[str, list[dict[str, Any]]],
             provenance: dict[str, Any], report: dict[str, Any],
             inference_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
-    from ..db.schema import json_dumps  # noqa: F401 (parity with prior imports)
-
     article = _build_v9_article(source_id, title, sections, picks, provenance)
 
     adir = settings.paths.article_dir(article_id)
@@ -564,7 +562,7 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
         with promoted_stage(adir, stage, manifest["generation_id"],
                             prune_assets=True), db.transaction() as conn:
             _commit_publication(
-                db, conn, settings=settings, article_id=article_id,
+                conn, settings=settings, article_id=article_id,
                 source_id=source_id, job_id=job_id, title=title,
                 markdown=markdown, html=html, outline=outline,
                 asset_rows=asset_rows, manifest=manifest,

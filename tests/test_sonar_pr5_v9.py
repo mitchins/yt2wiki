@@ -78,3 +78,61 @@ def test_rubric_known_decisions_accepted(decision):
            ' "images_received": 1}')
     parsed = _parse_rubric(raw, 1)
     assert parsed is not None and parsed["decision"] == decision
+
+
+def test_z1_refinement_round_accounts_for_vlm_calls(monkeypatch):
+    """An EXPAND refinement round increments vlm_calls/frames_inspected once."""
+    from yt2wiki.v9 import judge as J
+
+    calls = {"classify": 0}
+
+    def fake_classify_many(backend, paths, *, cache=None, expects_text=False):
+        calls["classify"] += 1
+        return [{"path": p, "label": "instructional", "veto": False,
+                 "reason": "", "ocr": {}} for p in paths]
+
+    monkeypatch.setattr(J, "classify_many", fake_classify_many)
+    section = {"section_id": "sec-1", "heading": "Install it",
+               "body": "Install the widget by following these steps precisely.",
+               "t_start": 0.0, "t_end": 60.0}
+    initial = {"frame_id": "f-1", "path": "/tmp/f-1.jpg", "t": 10.0}
+    alts = [{"frame_id": f"f-{i}", "path": f"/tmp/f-{i}.jpg", "t": 10.0 + i}
+            for i in range(2, 6)]
+    # unseen later-video frames the EXPAND refinement can retrieve
+    later = [{"frame_id": "f-10", "path": "/tmp/f-10.jpg", "t": 40.0},
+             {"frame_id": "f-11", "path": "/tmp/f-11.jpg", "t": 50.0}]
+
+    def fake_scores(ordered):
+        return {"scores": [{"idx": i + 1, "relevance": 0, "clarity": 0,
+                            "specificity": 0, "context": 0, "aesthetics": 0,
+                            "total": 0, "veto": False, "veto_reason": "",
+                            "context_ok": False, "weakness": "",
+                            "frame_id": c["frame_id"]}
+                           for i, c in enumerate(ordered)],
+                "decision": "EXPAND", "winner": 0, "pair": [],
+                "explanation": "e",
+                "refinement": {"direction": "later", "detail": "d"}}
+
+    def fake_score_candidates(backend, section, ordered, current_pos, *, cache=None):
+        return fake_scores(ordered), 1
+
+    class Stub:
+        supports_structured_schema = False
+
+    monkeypatch.setattr(J, "score_candidates", fake_score_candidates)
+    monkeypatch.setattr(J, "_vet_candidate",
+                        lambda backend, cand, expects: {"flagged": False,
+                                                        "reason": "", "label": "",
+                                                        "ocr": {}})
+    monkeypatch.setattr(J, "subject_of", lambda backend, path, cache=None: "widget")
+    monkeypatch.setattr(J, "_subject_supported", lambda desc, section: True)
+    rec = J.adjudicate_section_z1(
+        Stub(), section, initial, alts, [initial] + alts + later,
+        max_rounds=1, seed=0)
+    # EXPAND with all-zero totals and max_rounds=1 ends in OMIT after rescore
+    assert rec["decision"] == "OMIT"
+    assert rec["rounds"] and rec["rounds"][-1]["refinement"]
+    # one classify_many in pool pre-filter + one per refinement round
+    refinements = sum(1 for r in rec["rounds"] if "refinement" in r)
+    assert calls["classify"] == 1 + refinements
+    assert rec["vlm_calls"] >= 2

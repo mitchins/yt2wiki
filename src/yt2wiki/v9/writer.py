@@ -876,4 +876,3 @@ def write_article(settings, db, source_id: str, *, backend=None,
         "coverage": coverage,
         "elapsed_s": round(time.time() - started, 3),
     }
-
