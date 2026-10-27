@@ -53,6 +53,7 @@ _AUTH_RESPONSES = {
 _D_NOT_READY = {"description": "Inference services not ready."}
 _D_UNKNOWN_ARTICLE = {"description": "Unknown article id."}
 _D_INVALID_FILENAME = {"description": "Invalid filename."}
+_D_UNKNOWN_JOB = {"description": "Unknown job id."}
 
 
 def _responses(*groups: dict[int, dict[str, str]]) -> dict[int, dict[str, str]]:
@@ -181,7 +182,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/add/upload",
               responses=_responses(_AUTH_RESPONSES, {
-                  400: {"description": "Empty upload, unknown profile or unreachable video."},
+                  400: {"description": "Missing/empty file or unknown profile."},
                   409: _D_NOT_READY}))
     async def add_upload_form(request: Request, file: UploadFile = File(None),
                               csrf_token: str = Form("")) -> Any:
@@ -218,7 +219,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                            "queued": queued, "history": history})
 
     @app.get("/jobs/{job_id}", response_class=HTMLResponse,
-              responses={404: {"description": "Unknown job id."}})
+              responses={404: _D_UNKNOWN_JOB})
     def job_page(request: Request, job_id: str, error: str = Query("")) -> Any:
         job = service.get_job(job_id)
         if job is None:
@@ -550,7 +551,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/sources/upload",
               responses=_responses(_AUTH_RESPONSES, {
-                  400: {"description": "Empty upload, unknown profile or unreachable video."},
+                  400: {"description": "Missing/empty file or unknown profile."},
                   409: _D_NOT_READY}))
     async def api_upload(
         request: Request,
@@ -566,7 +567,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"jobs": [_job_json(j) for j in active_jobs()]}
 
     @app.get("/api/jobs/{job_id}",
-              responses={404: {"description": "Unknown job id."}})
+              responses={404: _D_UNKNOWN_JOB})
     def api_job(job_id: str) -> Any:
         job = service.get_job(job_id)
         if job is None:
@@ -593,7 +594,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/reprocess",
               responses=_responses(_AUTH_RESPONSES, {
-                  404: {"description": "Unknown job id."},
+                  404: _D_UNKNOWN_JOB,
                   400: {"description": "Unknown profile."},
                   409: _D_NOT_READY}))
     def api_reprocess(request: Request, job_id: str, payload: dict = Body(default={})) -> Any:

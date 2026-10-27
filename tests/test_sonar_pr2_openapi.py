@@ -68,6 +68,7 @@ def test_openapi_documents_flagged_error_codes(app):
                                                   "/articles/{article_id}/edit"))
     # Form routes whose guards do propagate auth errors declare them.
     assert set(_responses_of(schema, "post", "/jobs/{job_id}/retry")) >= {"401", "403"}
+    assert not {"404", "409"} & set(_responses_of(schema, "post", "/jobs/{job_id}/retry"))
     assert set(_responses_of(schema, "post", "/jobs/{job_id}/cancel")) >= {"401", "403"}
 
 
