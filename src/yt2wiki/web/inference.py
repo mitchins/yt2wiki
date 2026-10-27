@@ -540,7 +540,7 @@ def _qualify_vision(url: str, headers: dict[str, str], model: str, timeout: floa
         from ..v9.judge import RUBRIC_PROMPT, RUBRIC_SCHEMA, _parse_rubric
     except Exception:
         return False
-    content, prompt = _vision_probe_content(RUBRIC_PROMPT)
+    content, _prompt = _vision_probe_content(RUBRIC_PROMPT)
     payload: dict[str, Any] = {
         "messages": [{"role": "system", "content": "You judge images for technical documentation. Reply JSON only."},
                      {"role": "user", "content": content}],

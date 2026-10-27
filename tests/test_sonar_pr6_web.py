@@ -90,7 +90,8 @@ def test_revert_helpers_present_and_shallow(tmp_path):
     md = "a\n![x](assets/f1.jpg)\n\n*cap*\nb"
     dropped = _drop_image_markdown(md, "f1")
     assert "assets/f1.jpg" not in dropped
-    assert "a" in dropped and "b" in dropped
+    assert "a" in dropped
+    assert "b" in dropped
 
     # missing frame row: restore is a no-op, never raises
     class _DB:
@@ -201,7 +202,8 @@ def test_inference_probe_helpers(monkeypatch):
 
     monkeypatch.setattr(httpx, "get", _fail_get)
     probed = inference._probe_models("http://x", {}, 1.0)
-    assert probed["models"] == [] and probed["llm_like"] is False
+    assert probed["models"] == []
+    assert probed["llm_like"] is False
 
     # schema-reject once then success: retry without response_format succeeds
     calls = {"n": 0}

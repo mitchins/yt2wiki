@@ -63,10 +63,10 @@ def _responses(*groups: dict[int, dict[str, str]]) -> dict[int, dict[str, str]]:
     return out
 
 
-async def _route__startup(app) -> None:
+def _route__startup(app) -> None:
     app.state.runner.recover()
 
-async def _route__shutdown(app) -> None:
+def _route__shutdown(app) -> None:
     app.state.runner.stop()
 
 def _route_page(app, request: Request, name: str, ctx: dict[str, Any], status_code: int=200) -> Any:
@@ -515,8 +515,19 @@ def _route_api_revisions(app, article_id: str) -> Any:
     return [dict(r) for r in rows]
 
 
+def _strip_source_suffix(cap: str) -> str:
+    """Drop a trailing " — source at [...]" trailer (no regex backtracking)."""
+    i = cap.find("—")
+    while i != -1:
+        if i > 0 and cap[i - 1].isspace():
+            rest = cap[i + 1:].lstrip()
+            if rest.startswith("source at ["):
+                return cap[:i].rstrip()
+        i = cap.find("—", i + 1)
+    return cap
+
+
 def _caption_from_markdown(markdown: str, fid: str) -> str:
-    import re as _re2
     lines = markdown.split('\n')
     for i, ln in enumerate(lines):
         if f'assets/{fid}.jpg' in ln:
@@ -525,7 +536,7 @@ def _caption_from_markdown(markdown: str, fid: str) -> str:
                 j += 1
             if j < len(lines) and lines[j].strip().startswith('*'):
                 cap = lines[j].strip().strip('*').strip()
-                return _re2.sub(r'\s+—\s+source at \[.*$', '', cap).strip()
+                return _strip_source_suffix(cap).strip()
     return ''
 
 
@@ -747,11 +758,11 @@ def create_app(settings: Settings | None=None) -> FastAPI:
 
     @app.on_event('startup')
     async def _startup() -> None:
-        return await _route__startup(app)
+        return _route__startup(app)
 
     @app.on_event('shutdown')
     async def _shutdown() -> None:
-        return await _route__shutdown(app)
+        return _route__shutdown(app)
 
     @app.get('/', response_class=HTMLResponse)
     @app.get('/library', response_class=HTMLResponse)
@@ -1254,7 +1265,7 @@ def _move_image(markdown: str, frame_id: str, heading: str) -> str:
         raise ValueError("Unknown section.")
     block = [ln for ln in lines[at:end] if ln.strip()]
     rest = lines[:at] + lines[end:]
-    start, stop = _section_insert_range(rest, heading)
+    _start, stop = _section_insert_range(rest, heading)
     insert = [""] + [x for pair in zip(block, [""] * len(block)) for x in pair]
     out = rest[:stop] + insert + rest[stop:]
     text = "\n".join(out)

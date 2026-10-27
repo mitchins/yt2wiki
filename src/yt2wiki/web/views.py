@@ -401,8 +401,10 @@ def _frame_exists(db, paths, source_id: str, frame_id: str) -> bool:
 
 
 def _decision_candidates(rec, source_id: str, chosen: set, frame_ok) -> list:
+    import itertools
+
     cands = []
-    for c in (rec.get("candidates") or [])[:6]:
+    for c in itertools.islice(rec.get("candidates") or [], 6):
         fid = c.get("frame_id")
         if fid and frame_ok(fid):
             cands.append({"frame_id": fid, "t": c.get("t"), "chosen": fid in chosen,
