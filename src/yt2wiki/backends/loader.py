@@ -78,6 +78,108 @@ class ModelManager:
             except Exception:  # pragma: no cover - logging must never break a job
                 log.exception("model recorder failed")
 
+    def _release(self, backend: BaseBackend) -> None:
+        """Unload then free CUDA memory (unload errors must not mask job errors)."""
+        try:
+            backend.unload()
+        finally:
+            free_cuda_memory()
+
+    def _discard(self, candidate: BaseBackend) -> None:
+        """Best-effort unload of a failed load attempt, then free CUDA memory."""
+        try:
+            candidate.unload()
+        except Exception:
+            pass
+        free_cuda_memory()
+
+    def _snapshot_role_check(self, role: str, entry: dict[str, Any],
+                             lookup: str) -> None:
+        """Fail rather than fall back when a job-captured provider is unusable."""
+        if not entry.get("reachable"):
+            raise RuntimeError(
+                f"inference provider '{entry.get('provider')}' for role '{lookup}' "
+                f"was not reachable at submission time.")
+        if role == "vision" and not entry.get("qualified_for_vision"):
+            raise RuntimeError(
+                f"provider '{entry.get('provider')}' was not qualified for vision "
+                f"at submission time.")
+        if role == "text" and not entry.get("qualified_for_writer"):
+            # Writer may be reachable but not yet qualified — fail rather than fall back
+            raise RuntimeError(
+                f"provider '{entry.get('provider')}' was not qualified for writing "
+                f"at submission time.")
+        if role == "asr" and not entry.get("qualified_for_asr"):
+            raise RuntimeError(
+                f"provider '{entry.get('provider')}' was not qualified for "
+                f"transcription at submission time.")
+
+    def _snapshot_spec(self, role: str, entry: dict[str, Any]) -> tuple[ModelSpec, dict[str, Any]]:
+        """Synthetic (spec, provider) from a job-captured inference snapshot."""
+        provider = {"url": entry.get("url"), "model": entry.get("model") or "",
+                    "api_key_env": entry.get("api_key_env") or "",
+                    "timeout": _role_timeout(role, entry.get("timeout"))}
+        variant = {"model": provider.get("model") or "", "url": provider["url"],
+                   "api_key_env": provider.get("api_key_env") or "",
+                   "timeout": float(provider.get("timeout", 90.0))}
+        engine = "asr-http" if role == "asr" else "remote-openai"
+        spec = ModelSpec(
+            key=f"remote-{entry.get('provider')}",
+            role=role,
+            engine=engine,
+            repo=provider.get("model") or entry.get("url", ""),
+            revision="remote",
+            provider=entry.get("provider") or "",
+            notes=f"Remote {provider['url']} via {entry.get('provider')}",
+            variants={self.settings.profile: dict(variant)},
+        )
+        return spec, provider
+
+    def _config_role_check(self, role: str, provider_name: str,
+                           status: dict[str, Any]) -> None:
+        """Fail rather than fall back when the live provider is unusable."""
+        if not status.get("ok"):
+            raise RuntimeError(
+                f"inference provider '{provider_name}' for role '{self._lookup_role(role)}' is not reachable "
+                f"(test it in Settings). Status: {status.get('error') or 'not tested'}")
+        if role == "vision" and not status.get("qualified_for_vision"):
+            raise RuntimeError(
+                f"provider '{provider_name}' is not qualified for vision "
+                f"(needs genuine multi-image judging). Qualify it in Settings.")
+        if role == "text" and not status.get("qualified_for_writer"):
+            raise RuntimeError(
+                f"provider '{provider_name}' is not qualified for writing "
+                f"(needs real JSON generation). Qualify it in Settings.")
+        if role == "asr" and not status.get("qualified_for_asr"):
+            raise RuntimeError(
+                f"provider '{provider_name}' is not qualified for transcription "
+                f"(needs the transcription protocol probe). Qualify it in Settings.")
+
+    def _lookup_role(self, role: str) -> str:
+        """Pipeline role → operator-console assignment name (text → writer)."""
+        return {"text": "writer"}.get(role, role)
+
+    def _config_spec(self, role: str, provider_name: str,
+                     provider: dict[str, Any], status: dict[str, Any]) -> tuple[ModelSpec, dict[str, Any]]:
+        """Synthetic (spec, provider) from the live inference config."""
+        # Explicit model takes precedence over discovered models, then URL.
+        repo = provider.get("model") or (status.get("models") or [provider.get("url", "")])[0]
+        variant = {"model": provider.get("model") or "", "url": provider["url"],
+                   "api_key_env": provider.get("api_key_env") or "",
+                   "timeout": _role_timeout(role, provider.get("timeout"))}
+        engine = "asr-http" if role == "asr" else "remote-openai"
+        spec = ModelSpec(
+            key=f"remote-{provider_name}",
+            role=role,
+            engine=engine,
+            repo=repo,
+            revision="remote",
+            provider=provider_name,
+            notes=f"Remote {provider['url']} via {provider_name}",
+            variants={self.settings.profile: dict(variant)},
+        )
+        return spec, provider
+
     def _remote_spec(self, role: str) -> tuple[ModelSpec | None, dict[str, Any] | None]:
         """Return (synthetic spec, provider) when this role is assigned to a remote endpoint.
 
@@ -92,48 +194,15 @@ class ModelManager:
         duplicate configuration. ``asr`` maps to the ``asr`` (transcription)
         assignment.
         """
-        lookup = {"text": "writer"}.get(role, role)
+        lookup = self._lookup_role(role)
         try:
             if self.inference_snapshot is not None:
                 entry = self.inference_snapshot.get(lookup)
                 if not entry:
                     return None, None
                 # Snapshot is already the effective identity at submission time
-                if not entry.get("reachable"):
-                    raise RuntimeError(
-                        f"inference provider '{entry.get('provider')}' for role '{lookup}' "
-                        f"was not reachable at submission time.")
-                if role == "vision" and not entry.get("qualified_for_vision"):
-                    raise RuntimeError(
-                        f"provider '{entry.get('provider')}' was not qualified for vision "
-                        f"at submission time.")
-                if role == "text" and not entry.get("qualified_for_writer"):
-                    # Writer may be reachable but not yet qualified — fail rather than fall back
-                    raise RuntimeError(
-                        f"provider '{entry.get('provider')}' was not qualified for writing "
-                        f"at submission time.")
-                if role == "asr" and not entry.get("qualified_for_asr"):
-                    raise RuntimeError(
-                        f"provider '{entry.get('provider')}' was not qualified for "
-                        f"transcription at submission time.")
-                provider = {"url": entry.get("url"), "model": entry.get("model") or "",
-                            "api_key_env": entry.get("api_key_env") or "",
-                            "timeout": _role_timeout(role, entry.get("timeout"))}
-                variant = {"model": provider.get("model") or "", "url": provider["url"],
-                           "api_key_env": provider.get("api_key_env") or "",
-                           "timeout": float(provider.get("timeout", 90.0))}
-                engine = "asr-http" if role == "asr" else "remote-openai"
-                spec = ModelSpec(
-                    key=f"remote-{entry.get('provider')}",
-                    role=role,
-                    engine=engine,
-                    repo=provider.get("model") or entry.get("url", ""),
-                    revision="remote",
-                    provider=entry.get("provider") or "",
-                    notes=f"Remote {provider['url']} via {entry.get('provider')}",
-                    variants={self.settings.profile: dict(variant)},
-                )
-                return spec, provider
+                self._snapshot_role_check(role, entry, lookup)
+                return self._snapshot_spec(role, entry)
             from ..web import inference as _inf
             cfg = _inf.load(self.settings.paths)
             provider_name = (cfg.get("roles") or {}).get(lookup)
@@ -143,43 +212,39 @@ class ModelManager:
             if not provider:
                 return None, None
             status = _inf.load_status(self.settings.paths).get(provider_name, {})
-            if not status.get("ok"):
-                raise RuntimeError(
-                    f"inference provider '{provider_name}' for role '{lookup}' is not reachable "
-                    f"(test it in Settings). Status: {status.get('error') or 'not tested'}")
-            if role == "vision" and not status.get("qualified_for_vision"):
-                raise RuntimeError(
-                    f"provider '{provider_name}' is not qualified for vision "
-                    f"(needs genuine multi-image judging). Qualify it in Settings.")
-            if role == "text" and not status.get("qualified_for_writer"):
-                raise RuntimeError(
-                    f"provider '{provider_name}' is not qualified for writing "
-                    f"(needs real JSON generation). Qualify it in Settings.")
-            if role == "asr" and not status.get("qualified_for_asr"):
-                raise RuntimeError(
-                    f"provider '{provider_name}' is not qualified for transcription "
-                    f"(needs the transcription protocol probe). Qualify it in Settings.")
-            # Explicit model takes precedence over discovered models, then URL.
-            repo = provider.get("model") or (status.get("models") or [provider.get("url", "")])[0]
-            variant = {"model": provider.get("model") or "", "url": provider["url"],
-                       "api_key_env": provider.get("api_key_env") or "",
-                       "timeout": _role_timeout(role, provider.get("timeout"))}
-            engine = "asr-http" if role == "asr" else "remote-openai"
-            spec = ModelSpec(
-                key=f"remote-{provider_name}",
-                role=role,
-                engine=engine,
-                repo=repo,
-                revision="remote",
-                provider=provider_name,
-                notes=f"Remote {provider['url']} via {provider_name}",
-                variants={self.settings.profile: dict(variant)},
-            )
-            return spec, provider
+            self._config_role_check(role, provider_name, status)
+            return self._config_spec(role, provider_name, provider, status)
         except RuntimeError:
             raise
         except Exception:
             return None, None
+
+    def _build_asr_http(self, spec: ModelSpec) -> BaseBackend:
+        """Registry-default HTTP ASR: resolve env indirection, require a URL."""
+        variant = spec.variant(self.settings.profile)
+        # Variant carries url_env/model_env (resolved here); inference-assigned
+        # providers arrive with url already set.
+        resolved = resolve_env_variant(variant) if "url_env" in variant else dict(variant)
+        if not (resolved.get("url") or "").strip():
+            raise RuntimeError(
+                "no ASR server configured: assign the transcription role to a "
+                "provider (Settings → Inference) or set YT2WIKI_ASR_URL")
+        return HttpAsrBackend(
+            spec, variant, self.device, self.index,
+            base_url=resolved.get("url") or "",
+            model=resolved.get("model") or "",
+            api_key_env=resolved.get("api_key_env") or "",
+            timeout=float(resolved.get("timeout", 300.0)),
+        )
+
+    def _build_transformers(self, role: str, spec: ModelSpec) -> BaseBackend:
+        variant = spec.variant(self.settings.profile)
+        if role == "vision":
+            return TransformersVLM(
+                spec, variant, self.device, self.index, self.settings.hf_home,
+                max_image_tokens=self.settings.tuning.vision_image_tokens,
+            )
+        return TransformersLLM(spec, variant, self.device, self.index, self.settings.hf_home)
 
     def build(self, role: str, spec: ModelSpec) -> BaseBackend:
         variant = spec.variant(self.settings.profile)
@@ -195,32 +260,88 @@ class ModelManager:
         if spec.engine == "faster-whisper":
             return WhisperBackend(spec, variant, self.device, self.index, self.settings.hf_home)
         if spec.engine == "asr-http":
-            # Registry default: variant carries url_env/model_env (resolved
-            # here); inference-assigned providers arrive with url already set.
-            resolved = resolve_env_variant(variant) if "url_env" in variant else dict(variant)
-            if not (resolved.get("url") or "").strip():
-                raise RuntimeError(
-                    "no ASR server configured: assign the transcription role to a "
-                    "provider (Settings → Inference) or set YT2WIKI_ASR_URL")
-            return HttpAsrBackend(
-                spec, variant, self.device, self.index,
-                base_url=resolved.get("url") or "",
-                model=resolved.get("model") or "",
-                api_key_env=resolved.get("api_key_env") or "",
-                timeout=float(resolved.get("timeout", 300.0)),
-            )
+            return self._build_asr_http(spec)
         if spec.engine == "llamacpp-server":
             return LlamaServerVLM(spec, variant, self.device, self.index,
                                   self.settings.hf_home,
                                   max_image_tokens=self.settings.tuning.vision_image_tokens)
         if spec.engine == "transformers":
-            if role == "vision":
-                return TransformersVLM(
-                    spec, variant, self.device, self.index, self.settings.hf_home,
-                    max_image_tokens=self.settings.tuning.vision_image_tokens,
-                )
-            return TransformersLLM(spec, variant, self.device, self.index, self.settings.hf_home)
+            return self._build_transformers(role, spec)
         raise RuntimeError(f"no builder for engine {spec.engine!r}")
+
+    @contextmanager
+    def _load_http_asr(self, role: str, spec: ModelSpec) -> Iterator[BaseBackend]:
+        """HTTP transcription session: no GPU headroom, no OOM fallback.
+
+        A failing server is a loud job error, not a retry; failures are
+        recorded like local load failures, then re-raised.
+        """
+        try:
+            backend = self.build(role, spec)
+            report = backend.load()
+        except Exception as exc:  # noqa: BLE001 - record, then fail loud
+            self._record(
+                role=role, model_key=spec.key, repo=spec.repo,
+                revision=spec.revision, engine=spec.engine,
+                ok=False, device="http", device_index=None,
+                error=str(exc)[:600], fallback_of="",
+            )
+            raise
+        self._record(
+            role=role, model_key=spec.key, repo=spec.repo,
+            revision=spec.revision, engine=spec.engine,
+            variant=backend.report.variant, ok=True,
+            device="http", device_index=None,
+            vram_budget_gb=0, headroom_reason="http-asr",
+            load_seconds=report.load_seconds, peak_vram_gb=0,
+            fallback_of="", note=f"http {getattr(backend, 'server', '')}",
+        )
+        try:
+            yield backend
+        finally:
+            self._release(backend)
+
+    def _load_local_attempt(self, role: str, spec: ModelSpec,
+                            fallback_of: str) -> tuple[BaseBackend | None, Any, BaseBackend | None, Exception | None]:
+        """One spec, up to two OOM re-plans; (backend, info, candidate, error)."""
+        backend: BaseBackend | None = None
+        last_error: Exception | None = None
+        candidate: BaseBackend | None = None
+        info: Any = None
+        excluded: list[int] = []
+        for attempt in range(2):
+            info = self.headroom_for(role, exclude=excluded)
+            candidate = self.build(role, spec)
+            try:
+                report = candidate.load()
+                backend = candidate
+                break
+            except Exception as exc:  # noqa: BLE001
+                if not _is_cuda_oom(exc) or attempt == 1:
+                    last_error = exc
+                    self._record(
+                        role=role, model_key=spec.key, repo=spec.repo, ok=False,
+                        device=f"cuda:{info.device_index}", error=str(exc)[:600],
+                        fallback_of=fallback_of,
+                    )
+                    self._discard(candidate)
+                    # Try the next fallback model (smaller) instead of
+                    # retrying the same spec — this is where fallbacks
+                    # like text-9b → text-4b are exercised.
+                    break
+                excluded.append(info.device_index)
+                self._record(
+                    role=role, model_key=spec.key, repo=spec.repo, ok=False,
+                    device=f"cuda:{info.device_index}", error=f"OOM on this card; {exc}"[:600],
+                    fallback_of=fallback_of,
+                )
+                log.warning("cuda OOM loading %s on device %s; re-planning",
+                            spec.key, info.device_index)
+                self._discard(candidate)
+                continue
+        else:  # pragma: no cover - defensive
+            raise RuntimeError(f"could not allocate {spec.key}")
+        return backend, info, candidate, last_error
 
     @contextmanager
     def acquire(self, role: str) -> Iterator[BaseBackend]:
@@ -252,91 +373,23 @@ class ModelManager:
             try:
                 yield backend
             finally:
-                try:
-                    backend.unload()
-                finally:
-                    free_cuda_memory()
+                self._release(backend)
             return
         chain = self.settings.model_with_fallbacks(role)
         if chain and chain[0].engine == "asr-http":
-            # HTTP transcription: no local load, no GPU headroom, no OOM
-            # fallback (a failing server is a loud job error, not a retry).
-            # Failures are recorded like local load failures, then re-raised.
-            try:
-                backend = self.build(role, chain[0])
-                report = backend.load()
-            except Exception as exc:  # noqa: BLE001 - record, then fail loud
-                self._record(
-                    role=role, model_key=chain[0].key, repo=chain[0].repo,
-                    revision=chain[0].revision, engine=chain[0].engine,
-                    ok=False, device="http", device_index=None,
-                    error=str(exc)[:600], fallback_of="",
-                )
-                raise
-            self._record(
-                role=role, model_key=chain[0].key, repo=chain[0].repo,
-                revision=chain[0].revision, engine=chain[0].engine,
-                variant=backend.report.variant, ok=True,
-                device="http", device_index=None,
-                vram_budget_gb=0, headroom_reason="http-asr",
-                load_seconds=report.load_seconds, peak_vram_gb=0,
-                fallback_of="", note=f"http {getattr(backend, 'server', '')}",
-            )
-            try:
+            with self._load_http_asr(role, chain[0]) as backend:
                 yield backend
-            finally:
-                try:
-                    backend.unload()
-                finally:
-                    free_cuda_memory()
             return
         backend: BaseBackend | None = None
         last_error: Exception | None = None
         for i, spec in enumerate(chain):
             fallback_of = chain[0].key if i > 0 else ""
             reset_peak()
-            excluded: list[int] = []
-            for attempt in range(2):
-                info = self.headroom_for(role, exclude=excluded)
-                candidate = self.build(role, spec)
-                try:
-                    report = candidate.load()
-                    backend = candidate
-                    break
-                except Exception as exc:  # noqa: BLE001
-                    if not _is_cuda_oom(exc) or attempt == 1:
-                        last_error = exc
-                        self._record(
-                            role=role, model_key=spec.key, repo=spec.repo, ok=False,
-                            device=f"cuda:{info.device_index}", error=str(exc)[:600],
-                            fallback_of=fallback_of,
-                        )
-                        try:
-                            candidate.unload()
-                        except Exception:
-                            pass
-                        free_cuda_memory()
-                        # Try the next fallback model (smaller) instead of
-                        # retrying the same spec — this is where fallbacks
-                        # like text-9b → text-4b are exercised.
-                        break
-                    excluded.append(info.device_index)
-                    self._record(
-                        role=role, model_key=spec.key, repo=spec.repo, ok=False,
-                        device=f"cuda:{info.device_index}", error=f"OOM on this card; {exc}"[:600],
-                        fallback_of=fallback_of,
-                    )
-                    log.warning("cuda OOM loading %s on device %s; re-planning",
-                                spec.key, info.device_index)
-                    free_cuda_memory()
-                    try:
-                        candidate.unload()
-                    except Exception:
-                        pass
-                    continue
-            else:  # pragma: no cover - defensive
-                raise RuntimeError(f"could not allocate {spec.key}")
-            if backend is not None:
+            loaded, info, candidate, error = self._load_local_attempt(
+                role, spec, fallback_of)
+            last_error = error
+            if loaded is not None:
+                backend = loaded
                 self._record(
                     role=role,
                     model_key=spec.key,

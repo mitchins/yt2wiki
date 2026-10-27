@@ -54,6 +54,32 @@ def _run(cmd: Sequence[str], timeout: int = 3600) -> subprocess.CompletedProcess
     return proc
 
 
+def _stream_timebase(video: dict) -> Fraction | None:
+    tb = video.get("time_base")
+    if not (tb and "/" in tb):
+        return None
+    try:
+        return Fraction(tb)
+    except Exception:
+        return None
+
+
+def _stream_fps(video: dict) -> float | None:
+    rate = video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/0"
+    try:
+        f = Fraction(rate)
+        return float(f) if f > 0 else None
+    except Exception:
+        return None
+
+
+def _duration_s(data: dict, video: dict | None) -> float:
+    duration = float(data.get("format", {}).get("duration") or 0.0)
+    if not duration and video:
+        duration = float(video.get("duration") or 0.0)
+    return duration
+
+
 def ffprobe(path: Path) -> Probe:
     cmd = [
         FFPROBE, "-v", "error", "-print_format", "json",
@@ -65,24 +91,9 @@ def ffprobe(path: Path) -> Probe:
     data = json.loads(proc.stdout or "{}")
     video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
     audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
-    fps = None
-    timebase = None
-    if video:
-        tb = video.get("time_base")
-        if tb and "/" in tb:
-            try:
-                timebase = Fraction(tb)
-            except Exception:
-                timebase = None
-        rate = video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/0"
-        try:
-            f = Fraction(rate)
-            fps = float(f) if f > 0 else None
-        except Exception:
-            fps = None
-    duration = float(data.get("format", {}).get("duration") or 0.0)
-    if not duration and video:
-        duration = float(video.get("duration") or 0.0)
+    fps = _stream_fps(video) if video else None
+    timebase = _stream_timebase(video) if video else None
+    duration = _duration_s(data, video)
     return Probe(
         duration_s=duration,
         width=int(video["width"]) if video and video.get("width") else None,

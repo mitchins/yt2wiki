@@ -233,6 +233,28 @@ class Procedure:
         }
 
 
+def _should_flush(current: list[Any], start: float, current_start: float,
+                  window_s: float, max_chars: int) -> bool:
+    """True when appending `start`'s row would exceed the window bounds."""
+    if not current:
+        return False
+    span = start - current_start
+    total_chars = sum(len(r["text"] or "") for r in current)
+    return span > window_s or total_chars > max_chars
+
+
+def _carry_overlap(current: list[Any], overlap_s: float) -> list[Any]:
+    """Trailing rows worth carrying forward so boundary evidence is not lost."""
+    carry: list[Any] = []
+    carried = 0.0
+    for r in reversed(current):
+        if carried >= overlap_s and carry:
+            break
+        carry.insert(0, r)
+        carried += float(r["end"]) - float(r["start"])
+    return carry
+
+
 def chunk_transcript(
     rows: Sequence[Any],
     *,
@@ -255,20 +277,9 @@ def chunk_transcript(
         start = float(row["start"])
         if current_start is None:
             current_start = start
-        span = start - current_start
-        total_chars = sum(len(r["text"] or "") for r in current)
-        if current and (span > window_s or total_chars > max_chars):
+        if _should_flush(current, start, current_start, window_s, max_chars):
             chunks.append(current)
-            # carry a bounded overlap forward so evidence straddling the boundary
-            # is still seen by the next window
-            carry: list[Any] = []
-            carried = 0.0
-            for r in reversed(current):
-                if carried >= overlap_s and carry:
-                    break
-                carry.insert(0, r)
-                carried += float(r["end"]) - float(r["start"])
-            current = carry
+            current = _carry_overlap(current, overlap_s)
             current_start = float(current[0]["start"]) if current else start
         current.append(row)
     if current:

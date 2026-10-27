@@ -75,6 +75,28 @@ def cuda_available() -> bool:
         return False
 
 
+def _visible_device_ordinal(gpus: list) -> int | None:
+    """Best visible GPU ordinal under CUDA_VISIBLE_DEVICES, or None to fall through.
+
+    Maps the chosen PCI index to its visible ordinal so the device is valid
+    inside the container. Returns None when the variable is unset, unparsable
+    or matches no probed GPU.
+    """
+    import os as _os
+    visible = _os.environ.get("CUDA_VISIBLE_DEVICES")
+    if not visible:
+        return None
+    try:
+        order = [int(x.strip()) for x in visible.split(",") if x.strip() != ""]
+        visible_gpus = [g for g in gpus if g.index in order]
+        if visible_gpus:
+            best = max(visible_gpus, key=lambda g: g.free_gb)
+            return order.index(best.index)
+    except (ValueError, IndexError):
+        pass
+    return None
+
+
 def pick_device(preferred: int | None = None) -> tuple[str, int | None]:
     """Return ('cuda' | 'cpu', device_index).
 
@@ -94,21 +116,9 @@ def pick_device(preferred: int | None = None) -> tuple[str, int | None]:
         return "cuda", preferred
     gpus = nvidia_smi_gpus()
     if gpus:
-        import os as _os
-        visible = _os.environ.get("CUDA_VISIBLE_DEVICES")
-        if visible:
-            try:
-                order = [int(x.strip()) for x in visible.split(",") if x.strip() != ""]
-                # Map PCI index -> visible ordinal
-                def _visible_rank(g):
-                    return order.index(g.index) if g.index in order else 999
-                # Prefer visible GPUs first, by free memory
-                visible_gpus = [g for g in gpus if g.index in order]
-                if visible_gpus:
-                    best = max(visible_gpus, key=lambda g: g.free_gb)
-                    return "cuda", order.index(best.index)
-            except (ValueError, IndexError):
-                pass
+        ordinal = _visible_device_ordinal(gpus)
+        if ordinal is not None:
+            return "cuda", ordinal
         best = max(gpus, key=lambda g: g.free_gb)
         return "cuda", best.index
     return "cuda", None
