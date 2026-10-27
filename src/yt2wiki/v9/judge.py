@@ -262,6 +262,19 @@ def _accept_replacement(backend, cand: dict[str, Any], section: dict[str, Any]) 
 
 
 
+def _expansion_replacement(backend, section, frames, seen, history):
+    """One expansion round: denser neighbours of the section, rank order."""
+    extra = expand_candidates(frames, section["t_start"], section["t_end"], seen, "")
+    for c in extra:
+        seen.add(c["frame_id"])
+    for alt in extra[:6]:
+        ok, chk = _accept_replacement(backend, alt, section)
+        history.append({"round": 2, "current": alt["frame_id"], "check": chk})
+        if ok:
+            return alt
+    return None
+
+
 def _first_clean_replacement(backend, section, current, alternatives, seen,
                              frames, history, max_rounds):
     """Targeted revision: first clean, lexically supported alternative in rank
@@ -280,15 +293,7 @@ def _first_clean_replacement(backend, section, current, alternatives, seen,
         if checked >= 3:
             break
     if replacement is None and max_rounds >= 1:
-        extra = expand_candidates(frames, section["t_start"], section["t_end"], seen, "")
-        for c in extra:
-            seen.add(c["frame_id"])
-        for alt in extra[:6]:
-            ok, chk = _accept_replacement(backend, alt, section)
-            history.append({"round": 2, "current": alt["frame_id"], "check": chk})
-            if ok:
-                replacement = alt
-                break
+        replacement = _expansion_replacement(backend, section, frames, seen, history)
     return replacement
 
 
@@ -467,17 +472,19 @@ def _cached_labels(paths: Sequence[str], cache: dict[str, Any] | None) -> list[s
     return labels
 
 
-def _classify_uncached(backend, paths: Sequence[str], labels: list[str],
-                       cache: dict[str, Any] | None) -> int:
-    """Label the not-yet-cached paths; returns 1 when a batched call was made."""
+def _uncached_paths(paths: Sequence[str], labels: list[str],
+                    cache: dict[str, Any] | None) -> tuple[list[int], list[str]]:
+    """Indices/paths still needing a veto label."""
     todo_idx, todo_paths = [], []
     for i, p in enumerate(paths):
-        if cache is None or f"veto-label:{p}" not in cache:
-            if not labels[i]:
-                todo_idx.append(i)
-                todo_paths.append(p)
-    if not todo_paths:
-        return 0
+        if (cache is None or f"veto-label:{p}" not in cache) and not labels[i]:
+            todo_idx.append(i)
+            todo_paths.append(p)
+    return todo_idx, todo_paths
+
+
+def _batch_label_images(backend, todo_paths: list[str]) -> list[str]:
+    """Open + batched-label image paths; unreadable ones stay 'unreadable'."""
     from PIL import Image
     images = []
     for p in todo_paths:
@@ -499,6 +506,16 @@ def _classify_uncached(backend, paths: Sequence[str], labels: list[str],
                 raw[k] = r
         except Exception as exc:  # noqa: BLE001
             log.warning("batched classify failed: %s", exc)
+    return raw
+
+
+def _classify_uncached(backend, paths: Sequence[str], labels: list[str],
+                       cache: dict[str, Any] | None) -> int:
+    """Label the not-yet-cached paths; returns 1 when a batched call was made."""
+    todo_idx, todo_paths = _uncached_paths(paths, labels, cache)
+    if not todo_paths:
+        return 0
+    raw = _batch_label_images(backend, todo_paths)
     for i, p, r in zip(todo_idx, todo_paths, raw):
         lab = _canonical_label(r)
         labels[i] = lab
@@ -826,7 +843,7 @@ def adjudicate_section_z1(backend, section: dict[str, Any], initial: dict[str, A
     rounds: list[dict[str, Any]] = []
     _expects = _section_expects_text(section)
 
-    pool, seen, verdict = _z1_pool(backend, section, initial, alternatives,
+    pool, seen, verdict = _z1_pool(backend, initial, alternatives,
                                    alt_limit, frame_budget, cache, _expects,
                                    counters)
 
@@ -871,7 +888,7 @@ def adjudicate_section_z1(backend, section: dict[str, Any], initial: dict[str, A
 
     decision, reason, pair_ids = _z1_policy_loop(
         backend, section, frames, seen, verdict, cache, _expects,
-        max_rounds, state, rounds, score_round, refine, counters)
+        max_rounds, state, rounds, refine, counters)
 
     final_ids = _z1_final_ids(decision, pair_ids, state, initial)
     # re-verify finals through the single-frame veto (never publish knowingly poor)
@@ -902,7 +919,7 @@ class _Z1State:
         self.refinement_rounds = 0
 
 
-def _z1_pool(backend, section, initial, alternatives, alt_limit, frame_budget,
+def _z1_pool(backend, initial, alternatives, alt_limit, frame_budget,
              cache, _expects, counters):
     """Budgeted candidate pool plus its batched veto pre-filter."""
     pool = ([initial] if initial is not None else []) + list(alternatives[:alt_limit + 2])
@@ -986,8 +1003,18 @@ def _z1_eligible_strong(s: dict[str, Any] | None) -> bool:
             and (s["relevance"] == 2 or s["context_ok"]))
 
 
+def _z1_apply_policy(policy: dict[str, Any], jdec: str | None) -> tuple[str, str]:
+    """Non-EXPAND outcome for this round, with the judge's advice attached."""
+    if policy["action"] == "EXPAND":
+        return "OMIT", policy["reason"]
+    decision, reason = policy["action"], policy["reason"]
+    if jdec != decision and jdec in ("KEEP", "REPLACE", "OMIT"):
+        reason += f" (judge advised {jdec})"
+    return decision, reason
+
+
 def _z1_policy_loop(backend, section, frames, seen, verdict, cache, _expects,
-                    max_rounds, state: _Z1State, rounds, score_round, refine,
+                    max_rounds, state: _Z1State, rounds, refine,
                     counters):
     """Threshold policy (KEEP/REPLACE/USE_PAIR/OMIT) with EXPAND refinement.
 
@@ -1023,12 +1050,7 @@ def _z1_policy_loop(backend, section, frames, seen, verdict, cache, _expects,
                 break
             decision, reason = "OMIT", payload
             break
-        elif policy["action"] == "EXPAND":
-            decision, reason = "OMIT", policy["reason"]
-            break
-        decision, reason = policy["action"], policy["reason"]
-        if jdec != decision and jdec in ("KEEP", "REPLACE", "OMIT"):
-            reason += f" (judge advised {jdec})"
+        decision, reason = _z1_apply_policy(policy, jdec)
         break
     return decision, reason, pair_ids
 
@@ -1102,6 +1124,31 @@ def _z1_final_ids(decision: str | None, pair_ids: list[str],
     return None
 
 
+def _verify_finalist(backend, cand: dict[str, Any], fid: str,
+                     state: _Z1State, section: dict[str, Any],
+                     _expects, cache, counters) -> tuple[bool, str]:
+    """Re-verify one finalist; returns (drop, note) for the caller to apply."""
+    chk = _vet_candidate(backend, cand, _expects)
+    counters["inspected"] += 1
+    counters["vlm"] += 1
+    if chk["flagged"]:
+        return True, f" (re-verification vetoed {fid}: {chk['reason']})"
+    weak = next((str(s.get("weakness") or "") for s in state.parsed["scores"]
+                 if s.get("frame_id") == fid), "")
+    if len(weak.split()) >= 6:
+        return False, f" (subject probe skipped for {fid}: specific weakness)"
+    desc = subject_of(backend, cand["path"], cache=cache)
+    counters["vlm"] += 1
+    if _subject_supported(desc, section):
+        return False, ""
+    expl = str(state.parsed.get("explanation") or "")
+    if expl.strip() and _subject_supported(expl, section):
+        return False, (f" (subject probe kept {fid} on explanation "
+                       f"overlap despite: {desc!r})")
+    return True, (f" (subject backstop dropped {fid}: "
+                  f"described as {desc!r}, no section overlap)")
+
+
 def _z1_verify_finals(backend, section, state: _Z1State, pool, frames,
                       _expects, cache, counters, final_ids: list[str],
                       reason: str):
@@ -1112,30 +1159,11 @@ def _z1_verify_finals(backend, section, state: _Z1State, pool, frames,
         if cand is None:
             final_ids.remove(fid)
             continue
-        chk = _vet_candidate(backend, cand, _expects)
-        counters["inspected"] += 1
-        counters["vlm"] += 1
-        if chk["flagged"]:
+        drop, note = _verify_finalist(backend, cand, fid, state, section,
+                                      _expects, cache, counters)
+        if drop:
             final_ids.remove(fid)
-            reason += f" (re-verification vetoed {fid}: {chk['reason']})"
-            continue
-        weak = next((str(s.get("weakness") or "") for s in state.parsed["scores"]
-                     if s.get("frame_id") == fid), "")
-        if len(weak.split()) < 6:
-            desc = subject_of(backend, cand["path"], cache=cache)
-            counters["vlm"] += 1
-            if not _subject_supported(desc, section):
-                expl = str(state.parsed.get("explanation") or "")
-                if expl.strip() and _subject_supported(expl, section):
-                    reason += (f" (subject probe kept {fid} on explanation "
-                               f"overlap despite: {desc!r})")
-                else:
-                    final_ids.remove(fid)
-                    reason += (f" (subject backstop dropped {fid}: "
-                               f"described as {desc!r}, no section overlap)")
-                    continue
-        else:
-            reason += f" (subject probe skipped for {fid}: specific weakness)"
+        reason += note
     return final_ids, reason
 
 

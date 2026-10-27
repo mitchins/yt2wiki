@@ -55,5 +55,8 @@ def build_review_page(settings, db, out: Path | None = None) -> str:
         parts.append(_article_review_html(r, rep, secs))
     parts.append("</body></html>")
     out = out or Path("v9_review.html")
-    out.write_text("\n".join(parts), encoding="utf-8")
+    # False positive (pythonsecurity:S2083): `out` is an operator-supplied
+    # path for a static report dump, never request-derived; default is
+    # v9_review.html next to CWD.
+    out.write_text("\n".join(parts), encoding="utf-8")  # NOSONAR
     return str(out)

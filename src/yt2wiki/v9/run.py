@@ -205,7 +205,7 @@ def _ranked_frames(rank: dict[str, Any],
                    by_id: dict[str, dict[str, Any]]) -> tuple[list, list]:
     """Best-ranked frame plus alternatives, resolved through by_id."""
     ranked = []
-    for idx in list(rank["best"][:3]):
+    for idx in rank["best"][:3]:
         f = by_id.get(rank["candidates"][idx]["frame_id"])
         if f is not None:
             ranked.append(f)
@@ -361,7 +361,6 @@ def _ensure_base(settings, db, service, source_id: str,
     from ..pipeline.stages import acquisition, frame_candidates, inspect, transcribe
 
     counts = _base_counts(db, source_id)
-    n_trans = counts["transcript_segments"]
     n_frames = counts["frames"]
     n_trans = _drop_stale_transcript(settings, db, source_id, inference_snapshot,
                                      counts)

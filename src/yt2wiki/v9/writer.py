@@ -652,7 +652,52 @@ def section_transcript(transcript: Sequence[dict[str, Any]],
     return "\n".join(lines)
 
 
-def _run_attempt(chat, call, *, validate, editorial: bool, section_id: str,
+def _single_attempt(call, validate, calls: int, correction: str, editorial: bool,
+                    section_id: str, heading: str, excerpt: str) -> dict[str, Any]:
+    """One writer call plus validation; never raises SectionWriteError.
+
+    Returns a small outcome dict: ``done`` with ``checked`` on success,
+    otherwise ``retry`` with the next ``correction`` and the ``last``
+    (category, detail) pair for the final error.
+    """
+    try:
+        out = call(correction) if calls > 1 else call("")
+    except Exception as exc:  # noqa: BLE001 - classified below
+        category, retryable = _classify_error(exc)
+        log.warning("section %s attempt %d failed (%s): %s",
+                    section_id, calls, category, exc)
+        if retryable and calls < WRITER_MAX_ATTEMPTS:
+            return {"done": False, "retry": True, "correction": correction,
+                    "last": (category, f"{type(exc).__name__}: {exc}"[:300])}
+        return {"done": False, "retry": False,
+                "last": (category, f"{type(exc).__name__}: {exc}"[:300])}
+    try:
+        checked = validate(out, section_id=section_id, heading_fallback=heading,
+                           excerpt=excerpt)
+    except _SectionInvalid as bad:
+        log.warning("section %s attempt %d invalid (%s): %s",
+                    section_id, calls, bad.category, bad.detail)
+        if calls < WRITER_MAX_ATTEMPTS:
+            return {"done": False, "retry": True, "correction": correction,
+                    "last": (bad.category, bad.detail)}
+        return {"done": False, "retry": False, "last": (bad.category, bad.detail)}
+    problems = editorial_violations(checked["body"]) if editorial else []
+    if problems and calls < WRITER_MAX_ATTEMPTS:
+        # Bounded correction: one reinforced rewrite, facts intact.
+        correction = _correction_instruction(problems)
+        log.info("section %s attempt %d needs editorial correction: %s",
+                 section_id, calls, problems)
+        return {"done": False, "retry": True, "correction": correction,
+                "last": ("editorial", "; ".join(problems)[:300])}
+    if problems:
+        return {"done": False, "retry": False,
+                "last": ("editorial", "; ".join(problems)[:300])}
+    checked["attempts"] = calls
+    return {"done": True, "retry": False, "checked": checked, "last": None,
+            "correction": correction}
+
+
+def _run_attempt(call, *, validate, editorial: bool, section_id: str,
                  heading: str, t_start: float, t_end: float,
                  excerpt: str = "") -> dict[str, Any]:
     """One section through at most WRITER_MAX_ATTEMPTS writer calls.
@@ -669,42 +714,36 @@ def _run_attempt(chat, call, *, validate, editorial: bool, section_id: str,
     correction = ""
     while calls < WRITER_MAX_ATTEMPTS:
         calls += 1
-        try:
-            out = call(correction) if calls > 1 else call("")
-        except Exception as exc:  # noqa: BLE001 - classified below
-            category, retryable = _classify_error(exc)
-            last = (category, f"{type(exc).__name__}: {exc}"[:300])
-            log.warning("section %s attempt %d failed (%s): %s",
-                        section_id, calls, category, exc)
-            if retryable and calls < WRITER_MAX_ATTEMPTS:
-                continue
+        outcome = _single_attempt(call, validate, calls, correction, editorial,
+                                  section_id, heading, excerpt)
+        if outcome["done"]:
+            return outcome["checked"]
+        last = outcome["last"]
+        if not outcome["retry"]:
             break
-        try:
-            checked = validate(out, section_id=section_id, heading_fallback=heading,
-                               excerpt=excerpt)
-        except _SectionInvalid as bad:
-            last = (bad.category, bad.detail)
-            log.warning("section %s attempt %d invalid (%s): %s",
-                        section_id, calls, bad.category, bad.detail)
-            if calls < WRITER_MAX_ATTEMPTS:
-                continue
-            break
-        problems = editorial_violations(checked["body"]) if editorial else []
-        if problems and calls < WRITER_MAX_ATTEMPTS:
-            # Bounded correction: one reinforced rewrite, facts intact.
-            correction = _correction_instruction(problems)
-            last = ("editorial", "; ".join(problems)[:300])
-            log.info("section %s attempt %d needs editorial correction: %s",
-                     section_id, calls, problems)
-            continue
-        if problems:
-            last = ("editorial", "; ".join(problems)[:300])
-            break
-        checked["attempts"] = calls
-        return checked
+        correction = outcome.get("correction", correction)
     category, detail = last or ("error", "unknown failure")
     raise SectionWriteError(section_id, heading, t_start, t_end,
                             category, calls, detail, excerpt)
+
+
+def _title_editorial_fallback(exc, saved_title: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    """Valid title, unfixable summary narration: keep the title, drop the summary."""
+    if exc.section_id == "title" and exc.category == "editorial" and saved_title["title"]:
+        log.warning("summary neutralised after editorial failure: %s", exc)
+        thead = {"title": saved_title["title"], "summary": "",
+                 "kind": saved_title["kind"]}
+        return thead, "summary blanked after editorial failure"
+    return None
+
+
+def _title_neutral_fallback(exc, transcript_hits: int, video_title: str) -> tuple[dict[str, Any], str] | None:
+    """Nothing actionable to title: fall back to the source's own title."""
+    if transcript_hits == 0 and exc.section_id == "title":
+        log.warning("title neutralised to source title: %s", exc)
+        note = "neutralised to source title: transcript shows no actions"
+        return {"title": video_title, "summary": "", "kind": "explainer"}, note
+    return None
 
 
 def _write_title(chat, segs, chapters, srow, video_title) -> tuple[dict[str, Any], str]:
@@ -745,25 +784,17 @@ def _write_title(chat, segs, chapters, srow, video_title) -> tuple[dict[str, Any
             raise _SectionInvalid("editorial", "; ".join(problems))
         return checked
 
-    title_fallback = ""
     try:
-        return (_run_attempt(chat, _title_call, validate=_title_validate,
+        return (_run_attempt(_title_call, validate=_title_validate,
                              editorial=False, section_id="title",
                              heading="title", t_start=0.0, t_end=0.0), "")
     except SectionWriteError as exc:
-        if exc.section_id == "title" and exc.category == "editorial" and saved_title["title"]:
-            # Valid title, unfixable summary narration: keep the title, drop
-            # the summary rather than fail the job over two sentences.
-            log.warning("summary neutralised after editorial failure: %s", exc)
-            thead = {"title": saved_title["title"], "summary": "",
-                     "kind": saved_title["kind"]}
-            return thead, "summary blanked after editorial failure"
-        if transcript_hits == 0 and exc.section_id == "title":
-            # Nothing actionable to title: fall back to the source's own title
-            # rather than publish an invented construction promise.
-            log.warning("title neutralised to source title: %s", exc)
-            note = "neutralised to source title: transcript shows no actions"
-            return {"title": video_title, "summary": "", "kind": "explainer"}, note
+        fb = _title_editorial_fallback(exc, saved_title)
+        if fb is not None:
+            return fb
+        fb = _title_neutral_fallback(exc, transcript_hits, video_title)
+        if fb is not None:
+            return fb
         raise
 
 
@@ -790,7 +821,7 @@ def _write_sections(chat, plan, segs, video_title,
                      {"role": "user", "content": user}],
                     max_new_tokens=1600, temperature=0.15)
 
-            out = _run_attempt(chat, _section_call, validate=validate_section_response,
+            out = _run_attempt(_section_call, validate=validate_section_response,
                                editorial=True, section_id=p["section_id"],
                                heading=p["heading"], t_start=p["t_start"],
                                t_end=p["t_end"], excerpt=text)

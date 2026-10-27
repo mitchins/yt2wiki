@@ -381,11 +381,14 @@ class _TimestampNormaliser:
         return self.fmt(secs)
 
     def fix_label(self, label: str, target: str | None) -> str:
-        rm = re.fullmatch(r"(.+?)-(.+)", label)
-        if rm and ":" in label:
-            lo = _choose(_citation_candidates(rm.group(1), loose_seconds=True),
+        # Same split as fullmatch(r"(.+?)-(.+)"): first hyphen with text
+        # on both sides (head itself may contain hyphens).
+        idx = label.find("-", 1)
+        if idx != -1 and idx + 1 < len(label) and ":" in label:
+            head, tail = label[:idx], label[idx + 1:]
+            lo = _choose(_citation_candidates(head, loose_seconds=True),
                          self.hint_s, self.duration_s)
-            hi = _choose(_citation_candidates(rm.group(2), loose_seconds=True),
+            hi = _choose(_citation_candidates(tail, loose_seconds=True),
                          self.hint_s, self.duration_s)
             if lo is not None and hi is not None:
                 if hi < lo:

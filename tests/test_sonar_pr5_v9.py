@@ -31,7 +31,8 @@ def test_assemble_places_figure_after_body_and_source_ref_between():
     assert md.index("## Install") < md.index("![")
     assert md.index("Run it") < md.index("![")          # figure after prose
     assert md.index("## Configure") > md.index("![")    # figure stays inside its section
-    assert len(rows) == 1 and rows[0]["frame_id"] == "f-1"
+    assert len(rows) == 1
+    assert rows[0]['frame_id'] == 'f-1'
     assert rows[0]["alt_text"].startswith("Illustration for Install")
 
 
@@ -77,7 +78,8 @@ def test_rubric_known_decisions_accepted(decision):
            f'"decision": "{decision}", "winner": 1, "explanation": "e",'
            ' "images_received": 1}')
     parsed = _parse_rubric(raw, 1)
-    assert parsed is not None and parsed["decision"] == decision
+    assert parsed is not None
+    assert parsed['decision'] == decision
 
 
 def test_z1_refinement_round_accounts_for_vlm_calls(monkeypatch):
@@ -131,7 +133,8 @@ def test_z1_refinement_round_accounts_for_vlm_calls(monkeypatch):
         max_rounds=1, seed=0)
     # EXPAND with all-zero totals and max_rounds=1 ends in OMIT after rescore
     assert rec["decision"] == "OMIT"
-    assert rec["rounds"] and rec["rounds"][-1]["refinement"]
+    assert rec['rounds']
+    assert rec['rounds'][-1]['refinement']
     # one classify_many in pool pre-filter + one per refinement round
     refinements = sum(1 for r in rec["rounds"] if "refinement" in r)
     assert calls["classify"] == 1 + refinements
