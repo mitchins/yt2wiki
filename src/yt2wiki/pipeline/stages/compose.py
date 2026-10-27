@@ -285,6 +285,24 @@ def _scope_section(article: Article, procedure: Procedure,
     return Section(heading="Scope and applicability", level=2, body=scope_body)
 
 
+def _warning_block(text: str, ev_ids: list[str], evidence: Sequence[Evidence],
+                   url: str | None) -> list[str]:
+    """One warning's quote lines plus its source/citation trailer."""
+    lines = [f"> **Warning** — {text}"]
+    refs = [e for e in evidence if e.evidence_id in ev_ids]
+    if not refs:
+        return lines
+    times = [e.t_start for e in refs if e.t_start is not None]
+    t_min = min(times) if times else None
+    link = timestamp_url(url, t_min)
+    if link:
+        lines.append(f"> *Source: [{format_ts(t_min)}]({link})*")
+    lines.append(_cite_comment(
+        step="warnings", ev_ids=[e.evidence_id for e in refs],
+        t_min=t_min, t_max=max(times) if times else None))
+    return lines
+
+
 def _warnings_section(procedure: Procedure, evidence: Sequence[Evidence],
                       url: str | None) -> Section | None:
     warnings = _collect_warnings(procedure, evidence)
@@ -292,18 +310,7 @@ def _warnings_section(procedure: Procedure, evidence: Sequence[Evidence],
         return None
     body: list[str] = []
     for text, ev_ids in warnings:
-        body.append(f"> **Warning** — {text}")
-        refs = [e for e in evidence if e.evidence_id in ev_ids]
-        times = [e.t_start for e in refs if e.t_start is not None]
-        if refs:
-            t_min = min(times) if times else None
-            link = timestamp_url(url, t_min)
-            if link:
-                body.append(f"> *Source: [{format_ts(t_min)}]({link})*")
-            body.append(_cite_comment(
-                step="warnings", ev_ids=[e.evidence_id for e in refs],
-                t_min=t_min if refs else None,
-                t_max=max(times) if times else None))
+        body.extend(_warning_block(text, ev_ids, evidence, url))
     return Section(heading="Before you start", level=2, body=body)
 
 

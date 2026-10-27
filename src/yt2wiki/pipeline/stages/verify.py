@@ -321,6 +321,25 @@ def _absorb_citation(cur: dict[str, Any] | None, line: str) -> None:
         cur["t_spans"].append((float(ts), float(ts)))
 
 
+def _heading_of(s: str) -> str | None:
+    """Section title for a 1-3 hash heading, else None (no regex backtracking)."""
+    n = len(s) - len(s.lstrip("#"))
+    if 1 <= n <= 3 and n < len(s) and s[n].isspace():
+        rest = s[n:].lstrip()
+        return rest or None
+    return None
+
+
+def _numbered_of(s: str) -> int | None:
+    """Step number for a leading `N.` item, else None (no regex backtracking)."""
+    j = 0
+    while j < len(s) and s[j].isdecimal():
+        j += 1
+    if j and j + 1 < len(s) and s[j] == "." and s[j + 1].isspace():
+        return int(s[:j])
+    return None
+
+
 def _citation_blocks(markdown: str) -> list[dict[str, Any]]:
     """Split the article into checkable blocks with their citations.
 
@@ -353,16 +372,16 @@ def _citation_blocks(markdown: str) -> list[dict[str, Any]]:
 
     for line in lines:
         s = line.strip()
-        heading = re.match(r"^#{1,3}\s+(.+)$", s)
-        numbered = re.match(r"^(\d+)\.\s+", s)
-        if heading:
+        heading = _heading_of(s)
+        numbered = _numbered_of(s)
+        if heading is not None:
             flush()
-            section = heading.group(1)
+            section = heading
             step_num = None
             continue
-        if numbered:
+        if numbered is not None:
             flush()
-            step_num = int(numbered.group(1))
+            step_num = numbered
             cur = fresh("step", step_num)
             absorb(line)
             continue

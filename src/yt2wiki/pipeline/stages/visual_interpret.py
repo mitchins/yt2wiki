@@ -115,8 +115,11 @@ def _describe_batch(backend, ctx: StageContext, images: list[Any],
 
 def _dense_text_pass(backend, ctx: StageContext,
                      dense_candidates: list[tuple[dict[str, Any], dict[str, Any]]],
-                     batch: int) -> int:
-    """OCR the crop tiles of text-dense frames; store them. Returns tiles used."""
+                     batch: int) -> tuple[int, int]:
+    """OCR the crop tiles of text-dense frames; store them.
+
+    Returns ``(tiles_used, frames_stored)``.
+    """
     tiles: list[Any] = []
     owners: list[dict[str, Any]] = []
     meta: list[dict[str, Any]] = []

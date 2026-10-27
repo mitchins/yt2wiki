@@ -30,7 +30,8 @@ def test_unclosed_fence_at_eof_renders_code_block():
 
 def test_unsafe_figure_target_is_dropped_entirely():
     html = markdown_to_html("![x](javascript:alert(1))")
-    assert "<figure>" not in html and "alert" not in html
+    assert "<figure>" not in html
+    assert "alert" not in html
 
 
 def test_list_type_switch_closes_previous_list():
@@ -86,4 +87,5 @@ def test_missing_citation_info_for_supported_uncited_claim():
           "   Insert the USB drive into the Pi and boot it up.\n")
     findings = _rule_unsupported(None, md, ev)
     info = [f for f in findings if f["code"] == "missing_citation"]
-    assert info and info[0]["severity"] == "info"
+    assert info
+    assert info[0]["severity"] == "info"
