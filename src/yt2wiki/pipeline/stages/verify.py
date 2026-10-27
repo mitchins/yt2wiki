@@ -305,6 +305,41 @@ def _claim_id(text: str) -> str:
     return "claim-" + hashlib.sha1(norm.encode("utf-8")).hexdigest()[:12]
 
 
+
+def _absorb_citation(cur: dict[str, Any] | None, line: str) -> None:
+    """Add one line to a block, collecting its citations and time anchors."""
+    assert cur is not None
+    cur["lines"].append(line)
+    cm = _CITE_COMMENT_RE.search(line)
+    if cm:
+        cur["ev_ids"].extend(i for i in cm.group(2).split(",") if i and i != "-")
+        cur["t_spans"].append(_parse_span(cm.group(3)))
+    for ev in _EV_REF_RE.findall(line):
+        if ev not in cur["ev_ids"]:
+            cur["ev_ids"].append(ev)
+    for ts in re.findall(r"[?&]t=(\d+(?:\.\d+)?)", line):
+        cur["t_spans"].append((float(ts), float(ts)))
+
+
+def _heading_of(s: str) -> str | None:
+    """Section title for a 1-3 hash heading, else None (no regex backtracking)."""
+    n = len(s) - len(s.lstrip("#"))
+    if 1 <= n <= 3 and n < len(s) and s[n].isspace():
+        rest = s[n:].lstrip()
+        return rest or None
+    return None
+
+
+def _numbered_of(s: str) -> int | None:
+    """Step number for a leading `N.` item, else None (no regex backtracking)."""
+    j = 0
+    while j < len(s) and s[j].isdecimal():
+        j += 1
+    if j and j + 1 < len(s) and s[j] == "." and s[j + 1].isspace():
+        return int(s[:j])
+    return None
+
+
 def _citation_blocks(markdown: str) -> list[dict[str, Any]]:
     """Split the article into checkable blocks with their citations.
 
@@ -333,30 +368,20 @@ def _citation_blocks(markdown: str) -> list[dict[str, Any]]:
                 "ev_ids": [], "t_spans": []}
 
     def absorb(line: str) -> None:
-        assert cur is not None
-        cur["lines"].append(line)
-        cm = _CITE_COMMENT_RE.search(line)
-        if cm:
-            cur["ev_ids"].extend(i for i in cm.group(2).split(",") if i and i != "-")
-            cur["t_spans"].append(_parse_span(cm.group(3)))
-        for ev in _EV_REF_RE.findall(line):
-            if ev not in cur["ev_ids"]:
-                cur["ev_ids"].append(ev)
-        for ts in re.findall(r"[?&]t=(\d+(?:\.\d+)?)", line):
-            cur["t_spans"].append((float(ts), float(ts)))
+        _absorb_citation(cur, line)
 
     for line in lines:
         s = line.strip()
-        m = re.match(r"^#{1,3}\s+(.+)$", s)
-        if m:
+        heading = _heading_of(s)
+        numbered = _numbered_of(s)
+        if heading is not None:
             flush()
-            section = m.group(1)
+            section = heading
             step_num = None
             continue
-        m = re.match(r"^(\d+)\.\s+", s)
-        if m:
+        if numbered is not None:
             flush()
-            step_num = int(m.group(1))
+            step_num = numbered
             cur = fresh("step", step_num)
             absorb(line)
             continue
@@ -416,91 +441,126 @@ def _rule_unsupported(ctx: StageContext, markdown: str, evidence: Sequence[Evide
     """
     out: list[dict] = []
     by_id = {e.evidence_id: e for e in evidence}
-    blocks = _citation_blocks(markdown)
-    for block in blocks:
+    for block in _citation_blocks(markdown):
         if block["kind"] not in ("step", "callout"):
             continue
         if block["kind"] == "callout" and block["step"] is None \
                 and not _INSTRUCTIONAL_SECTION_RE.search(block["section"] or ""):
             continue  # top-matter epigraphs, not claims
-        bound = [by_id[i] for i in block["ev_ids"] if i in by_id]
-        broken = [i for i in block["ev_ids"] if i not in by_id]
-        span_recs: list[Evidence] = []
-        for t0, t1 in block["t_spans"]:
-            if t0 is None:
-                continue
-            lo = min(t0, t1 if t1 is not None else t0) - 45.0
-            hi = max(t0, t1 if t1 is not None else t0) + 45.0
-            span_recs.extend(e for e in evidence
-                             if e.t_start is not None and lo <= e.t_start <= hi)
+        bound, broken, span_recs = _block_bindings(block, by_id, evidence)
         label = f"Step {block['step']}" if block["step"] is not None else "Callout"
         for b in broken:
-            out.append(
-                {
-                    "direction": _DIR_ARTICLE_TO_EVIDENCE,
-                    "severity": "warning",
-                    "code": "broken_citation",
-                    "message": f"{label} cites evidence record {b}, which does not exist.",
-                    "detail": {"step": block["step"], "claim_id": _claim_id(b),
-                                "citation": b},
-                }
-            )
-        applicable = bound or span_recs
-        if not applicable:
-            applicable = list(evidence)
-        text = "\n".join(ln for ln in block["lines"]
-                         if ln.strip() and not ln.strip().startswith("<!--")
-                         and not _SOURCE_LINK_RE.match(ln.strip()))
+            out.append(_broken_citation_finding(label, block, b))
+        check = _BlockCheck(label=label, block=block, bound=bound,
+                            span_recs=span_recs, evidence=evidence)
+        text = _checkable_text(block)
         for sent in _sentences(text):
-            cite_ids = [e.evidence_id for e in (bound or span_recs)]
-            score = _sentence_support(sent, bound or span_recs) if (bound or span_recs) \
-                else _sentence_support(sent, evidence)
-            if score >= 0.2:
-                if not (bound or span_recs or block["ev_ids"]):
-                    out.append(
-                        {
-                            "direction": _DIR_ARTICLE_TO_EVIDENCE,
-                            "severity": "info",
-                            "code": "missing_citation",
-                            "message": f"{label} states a supported claim with no citation.",
-                            "detail": {"step": block["step"], "claim_id": _claim_id(sent),
-                                        "text": sent[:300], "support": round(score, 3)},
-                        }
-                    )
-                continue
-            if bound or span_recs:
-                elsewhere, escore = _best_evidence(sent, evidence)
-                if escore >= 0.2 and elsewhere is not None and \
-                        elsewhere.evidence_id not in cite_ids:
-                    out.append(
-                        {
-                            "direction": _DIR_ARTICLE_TO_EVIDENCE,
-                            "severity": "warning",
-                            "code": "mismatched_citation",
-                            "message": (
-                                f"{label} links a passage that does not support the claim; "
-                                f"the claim is supported by {elsewhere.evidence_id} instead."
-                            ),
-                            "detail": {"step": block["step"], "claim_id": _claim_id(sent),
-                                        "text": sent[:300],
-                                        "cited": cite_ids,
-                                        "supported_by": elsewhere.evidence_id},
-                        }
-                    )
-                    continue
-            out.append(
-                {
-                    "direction": _DIR_ARTICLE_TO_EVIDENCE,
-                    "severity": "critical" if score < 0.06 else "warning",
-                    "code": "unsupported_action",
-                    "message": (
-                        f"{label} does not map onto any recorded observation "
-                        f"(best overlap {score:.2f})."
-                    ),
-                    "detail": {"step": block["step"], "claim_id": _claim_id(sent),
-                                "text": sent[:300], "best_score": round(score, 3)},
-                }
-            )
+            out.extend(_sentence_findings(check, sent))
+    out.extend(_unsupported_command_findings(markdown, evidence))
+    return out
+
+
+class _BlockCheck:
+    """Per-block context for the sentence support ladder."""
+
+    def __init__(self, *, label: str, block: dict[str, Any],
+                 bound: list[Evidence], span_recs: list[Evidence],
+                 evidence: Sequence[Evidence]) -> None:
+        self.label = label
+        self.block = block
+        self.bound = bound
+        self.span_recs = span_recs
+        self.evidence = evidence
+
+    @property
+    def anchored(self) -> list[Evidence]:
+        """Records the block's own citations anchor it to (may be empty)."""
+        return self.bound or self.span_recs
+
+    @property
+    def cite_ids(self) -> list[str]:
+        return [e.evidence_id for e in self.anchored]
+
+
+def _block_bindings(block: dict[str, Any], by_id: dict[str, Evidence],
+                    evidence: Sequence[Evidence]) -> tuple[list[Evidence], list[str], list[Evidence]]:
+    """(bound records, broken citation ids, time-window records) for a block."""
+    bound = [by_id[i] for i in block["ev_ids"] if i in by_id]
+    broken = [i for i in block["ev_ids"] if i not in by_id]
+    span_recs: list[Evidence] = []
+    for t0, t1 in block["t_spans"]:
+        if t0 is None:
+            continue
+        lo = min(t0, t1 if t1 is not None else t0) - 45.0
+        hi = max(t0, t1 if t1 is not None else t0) + 45.0
+        span_recs.extend(e for e in evidence
+                         if e.t_start is not None and lo <= e.t_start <= hi)
+    return bound, broken, span_recs
+
+
+def _broken_citation_finding(label: str, block: dict[str, Any], b: str) -> dict:
+    return {
+        "direction": _DIR_ARTICLE_TO_EVIDENCE,
+        "severity": "warning",
+        "code": "broken_citation",
+        "message": f"{label} cites evidence record {b}, which does not exist.",
+        "detail": {"step": block["step"], "claim_id": _claim_id(b),
+                    "citation": b},
+    }
+
+
+def _checkable_text(block: dict[str, Any]) -> str:
+    return "\n".join(ln for ln in block["lines"]
+                     if ln.strip() and not ln.strip().startswith("<!--")
+                     and not _SOURCE_LINK_RE.match(ln.strip()))
+
+
+def _sentence_findings(ctx: _BlockCheck, sent: str) -> list[dict]:
+    """The support ladder for one sentence (matching the original order)."""
+    block = ctx.block
+    claim = {"step": block["step"], "claim_id": _claim_id(sent), "text": sent[:300]}
+    score = _sentence_support(sent, ctx.anchored) if ctx.anchored \
+        else _sentence_support(sent, ctx.evidence)
+    if score >= 0.2:
+        if not (ctx.anchored or block["ev_ids"]):
+            return [{
+                "direction": _DIR_ARTICLE_TO_EVIDENCE,
+                "severity": "info",
+                "code": "missing_citation",
+                "message": f"{ctx.label} states a supported claim with no citation.",
+                "detail": {**claim, "support": round(score, 3)},
+            }]
+        return []
+    if ctx.anchored:
+        elsewhere, escore = _best_evidence(sent, ctx.evidence)
+        if escore >= 0.2 and elsewhere is not None and \
+                elsewhere.evidence_id not in ctx.cite_ids:
+            return [{
+                "direction": _DIR_ARTICLE_TO_EVIDENCE,
+                "severity": "warning",
+                "code": "mismatched_citation",
+                "message": (
+                    f"{ctx.label} links a passage that does not support the claim; "
+                    f"the claim is supported by {elsewhere.evidence_id} instead."
+                ),
+                "detail": {**claim, "cited": ctx.cite_ids,
+                            "supported_by": elsewhere.evidence_id},
+            }]
+    return [{
+        "direction": _DIR_ARTICLE_TO_EVIDENCE,
+        "severity": "critical" if score < 0.06 else "warning",
+        "code": "unsupported_action",
+        "message": (
+            f"{ctx.label} does not map onto any recorded observation "
+            f"(best overlap {score:.2f})."
+        ),
+        "detail": {**claim, "best_score": round(score, 3)},
+    }]
+
+
+def _unsupported_command_findings(markdown: str,
+                                  evidence: Sequence[Evidence]) -> list[dict]:
+    out: list[dict] = []
     for cmd in _article_commands(markdown):
         if len(cmd) < 4:
             continue
@@ -533,44 +593,13 @@ def _rule_contradictions(markdown: str, evidence: Sequence[Evidence]) -> list[di
     only against active records, and never when the source itself asserts
     several values for the key (ambiguity is not contradiction).
     """
+    asserted = _article_keyvalues(markdown)
+    by_key, key_source = _evidence_keyvalues(evidence)
     out: list[dict] = []
-    def _keyvalues(text: str) -> dict[str, str]:
-        found: dict[str, str] = {}
-        for lit in extract_literals(text, max_values=6):
-            if "=" in lit.literal:
-                k, v = lit.literal.split("=", 1)
-                k = k.strip()
-                if re.fullmatch(r"[A-Za-z_][\w.\-]*", k) and len(k) >= 3 and v.strip():
-                    found.setdefault(normalize_value(k).lower(), v.strip())
-        return found
-
-    asserted: dict[str, str] = {}
-    for m in re.finditer(r"`([^`\n]{2,120})`", markdown):
-        asserted.update({k: v for k, v in _keyvalues(m.group(1)).items()
-                         if k not in asserted})
-    for block in _CODE_BLOCK_RE.finditer(markdown):
-        for line in block.group(1).splitlines():
-            for k, v in _keyvalues(line.strip()).items():
-                asserted.setdefault(k, v)
-    by_key: dict[str, set[str]] = {}
-    key_source: dict[str, dict[str, Evidence]] = {}
-    for e in evidence:
-        if e.status != "active":
-            continue
-        for lit in e.literals:
-            if "=" not in lit.literal:
-                continue
-            k, v = lit.literal.split("=", 1)
-            k = k.strip()
-            if not re.fullmatch(r"[A-Za-z_][\w.\-]*", k) or len(k) < 3 or not v.strip():
-                continue
-            kk = normalize_value(k).lower()
-            by_key.setdefault(kk, set()).add(normalize_value(v))
-            key_source.setdefault(kk, {}).setdefault(normalize_value(v), e)
     for key, value in asserted.items():
         sources = by_key.get(key, set())
         if not sources or len(sources) != 1:
-            continue
+            continue  # no source assertion, or the source itself is ambiguous
         want = next(iter(sources))
         if values_match(value, want):
             continue
@@ -591,6 +620,58 @@ def _rule_contradictions(markdown: str, evidence: Sequence[Evidence]) -> list[di
             }
         )
     return out
+
+
+_KEY_RE = r"[A-Za-z_][\w.\-]*"
+
+
+def _clean_keyvalue(lit) -> tuple[str, str] | None:
+    """A valid `key=value` pair from a literal, else None."""
+    if "=" not in lit.literal:
+        return None
+    k, v = lit.literal.split("=", 1)
+    k = k.strip()
+    if not re.fullmatch(_KEY_RE, k) or len(k) < 3 or not v.strip():
+        return None
+    return normalize_value(k).lower(), v.strip()
+
+
+def _article_keyvalues(markdown: str) -> dict[str, str]:
+    """First assertion wins: code spans, then fenced blocks line by line."""
+    def keyvalues(text: str) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for lit in extract_literals(text, max_values=6):
+            kv = _clean_keyvalue(lit)
+            if kv is not None:
+                found.setdefault(kv[0], kv[1])
+        return found
+
+    asserted: dict[str, str] = {}
+    for m in re.finditer(r"`([^`\n]{2,120})`", markdown):
+        asserted.update({k: v for k, v in keyvalues(m.group(1)).items()
+                         if k not in asserted})
+    for block in _CODE_BLOCK_RE.finditer(markdown):
+        for line in block.group(1).splitlines():
+            for k, v in keyvalues(line.strip()).items():
+                asserted.setdefault(k, v)
+    return asserted
+
+
+def _evidence_keyvalues(evidence: Sequence[Evidence]) -> tuple[dict[str, set[str]], dict[str, dict[str, Evidence]]]:
+    """Every value each active evidence record asserts for a key."""
+    by_key: dict[str, set[str]] = {}
+    key_source: dict[str, dict[str, Evidence]] = {}
+    for e in evidence:
+        if e.status != "active":
+            continue
+        for lit in e.literals:
+            kv = _clean_keyvalue(lit)
+            if kv is None:
+                continue
+            kk, vv = kv
+            by_key.setdefault(kk, set()).add(normalize_value(vv))
+            key_source.setdefault(kk, {}).setdefault(normalize_value(vv), e)
+    return by_key, key_source
 
 
 def _rule_omissions(ctx: StageContext, markdown: str, evidence: Sequence[Evidence]) -> list[dict]:

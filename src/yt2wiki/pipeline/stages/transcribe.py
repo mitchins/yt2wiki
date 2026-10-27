@@ -160,6 +160,22 @@ def _run_asr(
         return transcript, metrics_extra
 
 
+def _chapter_titles(row: Any) -> list[str]:
+    """Chapter titles recorded about the video (source metadata, not ASR)."""
+    chapters = json_loads(row["chapters_json"] if "chapters_json" in row.keys() else None, []) or []
+    return [str(ch["title"]) for ch in chapters if ch.get("title")]
+
+
+def _numeric_description_lines(desc: str) -> list[str]:
+    """Description lines that look like step/setting summaries."""
+    out: list[str] = []
+    for line in desc.splitlines():
+        line = line.strip()
+        if 12 < len(line) < 90 and any(c.isdigit() for c in line):
+            out.append(line)
+    return out
+
+
 def _vocabulary_hint(ctx: StageContext, row: Any) -> str:
     """Seed the decoder with domain vocabulary drawn from the source's own text.
 
@@ -173,14 +189,10 @@ def _vocabulary_hint(ctx: StageContext, row: Any) -> str:
         bits.append(str(title))
     if uploader:
         bits.append(f"by {uploader}")
-    for ch in json_loads(row["chapters_json"] if "chapters_json" in row.keys() else None, []) or []:
-        if ch.get("title"):
-            bits.append(str(ch["title"]))
+    bits.extend(_chapter_titles(row))
     desc = (row["description"] or "") if "description" in row.keys() else ""
-    for line in desc.splitlines():
-        line = line.strip()
-        if 12 < len(line) < 90 and any(c.isdigit() for c in line):
-            bits.append(line)
+    for line in _numeric_description_lines(desc):
+        bits.append(line)
         if len(bits) > 14:
             break
     return ". ".join(bits)[:700]

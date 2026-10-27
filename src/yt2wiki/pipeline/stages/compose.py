@@ -263,6 +263,120 @@ def _fallback_step(step, evidence: Sequence[Evidence]) -> dict[str, Any]:
 
 
 # ----------------------------------------------------------------------
+def _scope_section(article: Article, procedure: Procedure,
+                   evidence: Sequence[Evidence], url: str | None) -> Section | None:
+    """Scope prose bound to the procedure's full evidence span."""
+    if not article.scope:
+        return None
+    # Scope prose summarises the whole procedure, so it is bound to the
+    # procedure's full evidence span rather than any single observation.
+    step_ids = [i for s in procedure.steps for i in (s.evidence_ids or [])]
+    refs = [e for e in evidence if e.evidence_id in step_ids]
+    times = [e.t_start for e in refs if e.t_start is not None]
+    scope_body = [article.scope]
+    if refs and times:
+        t_min, t_max = min(times), max(times)
+        link = timestamp_url(url, t_min)
+        if link:
+            scope_body.append(f"*Source: [{format_ts(t_min)}–{format_ts(t_max)}]({link})*")
+        scope_body.append(_cite_comment(
+            step="scope", ev_ids=[e.evidence_id for e in refs],
+            t_min=t_min, t_max=t_max))
+    return Section(heading="Scope and applicability", level=2, body=scope_body)
+
+
+def _warning_block(text: str, ev_ids: list[str], evidence: Sequence[Evidence],
+                   url: str | None) -> list[str]:
+    """One warning's quote lines plus its source/citation trailer."""
+    lines = [f"> **Warning** — {text}"]
+    refs = [e for e in evidence if e.evidence_id in ev_ids]
+    if not refs:
+        return lines
+    times = [e.t_start for e in refs if e.t_start is not None]
+    t_min = min(times) if times else None
+    link = timestamp_url(url, t_min)
+    if link:
+        lines.append(f"> *Source: [{format_ts(t_min)}]({link})*")
+    lines.append(_cite_comment(
+        step="warnings", ev_ids=[e.evidence_id for e in refs],
+        t_min=t_min, t_max=max(times) if times else None))
+    return lines
+
+
+def _warnings_section(procedure: Procedure, evidence: Sequence[Evidence],
+                      url: str | None) -> Section | None:
+    warnings = _collect_warnings(procedure, evidence)
+    if not warnings:
+        return None
+    body: list[str] = []
+    for text, ev_ids in warnings:
+        body.extend(_warning_block(text, ev_ids, evidence, url))
+    return Section(heading="Before you start", level=2, body=body)
+
+
+def _steps_section(procedure: Procedure, evidence: Sequence[Evidence],
+                   frames: dict[str, dict[str, Any]],
+                   url: str | None) -> Section | None:
+    if not procedure.steps:
+        return None
+    steps_section = Section(heading="Procedure", level=2)
+    for step in procedure.steps:
+        block = _render_step(step, evidence, frames, url)
+        steps_section.body.append(block)
+    return steps_section
+
+
+def _commands_section(ctx: StageContext, procedure: Procedure,
+                      evidence: Sequence[Evidence]) -> Section | None:
+    commands = _collect_commands(ctx, evidence, procedure)
+    if not commands:
+        return None
+    body = ["Copy and paste these in order. Each entry is quoted verbatim from the source; "
+            "text in angle brackets or square brackets is a placeholder you fill in.",
+            "```bash", *commands, "```"]
+    return Section(heading="Commands", level=2, body=body)
+
+
+def _configs_section(evidence: Sequence[Evidence]) -> Section | None:
+    configs = _collect_configs(evidence)
+    if not configs:
+        return None
+    body = ["Exact configuration values shown in the source:",
+            "```ini", *configs, "```"]
+    return Section(heading="Configuration values", level=2, body=body)
+
+
+def _expected_section(procedure: Procedure, evidence: Sequence[Evidence]) -> Section | None:
+    expected = _collect_expected(procedure, evidence)
+    if not expected:
+        return None
+    return Section(heading="Expected outcome", level=2,
+                   body=[f"- {e}" for e in expected])
+
+
+def _troubleshooting_section(evidence: Sequence[Evidence]) -> Section | None:
+    troubleshooting = _collect_troubleshooting(evidence)
+    if not troubleshooting:
+        return None
+    body = []
+    for item in troubleshooting:
+        body.append(f"**Problem:** {item['problem']}")
+        if item.get("resolution"):
+            body.append(f"**What the source does about it:** {item['resolution']}")
+    return Section(heading="Troubleshooting", level=2, body=body)
+
+
+def _unresolved_section(procedure: Procedure,
+                        evidence: Sequence[Evidence]) -> Section | None:
+    unresolved = list(procedure.unresolved) + _unresolved_evidence(evidence)
+    if not unresolved:
+        return None
+    body = ["These points could not be determined from the source and should be "
+            "verified against the official documentation:"]
+    body += [f"- {u}" for u in unresolved]
+    return Section(heading="Unresolved details", level=2, body=body)
+
+
 def _assemble(
     ctx: StageContext,
     article: Article,
@@ -273,80 +387,37 @@ def _assemble(
     prov = article.provenance
     url = prov.get("url")
 
-    if article.scope:
-        # Scope prose summarises the whole procedure, so it is bound to the
-        # procedure's full evidence span rather than any single observation.
-        step_ids = [i for s in procedure.steps for i in (s.evidence_ids or [])]
-        refs = [e for e in evidence if e.evidence_id in step_ids]
-        times = [e.t_start for e in refs if e.t_start is not None]
-        scope_body = [article.scope]
-        if refs and times:
-            t_min, t_max = min(times), max(times)
-            link = timestamp_url(url, t_min)
-            if link:
-                scope_body.append(f"*Source: [{format_ts(t_min)}–{format_ts(t_max)}]({link})*")
-            scope_body.append(_cite_comment(
-                step="scope", ev_ids=[e.evidence_id for e in refs],
-                t_min=t_min, t_max=t_max))
-        article.sections.append(
-            Section(heading="Scope and applicability", level=2, body=scope_body)
-        )
+    sec = _scope_section(article, procedure, evidence, url)
+    if sec:
+        article.sections.append(sec)
 
     if procedure.prerequisites:
         body = [f"- {p}" for p in procedure.prerequisites]
         article.sections.append(Section(heading="Prerequisites", level=2, body=body))
 
-    warnings = _collect_warnings(procedure, evidence)
-    if warnings:
-        body: list[str] = []
-        for text, ev_ids in warnings:
-            body.append(f"> **Warning** — {text}")
-            refs = [e for e in evidence if e.evidence_id in ev_ids]
-            times = [e.t_start for e in refs if e.t_start is not None]
-            if refs:
-                t_min = min(times) if times else None
-                link = timestamp_url(url, t_min)
-                if link:
-                    body.append(f"> *Source: [{format_ts(t_min)}]({link})*")
-                body.append(_cite_comment(
-                    step="warnings", ev_ids=[e.evidence_id for e in refs],
-                    t_min=t_min if refs else None,
-                    t_max=max(times) if times else None))
-        article.sections.append(Section(heading="Before you start", level=2, body=body))
+    sec = _warnings_section(procedure, evidence, url)
+    if sec:
+        article.sections.append(sec)
 
-    if procedure.steps:
-        steps_section = Section(heading="Procedure", level=2)
-        for step in procedure.steps:
-            block = _render_step(step, evidence, frames, url)
-            steps_section.body.append(block)
-        article.sections.append(steps_section)
+    sec = _steps_section(procedure, evidence, frames, url)
+    if sec:
+        article.sections.append(sec)
 
-    commands = _collect_commands(ctx, evidence, procedure)
-    if commands:
-        body = ["Copy and paste these in order. Each entry is quoted verbatim from the source; "
-                "text in angle brackets or square brackets is a placeholder you fill in.",
-                "```bash", *commands, "```"]
-        article.sections.append(Section(heading="Commands", level=2, body=body))
+    sec = _commands_section(ctx, procedure, evidence)
+    if sec:
+        article.sections.append(sec)
 
-    configs = _collect_configs(evidence)
-    if configs:
-        body = ["Exact configuration values shown in the source:",
-                "```ini", *configs, "```"]
-        article.sections.append(Section(heading="Configuration values", level=2, body=body))
+    sec = _configs_section(evidence)
+    if sec:
+        article.sections.append(sec)
 
-    expected = _collect_expected(procedure, evidence)
-    if expected:
-        body = [f"- {e}" for e in expected]
-        article.sections.append(Section(heading="Expected outcome", level=2, body=body))
+    sec = _expected_section(procedure, evidence)
+    if sec:
+        article.sections.append(sec)
 
-    troubleshooting = _collect_troubleshooting(evidence)
-    if troubleshooting:
-        body = []
-        for item in troubleshooting:
-            body.append(f"**Problem:** {item['problem']}")
-            if item.get("resolution"):
-                body.append(f"**What the source does about it:** {item['resolution']}")
-        article.sections.append(Section(heading="Troubleshooting", level=2, body=body))
+    sec = _troubleshooting_section(evidence)
+    if sec:
+        article.sections.append(sec)
 
     if procedure.alternatives:
         body = [f"- {a}" for a in procedure.alternatives]
@@ -358,12 +429,9 @@ def _assemble(
             body.append(f"> {c}")
         article.sections.append(Section(heading="Corrections in the source", level=2, body=body))
 
-    unresolved = list(procedure.unresolved) + _unresolved_evidence(evidence)
-    if unresolved:
-        body = ["These points could not be determined from the source and should be "
-                "verified against the official documentation:"]
-        body += [f"- {u}" for u in unresolved]
-        article.sections.append(Section(heading="Unresolved details", level=2, body=body))
+    sec = _unresolved_section(procedure, evidence)
+    if sec:
+        article.sections.append(sec)
 
     if procedure.limitations:
         body = [f"- {l}" for l in procedure.limitations]
@@ -394,6 +462,55 @@ def _cite_comment(*, step: int | str, ev_ids: Sequence[str],
     return f"<!-- cite: step={step} ev={ev} t={span} frames={fr} -->"
 
 
+def _step_source_lines(step, refs: list[Evidence], url: str | None) -> list[str]:
+    """Visible *Source* anchor plus the machine-readable cite comment."""
+    lines: list[str] = []
+    times = [e.t_start for e in refs if e.t_start is not None]
+    t_min = min(times) if times else None
+    t_max = max(times) if times else None
+    link = timestamp_url(url, t_min)
+    if link:
+        lines.append(f"   *Source: [{format_ts(t_min)}]({link})*")
+    elif t_min is not None:
+        # no URL (local file): the timestamp is still the evidence anchor
+        lines.append(f"   *Source: {format_ts(t_min)} of the source video*")
+    lines.append("   " + _cite_comment(
+        step=step.position,
+        ev_ids=[e.evidence_id for e in refs],
+        t_min=t_min, t_max=t_max,
+        frame_ids=list(step.frame_ids or [])))
+    return lines
+
+
+def _step_warning_lines(step) -> list[str]:
+    """Cleaned step warnings; an evidence id is a citation, not a warning."""
+    lines: list[str] = []
+    for w in step.warnings:
+        cleaned = " ".join(str(w).split()).strip(" .;:-")
+        if len(cleaned) < 8 or re.fullmatch(r"ev-[0-9a-f]{4,}", cleaned):
+            continue
+        lines.append(f"   > **Warning** — {cleaned}")
+    return lines
+
+
+def _step_frame_lines(step, frames: dict[str, dict[str, Any]],
+                      evidence: Sequence[Evidence], url: str | None) -> list[str]:
+    """Embedded frame images with their source-anchored captions."""
+    lines: list[str] = []
+    for fid in step.frame_ids:
+        frame = frames.get(fid)
+        if frame is None:
+            continue
+        ref = _frame_ref(frame, evidence, fid)
+        link = timestamp_url(url, frame["t"])
+        if link:
+            caption = ref.caption + f" — source at [{format_ts(frame['t'])}]({link})"
+        else:
+            caption = ref.caption + f" — source at {format_ts(frame['t'])} of the source video"
+        lines.append(f"   ![{_alt(ref.caption)}](assets/{fid}.jpg)\n\n   *{caption}*")
+    return lines
+
+
 def _render_step(
     step,
     evidence: Sequence[Evidence],
@@ -414,41 +531,13 @@ def _render_step(
             lines.append("   ```")
     refs = [index[i] for i in step.evidence_ids if i in index]
     if refs:
-        times = [e.t_start for e in refs if e.t_start is not None]
-        t_min = min(times) if times else None
-        t_max = max(times) if times else None
-        link = timestamp_url(url, t_min)
-        if link:
-            lines.append(f"   *Source: [{format_ts(t_min)}]({link})*")
-        elif t_min is not None:
-            # no URL (local file): the timestamp is still the evidence anchor
-            lines.append(f"   *Source: {format_ts(t_min)} of the source video*")
-        lines.append("   " + _cite_comment(
-            step=step.position,
-            ev_ids=[e.evidence_id for e in refs],
-            t_min=t_min, t_max=t_max,
-            frame_ids=list(step.frame_ids or [])))
-    for w in step.warnings:
-        cleaned = " ".join(str(w).split()).strip(" .;:-")
-        # an evidence id is a citation, not a warning the reader can act on
-        if len(cleaned) < 8 or re.fullmatch(r"ev-[0-9a-f]{4,}", cleaned):
-            continue
-        lines.append(f"   > **Warning** — {cleaned}")
+        lines.extend(_step_source_lines(step, refs, url))
+    lines.extend(_step_warning_lines(step))
     if step.expected_result:
         lines.append(f"   *Expected:* {step.expected_result}")
     for alt in step.alternatives:
         lines.append(f"   *Alternative:* {alt}")
-    for fid in step.frame_ids:
-        frame = frames.get(fid)
-        if frame is None:
-            continue
-        ref = _frame_ref(frame, evidence, fid)
-        link = timestamp_url(url, frame["t"])
-        if link:
-            caption = ref.caption + f" — source at [{format_ts(frame['t'])}]({link})"
-        else:
-            caption = ref.caption + f" — source at {format_ts(frame['t'])} of the source video"
-        lines.append(f"   ![{_alt(ref.caption)}](assets/{fid}.jpg)\n\n   *{caption}*")
+    lines.extend(_step_frame_lines(step, frames, evidence, url))
     return "\n".join(lines)
 
 
@@ -597,20 +686,30 @@ def _values_supported(candidate: str, supported: Sequence[str]) -> bool:
     return any(values_match(candidate, s) for s in supported)
 
 
+_CONFIG_EVIDENCE_KINDS = frozenset({"config", "measurement", "identifier"})
+_CONFIG_LITERAL_KINDS = frozenset({"keyvalue", "measurement", "version", "path", "flag",
+                                   "port", "ip_address", "mac_address", "uuid"})
+
+
+def _config_value(lit) -> str:
+    return lit.literal if lit.kind == "keyvalue" else f"{lit.literal}"
+
+
 def _collect_configs(evidence: Sequence[Evidence]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for e in evidence:
-        if e.kind in ("config", "measurement", "identifier"):
-            for lit in e.literals:
-                if lit.kind in ("keyvalue", "measurement", "version", "path", "flag", "port",
-                                "ip_address", "mac_address", "uuid"):
-                    val = lit.literal if lit.kind == "keyvalue" else f"{lit.literal}"
-                    key = normalize_value(val).lower()
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    out.append(val)
+        if e.kind not in _CONFIG_EVIDENCE_KINDS:
+            continue
+        for lit in e.literals:
+            if lit.kind not in _CONFIG_LITERAL_KINDS:
+                continue
+            val = _config_value(lit)
+            key = normalize_value(val).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(val)
     return out[:60]
 
 

@@ -241,6 +241,28 @@ def _digest(items: Sequence[Evidence], *, limit: int) -> list[dict[str, Any]]:
     return out
 
 
+_LIST_FIELDS = ("prerequisites", "alternatives", "corrections", "unresolved", "limitations")
+
+
+def _parse_step(i: int, raw: Any) -> ProcedureStep | None:
+    """One writer step; None when it is not a usable instruction."""
+    if not isinstance(raw, dict):
+        return None
+    text = str(raw.get("text", "")).strip()
+    if len(text) < 4:
+        return None
+    return ProcedureStep(
+        position=i + 1,
+        text=text,
+        detail=str(raw.get("detail") or "").strip(),
+        evidence_ids=[str(x) for x in (raw.get("evidence_ids") or [])],
+        frame_ids=[str(x) for x in (raw.get("frame_ids") or [])],
+        warnings=[str(x) for x in (raw.get("warnings") or []) if str(x).strip()],
+        expected_result=str(raw.get("expected_result") or "").strip(),
+        alternatives=[str(x) for x in (raw.get("alternatives") or []) if str(x).strip()],
+    )
+
+
 def _parse(ctx: StageContext, payload: dict[str, Any]) -> Procedure:
     pid = ctx.source_id
     procedure = Procedure(
@@ -249,24 +271,10 @@ def _parse(ctx: StageContext, payload: dict[str, Any]) -> Procedure:
         summary=str(payload.get("summary") or "").strip()[:1200],
     )
     for i, raw in enumerate(payload.get("steps") or []):
-        if not isinstance(raw, dict):
-            continue
-        text = str(raw.get("text", "")).strip()
-        if len(text) < 4:
-            continue
-        procedure.steps.append(
-            ProcedureStep(
-                position=i + 1,
-                text=text,
-                detail=str(raw.get("detail") or "").strip(),
-                evidence_ids=[str(x) for x in (raw.get("evidence_ids") or [])],
-                frame_ids=[str(x) for x in (raw.get("frame_ids") or [])],
-                warnings=[str(x) for x in (raw.get("warnings") or []) if str(x).strip()],
-                expected_result=str(raw.get("expected_result") or "").strip(),
-                alternatives=[str(x) for x in (raw.get("alternatives") or []) if str(x).strip()],
-            )
-        )
-    for key in ("prerequisites", "alternatives", "corrections", "unresolved", "limitations"):
+        step = _parse_step(i, raw)
+        if step is not None:
+            procedure.steps.append(step)
+    for key in _LIST_FIELDS:
         procedure.__setattr__(
             key, [str(x).strip() for x in (payload.get(key) or []) if str(x).strip()]
         )

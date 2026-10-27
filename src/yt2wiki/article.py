@@ -231,6 +231,101 @@ ul.plain { padding-left:20px; }
 """
 
 
+def _consume_fence(lines: list[str], i: int) -> tuple[list[str], int]:
+    """Fenced code block starting at line ``i``; returns (html, next_i)."""
+    lang = lines[i].strip()[3:].strip()
+    i += 1
+    buf: list[str] = []
+    while i < len(lines) and not lines[i].strip().startswith("```"):
+        buf.append(lines[i])
+        i += 1
+    i += 1
+    code = html.escape("\n".join(buf))
+    return [f'<pre data-lang="{html.escape(lang)}"><code>{code}</code></pre>'], i
+
+
+def _consume_quote(lines: list[str], i: int) -> tuple[list[str], int]:
+    """Blockquote starting at line ``i``; returns (html, next_i)."""
+    buf: list[str] = []
+    while i < len(lines) and lines[i].strip().startswith(">"):
+        buf.append(lines[i].strip().lstrip(">").strip())
+        i += 1
+    body = " ".join(x for x in buf if x)
+    return [f"<blockquote><p>{_inline(body)}</p></blockquote>"], i
+
+
+def _emit_list_close(out: list[str], in_list: str | None) -> None:
+    if in_list:
+        out.append(f"</{in_list}>")
+
+
+def _render_block(lines: list[str], i: int,
+                  in_list: str | None) -> tuple[list[str], int, str | None] | None:
+    """Render one block element starting at line ``i``.
+
+    Returns ``(fragments, next_i, new_in_list)``, or ``None`` when the line
+    is ordinary paragraph text. Block order and list transitions match the
+    original single-loop renderer exactly.
+    """
+    stripped = lines[i].strip()
+    out: list[str] = []
+
+    if stripped.startswith("```"):
+        frag, i = _consume_fence(lines, i)
+        _emit_list_close(out, in_list)
+        out.extend(frag)
+        return out, i, None
+
+    if stripped.startswith("#"):
+        _emit_list_close(out, in_list)
+        level = len(stripped) - len(stripped.lstrip("#"))
+        level = max(1, min(6, level))
+        out.append(f"<h{level}>{_inline(stripped[level:].strip())}</h{level}>")
+        return out, i + 1, None
+
+    if stripped.startswith("> "):
+        frag, i = _consume_quote(lines, i)
+        _emit_list_close(out, in_list)
+        out.extend(frag)
+        return out, i, None
+
+    m = re.match(r"^(\d+)\.\s+(.*)$", stripped)
+    if m:
+        if in_list != "ol":
+            _emit_list_close(out, in_list)
+            out.append('<ol class="steps">')
+        out.append(f"<li>{_inline(m.group(2))}</li>")
+        return out, i + 1, "ol"
+
+    m = re.match(r"^[-*]\s+(.*)$", stripped)
+    if m:
+        if in_list != "ul":
+            _emit_list_close(out, in_list)
+            out.append('<ul class="plain">')
+        out.append(f"<li>{_inline(m.group(1))}</li>")
+        return out, i + 1, "ul"
+
+    m = re.match(r"^!\[(.*?)\]\((.*?)\)$", stripped)
+    if m:
+        _emit_list_close(out, in_list)
+        if _safe_href(m.group(2)):
+            out.append(f'<figure><img alt="{html.escape(m.group(1))}" src="{html.escape(m.group(2))}"></figure>')
+        return out, i + 1, None
+
+    # A lone *emphasised* line is a figure caption; a lone **bold** line
+    # is a paragraph (often a sub-heading the writer emphasised).
+    m = re.match(r"^\*([^*]+)\*$", stripped)
+    if m and in_list is None:
+        out.append(f'<figcaption>{_inline(m.group(1))}</figcaption>')
+        return out, i + 1, None
+
+    if not stripped:
+        _emit_list_close(out, in_list)
+        return out, i + 1, None
+
+    return None
+
+
 def markdown_to_html(md: str) -> str:
     """Small self-contained Markdown subset renderer (no external assets)."""
     lines = md.split("\n")
@@ -238,91 +333,17 @@ def markdown_to_html(md: str) -> str:
     i = 0
     in_list: str | None = None
     while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            lang = stripped[3:].strip()
-            i += 1
-            buf: list[str] = []
-            while i < len(lines) and not lines[i].strip().startswith("```"):
-                buf.append(lines[i])
-                i += 1
-            i += 1
-            if in_list:
-                out.append(f"</{in_list}>")
-                in_list = None
-            code = html.escape("\n".join(buf))
-            out.append(f'<pre data-lang="{html.escape(lang)}"><code>{code}</code></pre>')
-            continue
-        if stripped.startswith("#"):
-            if in_list:
-                out.append(f"</{in_list}>")
-                in_list = None
-            level = len(stripped) - len(stripped.lstrip("#"))
-            level = max(1, min(6, level))
-            out.append(f"<h{level}>{_inline(stripped[level:].strip())}</h{level}>")
-            i += 1
-            continue
-        if stripped.startswith("> "):
-            if in_list:
-                out.append(f"</{in_list}>")
-                in_list = None
-            buf = []
-            while i < len(lines) and lines[i].strip().startswith(">"):
-                buf.append(lines[i].strip().lstrip(">").strip())
-                i += 1
-            body = " ".join(x for x in buf if x)
-            out.append(f"<blockquote><p>{_inline(body)}</p></blockquote>")
-            continue
-        m = re.match(r"^(\d+)\.\s+(.*)$", stripped)
-        if m:
-            if in_list != "ol":
-                if in_list:
-                    out.append(f"</{in_list}>")
-                out.append('<ol class="steps">')
-                in_list = "ol"
-            out.append(f"<li>{_inline(m.group(2))}</li>")
-            i += 1
-            continue
-        m = re.match(r"^[-*]\s+(.*)$", stripped)
-        if m:
-            if in_list != "ul":
-                if in_list:
-                    out.append(f"</{in_list}>")
-                out.append('<ul class="plain">')
-                in_list = "ul"
-            out.append(f"<li>{_inline(m.group(1))}</li>")
-            i += 1
-            continue
-        m = re.match(r"^!\[(.*?)\]\((.*?)\)$", stripped)
-        if m:
-            if in_list:
-                out.append(f"</{in_list}>")
-                in_list = None
-            if _safe_href(m.group(2)):
-                out.append(f'<figure><img alt="{html.escape(m.group(1))}" src="{html.escape(m.group(2))}"></figure>')
-            i += 1
-            continue
-        # A lone *emphasised* line is a figure caption; a lone **bold** line
-        # is a paragraph (often a sub-heading the writer emphasised).
-        m = re.match(r"^\*([^*]+)\*$", stripped)
-        if m and in_list is None:
-            out.append(f'<figcaption>{_inline(m.group(1))}</figcaption>')
-            i += 1
-            continue
-        if not stripped:
-            if in_list:
-                out.append(f"</{in_list}>")
-                in_list = None
-            i += 1
-            continue
-        if in_list:
-            out.append(f"</{in_list}>")
+        rendered = _render_block(lines, i, in_list)
+        if rendered is None:
+            # Ordinary paragraph text (also closes any open list).
+            _emit_list_close(out, in_list)
             in_list = None
-        out.append(f"<p>{_inline(stripped)}</p>")
-        i += 1
-    if in_list:
-        out.append(f"</{in_list}>")
+            out.append(f"<p>{_inline(lines[i].strip())}</p>")
+            i += 1
+            continue
+        frag, i, in_list = rendered
+        out.extend(frag)
+    _emit_list_close(out, in_list)
     return "\n".join(out)
 
 
