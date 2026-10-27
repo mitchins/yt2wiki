@@ -374,7 +374,10 @@ def validate(t: Transcript, duration_s: float, *,
     degenerate_segs = 0
     prev_start = -math.inf
     for i, s in enumerate(t.segments):
+        finite = math.isfinite(s.start) and math.isfinite(s.end)
         prev_start = _validate_segment(i, s, duration_s, problems, prev_start)
+        if not finite:
+            continue  # word checks need finite bounds (base behaviour)
         seg_degenerate = _validate_words(i, s, problems)
         if seg_degenerate:
             degenerate += seg_degenerate

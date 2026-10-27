@@ -412,6 +412,7 @@ def _rollback_promotion(completed: list[tuple[Path | None, Path, bool]],
     else:
         shutil.rmtree(backup_dir, ignore_errors=True)
 
+
 def write_manifest(paths, article_id: str, manifest: dict[str, Any]) -> str:
     """Persist the manifest JSON beside the snapshotted files."""
     manifest_rel = f"generations/{manifest['generation_id']}/manifest.json"

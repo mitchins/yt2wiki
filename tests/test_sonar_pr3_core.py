@@ -71,3 +71,32 @@ def test_visible_device_mapping(monkeypatch):
     # variable matching no probed GPU falls through
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "7")
     assert _visible_device_ordinal(gpus) is None
+
+
+def test_validate_skips_word_checks_for_nonfinite_segments():
+    """Non-finite segments produce only the non-finite problem (base behaviour)."""
+    from yt2wiki.backends.asr_http import validate
+
+    def seg(start, end, words=()):
+        from yt2wiki.backends.asr_http import Segment
+
+        return Segment(start=start, end=end, text="x", words=list(words),
+                       avg_logprob=None, no_speech_prob=None,
+                       compression_ratio=None)
+
+    t = type("T", (), {"language": "en", "segments": [
+        seg(float("nan"), 5.0),
+    ]})()
+    problems, warnings = validate(t, 60.0, require_words=False)
+    assert problems == ["segment 0: non-finite timestamps"]
+    assert warnings == []
+
+
+def test_json_span_survives_escapes_and_stray_brackets():
+    from yt2wiki.backends.llm import _json_span
+
+    assert _json_span('{"a": "bracket } inside"} tail') == '{"a": "bracket } inside"}'
+    assert _json_span('{"a": "escaped \\" quote"} x') == '{"a": "escaped \\" quote"}'
+    assert _json_span('} stray {"a": 1}') == '{"a": 1}'
+    assert _json_span("no json here") is None
+    assert _json_span('{"open": 1') is None

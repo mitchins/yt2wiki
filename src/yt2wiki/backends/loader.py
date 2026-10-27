@@ -396,7 +396,7 @@ class ModelManager:
                     repo=spec.repo,
                     revision=spec.revision,
                     engine=spec.engine,
-                    variant=candidate.report.variant,
+                    variant=loaded.report.variant,
                     ok=True,
                     device=self.device,
                     device_index=self.index,
@@ -421,10 +421,7 @@ class ModelManager:
         try:
             yield backend
         finally:
-            try:
-                backend.unload()
-            finally:
-                free_cuda_memory()
+            self._release(backend)
 
     def acquire_all(self, *roles: str) -> dict[str, BaseBackend]:
         """Eagerly load several roles (used by the API when a worker is idle)."""
