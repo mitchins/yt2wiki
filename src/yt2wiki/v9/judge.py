@@ -261,6 +261,37 @@ def _accept_replacement(backend, cand: dict[str, Any], section: dict[str, Any]) 
     return True, chk
 
 
+
+def _first_clean_replacement(backend, section, current, alternatives, seen,
+                             frames, history, max_rounds):
+    """Targeted revision: first clean, lexically supported alternative in rank
+    order (max 3 checks), then one expansion round of denser neighbours."""
+    replacement = None
+    checked = 0
+    for alt in alternatives:
+        if current is not None and alt["frame_id"] == current["frame_id"]:
+            continue
+        ok, chk = _accept_replacement(backend, alt, section)
+        history.append({"round": 1, "current": alt["frame_id"], "check": chk})
+        checked += 1
+        if ok:
+            replacement = alt
+            break
+        if checked >= 3:
+            break
+    if replacement is None and max_rounds >= 1:
+        extra = expand_candidates(frames, section["t_start"], section["t_end"], seen, "")
+        for c in extra:
+            seen.add(c["frame_id"])
+        for alt in extra[:6]:
+            ok, chk = _accept_replacement(backend, alt, section)
+            history.append({"round": 2, "current": alt["frame_id"], "check": chk})
+            if ok:
+                replacement = alt
+                break
+    return replacement
+
+
 def adjudicate_section(backend, section: dict[str, Any], initial: dict[str, Any] | None,
                        alternatives: Sequence[dict[str, Any]],
                        frames: Sequence[dict[str, Any]],
@@ -294,32 +325,9 @@ def adjudicate_section(backend, section: dict[str, Any], initial: dict[str, Any]
     if not first["flagged"]:
         final, outcome = current, "kept-clean"
     else:
-        # targeted revision: first clean, lexically supported alternative
-        # in rank order (max 3 checks)
-        replacement = None
-        checked = 0
-        for alt in alternatives:
-            if current is not None and alt["frame_id"] == current["frame_id"]:
-                continue
-            ok, chk = _accept_replacement(backend, alt, section)
-            history.append({"round": 1, "current": alt["frame_id"], "check": chk})
-            checked += 1
-            if ok:
-                replacement = alt
-                break
-            if checked >= 3:
-                break
-        if replacement is None and max_rounds >= 1:
-            # one expansion round: denser neighbours / wider window
-            extra = expand_candidates(frames, section["t_start"], section["t_end"], seen, "")
-            for c in extra:
-                seen.add(c["frame_id"])
-            for alt in extra[:6]:
-                ok, chk = _accept_replacement(backend, alt, section)
-                history.append({"round": 2, "current": alt["frame_id"], "check": chk})
-                if ok:
-                    replacement = alt
-                    break
+        replacement = _first_clean_replacement(backend, section, current,
+                                               alternatives, seen, frames,
+                                               history, max_rounds)
         if replacement is not None:
             final, outcome = replacement, "replaced"
         else:
@@ -448,48 +456,63 @@ STRONG_MIN_TOTAL = 7
 REPLACE_MARGIN = 2
 
 
-def classify_many(backend, paths: Sequence[str], *,
-                  cache: dict[str, Any] | None = None,
-                  expects_text: bool = False) -> list[dict[str, Any]]:
-    """Batched decorative veto pre-filter: one prompt per image, packed forward passes."""
+
+def _cached_labels(paths: Sequence[str], cache: dict[str, Any] | None) -> list[str]:
+    """Cached pre-filter labels; the uncached positions start empty."""
     labels: list[str] = ["" for _ in paths]
-    todo_idx, todo_paths = [], []
     for i, p in enumerate(paths):
         key = f"veto-label:{p}"
         if cache is not None and key in cache:
             labels[i] = cache[key]
-        else:
-            todo_idx.append(i)
-            todo_paths.append(p)
-    calls = 0
-    if todo_paths:
-        from PIL import Image
-        images = []
-        for p in todo_paths:
-            try:
-                images.append(Image.open(p).convert("RGB"))
-            except Exception:  # noqa: BLE001
-                images.append(None)
-        raw = ["unreadable"] * len(todo_paths)
-        good = [(k, im) for k, im in enumerate(images) if im is not None]
-        if good:
-            try:
-                # See classify_frame: reasoning models need headroom
-                # beyond the label itself or the answer comes back empty.
-                out = backend.describe_batch(
-                    [im for _, im in good], CLASSIFY_PROMPT, max_new_tokens=150,
-                    temperature=0.0, system="Reply with only the label.",
-                    batch_size=4)
-                calls += 1
-                for (k, _), r in zip(good, out):
-                    raw[k] = r
-            except Exception as exc:  # noqa: BLE001
-                log.warning("batched classify failed: %s", exc)
-        for i, p, r in zip(todo_idx, todo_paths, raw):
-            lab = _canonical_label(r)
-            labels[i] = lab
-            if cache is not None:
-                cache[f"veto-label:{p}"] = lab
+    return labels
+
+
+def _classify_uncached(backend, paths: Sequence[str], labels: list[str],
+                       cache: dict[str, Any] | None) -> int:
+    """Label the not-yet-cached paths; returns 1 when a batched call was made."""
+    todo_idx, todo_paths = [], []
+    for i, p in enumerate(paths):
+        if cache is None or f"veto-label:{p}" not in cache:
+            if not labels[i]:
+                todo_idx.append(i)
+                todo_paths.append(p)
+    if not todo_paths:
+        return 0
+    from PIL import Image
+    images = []
+    for p in todo_paths:
+        try:
+            images.append(Image.open(p).convert("RGB"))
+        except Exception:  # noqa: BLE001
+            images.append(None)
+    raw = ["unreadable"] * len(todo_paths)
+    good = [(k, im) for k, im in enumerate(images) if im is not None]
+    if good:
+        try:
+            # See classify_frame: reasoning models need headroom
+            # beyond the label itself or the answer comes back empty.
+            out = backend.describe_batch(
+                [im for _, im in good], CLASSIFY_PROMPT, max_new_tokens=150,
+                temperature=0.0, system="Reply with only the label.",
+                batch_size=4)
+            for (k, _), r in zip(good, out):
+                raw[k] = r
+        except Exception as exc:  # noqa: BLE001
+            log.warning("batched classify failed: %s", exc)
+    for i, p, r in zip(todo_idx, todo_paths, raw):
+        lab = _canonical_label(r)
+        labels[i] = lab
+        if cache is not None:
+            cache[f"veto-label:{p}"] = lab
+    return 1
+
+
+def classify_many(backend, paths: Sequence[str], *,
+                  cache: dict[str, Any] | None = None,
+                  expects_text: bool = False) -> list[dict[str, Any]]:
+    """Batched decorative veto pre-filter: one prompt per image, packed forward passes."""
+    labels = _cached_labels(paths, cache)
+    _classify_uncached(backend, paths, labels, cache)
     vetoed = []
     for p, lab in zip(paths, labels):
         stats = ocr_stats(p)
@@ -558,6 +581,18 @@ def _parse_rubric(raw: str, n: int) -> dict[str, Any] | None:
         return None
     if not isinstance(data.get("explanation"), str):
         return None
+    clean = _parse_score_entries(scores, n)
+    if not _rubric_grounded(clean, n, data):
+        return None
+    verdict = _parse_verdict(data)
+    if verdict is None:
+        return None
+    return {"scores": clean, **verdict,
+            "explanation": str(data.get("explanation") or "")[:600]}
+
+
+def _parse_score_entries(scores: list, n: int) -> list[dict[str, Any]]:
+    """Per-candidate rubric entries; unusable entries are skipped."""
     clean = []
     for s in scores:
         if not isinstance(s, dict):
@@ -584,19 +619,27 @@ def _parse_rubric(raw: str, n: int) -> dict[str, Any] | None:
             total += v
         entry["total"] = total
         clean.append(entry)
-    # Grounding check: the verdict must score every shown image exactly
-    # once — no missing, duplicate, or out-of-range entries. A schema
-    # cannot stop a made-up verdict on a malformed prompt, so a partial
-    # or padded score set fails the round outright and the caller falls
-    # back to the veto loop.
+    return clean
+
+
+def _rubric_grounded(clean: list[dict[str, Any]], n: int, data: dict[str, Any]) -> bool:
+    """Grounding check: every shown image scored exactly once, count honest.
+
+    A schema cannot stop a made-up verdict on a malformed prompt, so a
+    partial or padded score set fails the round outright and the caller
+    falls back to the veto loop.
+    """
     if sorted(e["idx"] for e in clean) != list(range(1, n + 1)):
-        return None
+        return False
     # The count must be a real JSON integer: bool/float/str approximations
     # (true, 2.9, "2") fail even when they would coerce to the right number.
     received = data.get("images_received")
-    if (not isinstance(received, int) or isinstance(received, bool)
-            or received != n):
-        return None
+    return (isinstance(received, int) and not isinstance(received, bool)
+            and received == n)
+
+
+def _parse_verdict(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Decision/winner/pair/refinement; None when the model saw no images."""
     decision = str(data.get("decision") or "").upper()
     if decision == "NO_IMAGE":
         # The model reports it saw no images: never install on this verdict.
@@ -617,8 +660,7 @@ def _parse_rubric(raw: str, n: int) -> dict[str, Any] | None:
     direction = str(ref.get("direction") or "none").lower()
     if direction not in ("none", "earlier", "later", "denser", "clearer", "result", "pair"):
         direction = "none"
-    return {"scores": clean, "decision": decision, "winner": winner, "pair": pair,
-            "explanation": str(data.get("explanation") or "")[:600],
+    return {"decision": decision, "winner": winner, "pair": pair,
             "refinement": {"direction": direction,
                            "detail": str(ref.get("detail") or "")[:300]}}
 
@@ -632,7 +674,26 @@ def score_candidates(backend, section: dict[str, Any],
     Returns (parsed judgement, vlm_calls). Positions map back to frame_ids by
     the caller; frame_ids are never shown to the judge.
     """
+    images = _load_slot_images(ordered)
+    if images is None:
+        return None, 0
+    key = _rubric_cache_key(section, ordered)
+    if cache is not None and key in cache:
+        return cache[key], 0
+    prompt = RUBRIC_PROMPT.format(
+        heading=(section.get("heading") or "")[:150],
+        body=(section.get("body") or "")[:1200],
+        n=len(ordered), current_pos=current_pos)
+    parsed, calls = _rubric_pass(backend, images, prompt, ordered)
+    if cache is not None and parsed is not None:
+        cache[key] = parsed
+    return parsed, calls
+
+
+def _load_slot_images(ordered: Sequence[dict[str, Any]]) -> list | None:
+    """Slot-per-candidate images; None when every file is unreadable."""
     from PIL import Image
+
     images = []
     for c in ordered:
         try:
@@ -640,21 +701,23 @@ def score_candidates(backend, section: dict[str, Any],
         except Exception:  # noqa: BLE001
             images.append(None)
     if not any(im is not None for im in images):
-        return None, 0
+        return None
     # Unreadable files still occupy their numbered slot (blank) so positions hold.
     blank = Image.new("RGB", (64, 64), (0, 0, 0))
-    images = [im if im is not None else blank for im in images]
-    key = "rubric:" + hashlib.sha1(
+    return [im if im is not None else blank for im in images]
+
+
+def _rubric_cache_key(section: dict[str, Any],
+                      ordered: Sequence[dict[str, Any]]) -> str:
+    return "rubric:" + hashlib.sha1(
         ("|".join(c["frame_id"] for c in ordered) + "|" +
          (section.get("heading") or "")[:80]).encode()).hexdigest()[:16]
-    if cache is not None and key in cache:
-        return cache[key], 0
-    prompt = RUBRIC_PROMPT.format(
-        heading=(section.get("heading") or "")[:150],
-        body=(section.get("body") or "")[:1200],
-        n=len(ordered), current_pos=current_pos)
+
+
+def _rubric_pass(backend, images: list, prompt: str,
+                 ordered: Sequence[dict[str, Any]]) -> tuple[dict[str, Any] | None, int]:
+    """Two attempts (retry compact at temperature 0.3); (verdict, calls)."""
     calls = 0
-    parsed = None
     schema_kw: dict[str, Any] = {}
     if getattr(backend, "supports_structured_schema", False):
         schema_kw = {"response_schema": RUBRIC_SCHEMA, "schema_name": "rubric"}
@@ -672,12 +735,10 @@ def score_candidates(backend, section: dict[str, Any],
             raw = ""
         parsed = _parse_rubric(raw or "", len(ordered))
         if parsed is not None:
-            break
+            return parsed, calls
         prompt = ("COMPACT JSON only, one line per candidate, no fences, no extra "
                   "prose. " + prompt)
-    if cache is not None and parsed is not None:
-        cache[key] = parsed
-    return parsed, calls
+    return None, calls
 
 
 def _decide(scored: list[dict[str, Any]], current_pos: int, *,
@@ -761,73 +822,31 @@ def adjudicate_section_z1(backend, section: dict[str, Any], initial: dict[str, A
     if cache is None:
         cache = {}
     cache_before = len(cache)
-    vlm_calls = 0
-    inspected = 0
+    counters = {"vlm": 0, "inspected": 0}
     rounds: list[dict[str, Any]] = []
     _expects = _section_expects_text(section)
 
-    pool = ([initial] if initial is not None else []) + list(alternatives[:alt_limit + 2])
-    # de-duplicate while preserving rank order
-    uniq, seen_ids = [], set()
-    for c in pool:
-        if c["frame_id"] not in seen_ids:
-            uniq.append(c)
-            seen_ids.add(c["frame_id"])
-    pool = uniq[:frame_budget]
-    seen = {c["frame_id"] for c in pool}
-
-    pre = classify_many(backend, [c["path"] for c in pool],
-                        cache=cache, expects_text=_expects)
-    vlm_calls += 1  # one batched classify_many invocation
-    inspected += len(pool)
-    verdict = {c["frame_id"]: v for c, v in zip(pool, pre)}
+    pool, seen, verdict = _z1_pool(backend, section, initial, alternatives,
+                                   alt_limit, frame_budget, cache, _expects,
+                                   counters)
 
     def shown_set(extra=()):
-        shown = []
-        if initial is not None:
-            shown.append(initial)
-        for c in list(alternatives) + list(extra):
-            if len(shown) >= alt_limit + 1:
-                break
-            if c["frame_id"] not in {s["frame_id"] for s in shown}:
-                shown.append(c)
-        return shown
+        return _z1_shown_set(initial, alternatives, extra, alt_limit)
 
     # --- round 0: comparative scoring of incumbent + strongest alternatives ---
     shown = shown_set()
     if not shown:
         return _z1_record(section, initial, [], rounds, None, "OMIT",
-                          "no candidates available", started, inspected,
-                          vlm_calls, cache_before, cache)
+                          "no candidates available", started,
+                          counters["inspected"], counters["vlm"],
+                          cache_before, cache)
     # Honour the frame budget across refinement rounds.
     shown = shown[:alt_limit + 1]
 
     def score_round(shown_cands, rnd, rng_seed):
-        nonlocal vlm_calls
-        order = list(range(len(shown_cands)))
-        random.Random(rng_seed).shuffle(order)  # S2245: non-cryptographic deterministic shuffle for presentation order
-        ordered = [shown_cands[i] for i in order]
-        if initial is not None and any(s["frame_id"] == initial["frame_id"]
-                                      for s in shown_cands):
-            cur_pos = next(i for i, s in enumerate(ordered)
-                           if s["frame_id"] == initial["frame_id"])
-        else:
-            cur_pos = -1
-        parsed, calls = score_candidates(backend, section, ordered, cur_pos + 1,
-                                         cache=cache)
-        vlm_calls += calls
-        if parsed is None:
-            return None, ordered, cur_pos
-        # fuse rubric veto with pre-filter veto (pre-filter keyed by frame_id)
-        for s in parsed["scores"]:
-            f = ordered[s["idx"] - 1]
-            s["frame_id"] = f["frame_id"]
-            pv = verdict.get(f["frame_id"])
-            if pv is not None and pv["veto"]:
-                s["veto"] = True
-                prev = s.get("veto_reason") or ""
-                join = " + " if prev else ""
-                s["veto_reason"] = (f"prefilter: {pv['reason']}" + join + prev)[:200]
+        parsed, ordered, cur_pos, calls = _z1_score_round(
+            backend, section, shown_cands, initial, rng_seed, cache, verdict)
+        counters["vlm"] += calls
         return parsed, ordered, cur_pos
 
     parsed, ordered, cur_pos = score_round(shown, 0, seed)
@@ -842,156 +861,280 @@ def adjudicate_section_z1(backend, section: dict[str, Any], initial: dict[str, A
     rounds.append({"round": 0, "shown": [c["frame_id"] for c in ordered],
                      "judgement": parsed})
 
-    final_ids: list[str] | None = None
-    decision, reason = None, ""
-    refinement_rounds = 0
+    state = _Z1State(parsed=parsed, ordered=ordered, cur_pos=cur_pos, seed=seed)
 
-    while True:
-        scored = parsed["scores"]
-        policy = _decide(scored, cur_pos + 1,
-                         rounds_left=max_rounds - refinement_rounds)
-        jdec = parsed["decision"]
-        by_idx = {s["idx"]: s for s in scored}
-        # USE_PAIR: judge-nominated pair, both eligible, no dominant single.
-        pair_ids: list[str] = []
-        if (jdec == "USE_PAIR" and len(parsed["pair"]) == 2
-                and all(p in by_idx and not by_idx[p]["veto"]
-                        and (by_idx[p]["relevance"] == 2 or by_idx[p]["context_ok"])
-                        for p in parsed["pair"])):
-            best_single = max((s["total"] for s in scored if not s["veto"]),
-                              default=0)
-            if best_single < STRONG_MIN_TOTAL:
-                pair_ids = [ordered[p - 1]["frame_id"] for p in parsed["pair"][:2]]
-                decision = "USE_PAIR"
-                reason = (parsed["explanation"] or "judge-nominated before/after pair")[:300]
-        if decision is None:
-            if policy["action"] == "EXPAND" and refinement_rounds < max_rounds:
-                direction = parsed["refinement"]["direction"]
-                incumb = by_idx.get(cur_pos + 1) if cur_pos >= 0 else None
-                incumb_strong = (incumb is not None and not incumb["veto"]
-                                 and (incumb["relevance"] == 2 or incumb["context_ok"])
-                                 and incumb["total"] >= STRONG_MIN_TOTAL)
-                if incumb_strong:
-                    # Strong incumbent despite EXPAND advice: keep, record dissent.
-                    decision = "KEEP (judge EXPAND overruled: strong incumbent)"
-                    reason = policy["reason"]
-                elif (direction == "none"
-                        and not any(not s["veto"] for s in scored)):
-                    decision, reason = "OMIT", (
-                        "no eligible candidate and no directed refinement request")
-                else:
-                    anchor = None
-                    w = policy.get("winner_idx")
-                    if w and w in by_idx:
-                        anchor = float(ordered[w - 1]["t"])
-                    new = refine_candidates(frames, section, seen, direction,
-                                            parsed["refinement"]["detail"],
-                                            anchor_t=anchor)
-                    for c in new:
-                        seen.add(c["frame_id"])
-                    new_pre = classify_many(backend, [c["path"] for c in new],
-                                            cache=cache, expects_text=_expects)
-                    vlm_calls += 1
-                    inspected += len(new)
-                    for c, v in zip(new, new_pre):
-                        verdict[c["frame_id"]] = v
-                    clean_new = [c for c, v in zip(new, new_pre) if not v["veto"]][:2]
-                    rounds.append({"round": refinement_rounds + 1,
-                                   "refinement": parsed["refinement"],
-                                   "retrieved": [c["frame_id"] for c in new],
-                                   "judgement": None})
-                    if not clean_new:
-                        decision, reason = "OMIT", (
-                            f"refinement '{direction}' retrieved nothing clean")
-                    else:
-                        # Rescore: incumbent winner + fresh material.
-                        keep = policy.get("winner_idx")
-                        base = []
-                        if keep and keep in by_idx:
-                            base = [ordered[keep - 1]]
-                        shown2 = base + [c for c in clean_new
-                                        if c["frame_id"] not in {b["frame_id"] for b in base}]
-                        refinement_rounds += 1
-                        parsed2, ordered2, cur_pos2 = score_round(
-                            shown2, refinement_rounds, seed + refinement_rounds)
-                        if parsed2 is None:
-                            decision, reason = "OMIT", "rescoring failed after refinement"
-                        else:
-                            ordered, cur_pos, parsed = ordered2, cur_pos2, parsed2
-                            rounds[-1]["judgement"] = parsed2
-                            rounds[-1]["shown"] = [c["frame_id"] for c in ordered2]
-                            continue
-            elif policy["action"] == "EXPAND":
-                decision, reason = "OMIT", policy["reason"]
-            else:
-                decision, reason = policy["action"], policy["reason"]
-                if jdec != decision and jdec in ("KEEP", "REPLACE", "OMIT"):
-                    reason += f" (judge advised {jdec})"
-        if decision is not None:
-            break
-        # the loop only continues via the refinement `continue` above
-        break
+    def refine(shown2):
+        state.refinement_rounds += 1
+        parsed2, ordered2, cur_pos2 = score_round(shown2, state.refinement_rounds,
+                                                  seed + state.refinement_rounds)
+        return parsed2, ordered2, cur_pos2
 
-    if decision == "USE_PAIR":
-        final_ids = pair_ids
-    elif decision in ("KEEP", "REPLACE") or decision.startswith("KEEP"):
-        w = _decide(parsed["scores"], cur_pos + 1, rounds_left=0)
-        # recompute winner deterministically at rounds_left=0 (never EXPAND)
-        final_ids = [ordered[w["winner_idx"] - 1]["frame_id"]] if w["winner_idx"] else None
-        if decision.startswith("KEEP") and initial is not None:
-            final_ids = [initial["frame_id"]]
+    decision, reason, pair_ids = _z1_policy_loop(
+        backend, section, frames, seen, verdict, cache, _expects,
+        max_rounds, state, rounds, score_round, refine)
+
+    final_ids = _z1_final_ids(decision, pair_ids, state, initial)
     # re-verify finals through the single-frame veto (never publish knowingly poor)
     if final_ids:
-        for fid in list(final_ids):
-            cand = next((c for c in pool if c["frame_id"] == fid),
-                        next((c for c in frames if c["frame_id"] == fid), None))
-            if cand is None:
-                final_ids.remove(fid)
-                continue
-            chk = _vet_candidate(backend, cand, _expects)
-            inspected += 1
-            vlm_calls += 1
-            if chk["flagged"]:
-                final_ids.remove(fid)
-                reason += f" (re-verification vetoed {fid}: {chk['reason']})"
-                continue
-            # wrong-context backstop: when the judge awards top marks but cannot
-            # articulate anything specific (short/vacuous weakness), get an
-            # independent plain-language subject description; drop the
-            # finalist if the described subject shares no content token with
-            # the section (catches memes/B-roll the classifier calls
-            # instructional). Specific weaknesses skip this probe.
-            weak = next((str(s.get("weakness") or "") for s in parsed["scores"]
-                           if s.get("frame_id") == fid), "")
-            if len(weak.split()) < 6:
-                desc = subject_of(backend, cand["path"], cache=cache)
-                vlm_calls += 1
-                if not _subject_supported(desc, section):
-                    # Rescue: the terse weakness may undersell a grounded
-                    # verdict (numbers the probe paraphrases away, e.g.
-                    # "250 MB/s" -> "data transfer speed"). The judge's own
-                    # explanation is pixel-grounded evidence too; keep the
-                    # finalist when IT shares a content token with the
-                    # section. A vacuous verdict (no overlap anywhere) is
-                    # still dropped.
-                    expl = str(parsed.get("explanation") or "")
-                    if expl.strip() and _subject_supported(expl, section):
-                        reason += (f" (subject probe kept {fid} on explanation "
-                                   f"overlap despite: {desc!r})")
-                    else:
-                        final_ids.remove(fid)
-                        reason += (f" (subject backstop dropped {fid}: "
-                                   f"described as {desc!r}, no section overlap)")
-                        continue
-            else:
-                reason += f" (subject probe skipped for {fid}: specific weakness)"
+        final_ids, reason = _z1_verify_finals(
+            backend, section, state, pool, frames, _expects, cache, counters,
+            final_ids, reason)
         if not final_ids:
             decision = "OMIT"
             reason = reason + " (all finals failed re-verification)"
     return _z1_record(section, initial,
                       [c["frame_id"] for c in shown], rounds, final_ids,
-                      decision or "OMIT", reason, started, inspected,
-                      vlm_calls, cache_before, cache)
+                      decision or "OMIT", reason, started,
+                      counters["inspected"], counters["vlm"],
+                      cache_before, cache)
+
+
+
+class _Z1State:
+    """Mutable rubric-round state (rescored in place during refinement)."""
+
+    def __init__(self, *, parsed: dict[str, Any], ordered: list,
+                 cur_pos: int, seed: int) -> None:
+        self.parsed = parsed
+        self.ordered = ordered
+        self.cur_pos = cur_pos
+        self.seed = seed
+        self.refinement_rounds = 0
+
+
+def _z1_pool(backend, section, initial, alternatives, alt_limit, frame_budget,
+             cache, _expects, counters):
+    """Budgeted candidate pool plus its batched veto pre-filter."""
+    pool = ([initial] if initial is not None else []) + list(alternatives[:alt_limit + 2])
+    # de-duplicate while preserving rank order
+    uniq, seen_ids = [], set()
+    for c in pool:
+        if c["frame_id"] not in seen_ids:
+            uniq.append(c)
+            seen_ids.add(c["frame_id"])
+    pool = uniq[:frame_budget]
+    seen = {c["frame_id"] for c in pool}
+    pre = classify_many(backend, [c["path"] for c in pool],
+                        cache=cache, expects_text=_expects)
+    counters["vlm"] += 1  # one batched classify_many invocation
+    counters["inspected"] += len(pool)
+    verdict = {c["frame_id"]: v for c, v in zip(pool, pre)}
+    return pool, seen, verdict
+
+
+def _z1_shown_set(initial, alternatives, extra, alt_limit) -> list:
+    """Incumbent plus up to alt_limit alternatives (rank order, deduped)."""
+    shown = []
+    if initial is not None:
+        shown.append(initial)
+    for c in list(alternatives) + list(extra):
+        if len(shown) >= alt_limit + 1:
+            break
+        if c["frame_id"] not in {s["frame_id"] for s in shown}:
+            shown.append(c)
+    return shown
+
+
+def _z1_score_round(backend, section, shown_cands, initial, rng_seed, cache,
+                    verdict):
+    """One comparative scoring pass; fuses the pre-filter veto into scores."""
+    order = list(range(len(shown_cands)))
+    random.Random(rng_seed).shuffle(order)  # S2245: non-cryptographic deterministic shuffle for presentation order
+    ordered = [shown_cands[i] for i in order]
+    if initial is not None and any(s["frame_id"] == initial["frame_id"]
+                                   for s in shown_cands):
+        cur_pos = next(i for i, s in enumerate(ordered)
+                       if s["frame_id"] == initial["frame_id"])
+    else:
+        cur_pos = -1
+    parsed, calls = score_candidates(backend, section, ordered, cur_pos + 1,
+                                     cache=cache)
+    if parsed is None:
+        return None, ordered, cur_pos, calls
+    # fuse rubric veto with pre-filter veto (pre-filter keyed by frame_id)
+    for s in parsed["scores"]:
+        f = ordered[s["idx"] - 1]
+        s["frame_id"] = f["frame_id"]
+        pv = verdict.get(f["frame_id"])
+        if pv is not None and pv["veto"]:
+            s["veto"] = True
+            prev = s.get("veto_reason") or ""
+            join = " + " if prev else ""
+            s["veto_reason"] = (f"prefilter: {pv['reason']}" + join + prev)[:200]
+    return parsed, ordered, cur_pos, calls
+
+
+def _z1_use_pair(parsed: dict[str, Any], by_idx: dict[int, dict[str, Any]],
+                 ordered: list) -> tuple[str, str, list[str]] | None:
+    """USE_PAIR when the judge nominates two eligible, non-dominant candidates."""
+    scored = parsed["scores"]
+    if (parsed["decision"] != "USE_PAIR" or len(parsed["pair"]) != 2
+            or not all(p in by_idx and not by_idx[p]["veto"]
+                       and (by_idx[p]["relevance"] == 2 or by_idx[p]["context_ok"])
+                       for p in parsed["pair"])):
+        return None
+    best_single = max((s["total"] for s in scored if not s["veto"]), default=0)
+    if best_single >= STRONG_MIN_TOTAL:
+        return None
+    return ("USE_PAIR",
+            (parsed["explanation"] or "judge-nominated before/after pair")[:300],
+            [ordered[p - 1]["frame_id"] for p in parsed["pair"][:2]])
+
+
+def _z1_eligible_strong(s: dict[str, Any] | None) -> bool:
+    return (s is not None and not s["veto"]
+            and (s["relevance"] == 2 or s["context_ok"]))
+
+
+def _z1_policy_loop(backend, section, frames, seen, verdict, cache, _expects,
+                    max_rounds, state: _Z1State, rounds, score_round,
+                    refine):
+    """Threshold policy (KEEP/REPLACE/USE_PAIR/OMIT) with EXPAND refinement.
+
+    Returns (decision, reason, pair_ids). The loop only iterates through
+    refinement rescoring, exactly as the original implementation did.
+    """
+    decision: str | None = None
+    reason = ""
+    pair_ids: list[str] = []
+    while True:
+        parsed = state.parsed
+        scored = parsed["scores"]
+        policy = _decide(scored, state.cur_pos + 1,
+                         rounds_left=max_rounds - state.refinement_rounds)
+        jdec = parsed["decision"]
+        by_idx = {s["idx"]: s for s in scored}
+        pair = _z1_use_pair(parsed, by_idx, state.ordered)
+        if pair is not None:
+            decision, reason, pair_ids = pair
+            break
+            # USE_PAIR check matched; nothing else applies this round.
+        if policy["action"] == "EXPAND" and state.refinement_rounds < max_rounds:
+            outcome = _z1_expand_round(
+                backend, section, frames, seen, verdict, cache, _expects,
+                state, rounds, by_idx, policy, refine)
+            if outcome is None:
+                continue  # rescored: policy re-runs on the new state
+            kind, payload = outcome
+            if kind == "overruled":
+                # Strong incumbent despite EXPAND advice: keep, record dissent.
+                decision = "KEEP (judge EXPAND overruled: strong incumbent)"
+                reason = payload
+                break
+            decision, reason = "OMIT", payload
+            break
+        elif policy["action"] == "EXPAND":
+            decision, reason = "OMIT", policy["reason"]
+            break
+        decision, reason = policy["action"], policy["reason"]
+        if jdec != decision and jdec in ("KEEP", "REPLACE", "OMIT"):
+            reason += f" (judge advised {jdec})"
+        break
+    return decision, reason, pair_ids
+
+
+def _z1_expand_round(backend, section, frames, seen, verdict, cache, _expects,
+                     state: _Z1State, rounds, by_idx, policy, refine
+                     ) -> tuple[str, str] | None:
+    """Handle an EXPAND policy: overrule, omit, or refine and rescore.
+
+    Returns None when the loop should re-run policy on the rescored state,
+    or ("omit", reason) / ("overruled", reason) when refinement ended the
+    section.
+    """
+    parsed = state.parsed
+    scored = parsed["scores"]
+    direction = parsed["refinement"]["direction"]
+    incumb = by_idx.get(state.cur_pos + 1) if state.cur_pos >= 0 else None
+    if _z1_eligible_strong(incumb) and incumb["total"] >= STRONG_MIN_TOTAL:
+        return ("overruled", policy["reason"])
+    if direction == "none" and not any(not s["veto"] for s in scored):
+        return ("omit", "no eligible candidate and no directed refinement request")
+    anchor = None
+    w = policy.get("winner_idx")
+    if w and w in by_idx:
+        anchor = float(state.ordered[w - 1]["t"])
+    new = refine_candidates(frames, section, seen, direction,
+                            parsed["refinement"]["detail"], anchor_t=anchor)
+    for c in new:
+        seen.add(c["frame_id"])
+    new_pre = classify_many(backend, [c["path"] for c in new],
+                            cache=cache, expects_text=_expects)
+    for c, v in zip(new, new_pre):
+        verdict[c["frame_id"]] = v
+    clean_new = [c for c, v in zip(new, new_pre) if not v["veto"]][:2]
+    rounds.append({"round": state.refinement_rounds + 1,
+                   "refinement": parsed["refinement"],
+                   "retrieved": [c["frame_id"] for c in new],
+                   "judgement": None})
+    if not clean_new:
+        return ("omit", f"refinement '{direction}' retrieved nothing clean")
+    # Rescore: incumbent winner + fresh material.
+    keep = policy.get("winner_idx")
+    base = []
+    if keep and keep in by_idx:
+        base = [state.ordered[keep - 1]]
+    shown2 = base + [c for c in clean_new
+                     if c["frame_id"] not in {b["frame_id"] for b in base}]
+    parsed2, ordered2, cur_pos2 = refine(shown2)
+    if parsed2 is None:
+        return ("omit", "rescoring failed after refinement")
+    state.parsed, state.ordered, state.cur_pos = parsed2, ordered2, cur_pos2
+    rounds[-1]["judgement"] = parsed2
+    rounds[-1]["shown"] = [c["frame_id"] for c in ordered2]
+    return None
+
+
+def _z1_final_ids(decision: str | None, pair_ids: list[str],
+                  state: _Z1State, initial) -> list[str] | None:
+    """Winner ids for the decided action (deterministic recompute, never EXPAND)."""
+    if decision == "USE_PAIR":
+        return pair_ids
+    if decision in ("KEEP", "REPLACE") or (decision or "").startswith("KEEP"):
+        w = _decide(state.parsed["scores"], state.cur_pos + 1, rounds_left=0)
+        final_ids = ([state.ordered[w["winner_idx"] - 1]["frame_id"]]
+                     if w["winner_idx"] else None)
+        if decision.startswith("KEEP") and initial is not None:
+            final_ids = [initial["frame_id"]]
+        return final_ids
+    return None
+
+
+def _z1_verify_finals(backend, section, state: _Z1State, pool, frames,
+                      _expects, cache, counters, final_ids: list[str],
+                      reason: str):
+    """Re-verify every finalist; drop vetoed ones (never publish knowingly poor)."""
+    for fid in list(final_ids):
+        cand = next((c for c in pool if c["frame_id"] == fid),
+                    next((c for c in frames if c["frame_id"] == fid), None))
+        if cand is None:
+            final_ids.remove(fid)
+            continue
+        chk = _vet_candidate(backend, cand, _expects)
+        counters["inspected"] += 1
+        counters["vlm"] += 1
+        if chk["flagged"]:
+            final_ids.remove(fid)
+            reason += f" (re-verification vetoed {fid}: {chk['reason']})"
+            continue
+        weak = next((str(s.get("weakness") or "") for s in state.parsed["scores"]
+                     if s.get("frame_id") == fid), "")
+        if len(weak.split()) < 6:
+            desc = subject_of(backend, cand["path"], cache=cache)
+            counters["vlm"] += 1
+            if not _subject_supported(desc, section):
+                expl = str(state.parsed.get("explanation") or "")
+                if expl.strip() and _subject_supported(expl, section):
+                    reason += (f" (subject probe kept {fid} on explanation "
+                               f"overlap despite: {desc!r})")
+                else:
+                    final_ids.remove(fid)
+                    reason += (f" (subject backstop dropped {fid}: "
+                               f"described as {desc!r}, no section overlap)")
+                    continue
+        else:
+            reason += f" (subject probe skipped for {fid}: specific weakness)"
+    return final_ids, reason
 
 
 def _z1_record(section, initial, shown_ids, rounds, final_ids, decision, reason,

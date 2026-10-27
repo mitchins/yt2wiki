@@ -19,6 +19,47 @@ log = logging.getLogger("yt2wiki.v9.frames")
 MAX_GAP_S = 150.0
 
 
+def _fill_gap(settings, db, source_id: str, srow: Any, a: float, b: float,
+              filled: list[dict[str, Any]], frames: list[dict[str, Any]]) -> None:
+    """Extract one midpoint frame into a coverage gap and register it."""
+    import hashlib
+
+    t = round((a + b) / 2, 1)
+    fid = "f-" + hashlib.sha1(f"{source_id}|{t}".encode()).hexdigest()[:12]
+    out = Path(srow["video_path"]).parent / f"v9-fill-{fid}.jpg"
+    video = srow["video_path"]
+    if not video or not Path(video).is_file():
+        video = str(settings.paths.source_video(source_id))
+    try:
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", str(t),
+             "-i", video, "-frames:v", "1", "-vf", "scale=1280:-1", str(out)],
+            check=True, timeout=120)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("gap fill failed at %ss: %s", t, exc)
+        return
+    db.execute(
+        "INSERT OR IGNORE INTO frames(frame_id, source_id, t, path, kind, reason) "
+        "VALUES(?,?,?,?,?,?)",
+        (fid, source_id, t, str(out), "v9_gapfill", "coverage gap fill"))
+    filled.append({"frame_id": fid, "t": t, "path": str(out)})
+    frames.append({"frame_id": fid, "t": t, "path": str(out), "kind": "v9_gapfill",
+                   "reason": "coverage gap fill"})
+
+
+def _fill_gaps(settings, db, source_id: str, srow: Any, frames: list[dict[str, Any]],
+               duration: float) -> list[dict[str, Any]]:
+    """Coverage: fill gaps > MAX_GAP_S with one extracted frame each."""
+    filled: list[dict[str, Any]] = []
+    bounds = [0.0] + [float(f["t"]) for f in frames] + [duration]
+    for a, b in zip(bounds, bounds[1:]):
+        if b - a <= MAX_GAP_S:
+            continue
+        _fill_gap(settings, db, source_id, srow, a, b, filled, frames)
+    frames.sort(key=lambda r: float(r["t"]))
+    return filled
+
+
 def discover(settings, db, source_id: str) -> dict[str, Any]:
     started = time.time()
     frames = [dict(r) for r in db.query(
@@ -30,35 +71,7 @@ def discover(settings, db, source_id: str) -> dict[str, Any]:
     duration = float(srow["duration_s"] or frames[-1]["t"])
     have_phash = True
 
-    # Coverage: fill gaps > MAX_GAP_S with one extracted frame each.
-    filled: list[dict[str, Any]] = []
-    bounds = [0.0] + [float(f["t"]) for f in frames] + [duration]
-    import hashlib
-    for a, b in zip(bounds, bounds[1:]):
-        if b - a <= MAX_GAP_S:
-            continue
-        t = round((a + b) / 2, 1)
-        fid = "f-" + hashlib.sha1(f"{source_id}|{t}".encode()).hexdigest()[:12]
-        out = Path(srow["video_path"]).parent / f"v9-fill-{fid}.jpg"
-        video = srow["video_path"]
-        if not video or not Path(video).is_file():
-            video = str(settings.paths.source_video(source_id))
-        try:
-            subprocess.run(
-                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", str(t),
-                 "-i", video, "-frames:v", "1", "-vf", "scale=1280:-1", str(out)],
-                check=True, timeout=120)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("gap fill failed at %ss: %s", t, exc)
-            continue
-        db.execute(
-            "INSERT OR IGNORE INTO frames(frame_id, source_id, t, path, kind, reason) "
-            "VALUES(?,?,?,?,?,?)",
-            (fid, source_id, t, str(out), "v9_gapfill", "coverage gap fill"))
-        filled.append({"frame_id": fid, "t": t, "path": str(out)})
-        frames.append({"frame_id": fid, "t": t, "path": str(out), "kind": "v9_gapfill",
-                       "reason": "coverage gap fill"})
-    frames.sort(key=lambda r: float(r["t"]))
+    filled = _fill_gaps(settings, db, source_id, srow, frames, duration)
 
     # Near-duplicate collapse (adjacent, same phash) for ranking hygiene.
     dupes = 0

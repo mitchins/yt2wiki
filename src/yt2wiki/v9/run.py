@@ -133,33 +133,39 @@ def effective_models(inference_snapshot: dict | None, db,
     snap = inference_snapshot or {}
     out: dict[str, dict[str, Any] | None] = {}
     for role in ("writer", "vision"):
-        entry = snap.get(role) or {}
-        if entry.get("provider") or entry.get("url") or entry.get("model"):
-            out[role] = {"provider": str(entry.get("provider") or "unknown"),
-                         "model": str(entry.get("model") or "unknown"),
-                         "url": str(entry.get("url") or ""),
-                         "remote": bool(str(entry.get("url") or "").startswith("http"))}
-        else:
-            out[role] = None
-    recorded = _recorded_asr_identity(db, source_id)
-    asr_entry = snap.get("asr") or {}
+        out[role] = _snapshot_identity(snap.get(role) or {})
+    out["asr"] = _effective_asr(snap.get("asr") or {},
+                                _recorded_asr_identity(db, source_id))
+    return out
+
+
+def _snapshot_identity(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """A snapshot role entry when it names any identity, else None."""
+    if not (entry.get("provider") or entry.get("url") or entry.get("model")):
+        return None
+    return {"provider": str(entry.get("provider") or "unknown"),
+            "model": str(entry.get("model") or "unknown"),
+            "url": str(entry.get("url") or ""),
+            "remote": bool(str(entry.get("url") or "").startswith("http"))}
+
+
+def _effective_asr(asr_entry: dict[str, Any],
+                   recorded: Any) -> dict[str, Any] | None:
+    """ASR identity: recorded transcript identity, then snapshot, then None.
+
+    The recorded identity survives transcript reuse; captions mode is its
+    own provenance (no remote endpoint).
+    """
     if isinstance(recorded, dict) and recorded.get("mode") == "captions":
-        out["asr"] = {"provider": "captions", "model": "", "url": "", "remote": False}
-    elif isinstance(recorded, dict) and (recorded.get("url") or recorded.get("model")):
-        out["asr"] = {
+        return {"provider": "captions", "model": "", "url": "", "remote": False}
+    if isinstance(recorded, dict) and (recorded.get("url") or recorded.get("model")):
+        return {
             "provider": str(asr_entry.get("provider") or "unknown"),
             "model": str(recorded.get("model") or asr_entry.get("model") or "unknown"),
             "url": str(recorded.get("url") or asr_entry.get("url") or ""),
             "remote": True,
         }
-    elif asr_entry.get("provider") or asr_entry.get("url") or asr_entry.get("model"):
-        out["asr"] = {"provider": str(asr_entry.get("provider") or "unknown"),
-                      "model": str(asr_entry.get("model") or "unknown"),
-                      "url": str(asr_entry.get("url") or ""),
-                      "remote": bool(str(asr_entry.get("url") or "").startswith("http"))}
-    else:
-        out["asr"] = None
-    return out
+    return _snapshot_identity(asr_entry)
 
 
 def _record(db, job_id: str, stage: str, state: str, metrics: dict | None = None,
@@ -194,6 +200,36 @@ def _finish_job(db, job_id: str, state: str, *, article_id: str | None = None,
         (state, article_id, error, now, now, job_id))
 
 
+
+def _ranked_frames(rank: dict[str, Any],
+                   by_id: dict[str, dict[str, Any]]) -> tuple[list, list]:
+    """Best-ranked frame plus alternatives, resolved through by_id."""
+    ranked = []
+    for idx in list(rank["best"][:3]):
+        f = by_id.get(rank["candidates"][idx]["frame_id"])
+        if f is not None:
+            ranked.append(f)
+    return (ranked[0] if ranked else None), ranked[1:]
+
+
+def _install_finals(adj: dict[str, Any], by_id: dict[str, dict[str, Any]],
+                    used: set[str]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Materialise the judge's finals as picks; drop already-installed ids."""
+    chosen: list[dict[str, Any]] = []
+    dropped_used: list[str] = []
+    for fid in list(adj.get("final") or [])[:2]:
+        if fid in used:
+            dropped_used.append(fid)
+            continue
+        f = by_id.get(fid)
+        if f is None:
+            continue
+        chosen.append({"frame_id": fid, "t": f["t"],
+                       "path": f["path"], "caption": ""})
+        used.add(fid)
+    return chosen, dropped_used
+
+
 def adjudicate_section_with_judge(vb, sec: dict[str, Any],
                                     frames: list[dict[str, Any]],
                                     used: set[str],
@@ -215,30 +251,11 @@ def adjudicate_section_with_judge(vb, sec: dict[str, Any],
     cands = v9select.candidates_for_section(frames, sec["t_start"], sec["t_end"])
     cands = [c for c in cands if c["frame_id"] not in used] or cands
     rank = v9select.rank_section(vb, sec, cands)
-    order = list(rank["best"][:3])
-    ranked = []
-    for idx in order:
-        f = by_id.get(rank["candidates"][idx]["frame_id"])
-        if f is not None:
-            ranked.append(f)
-    initial = ranked[0] if ranked else None
-    alternatives = ranked[1:]
+    initial, alternatives = _ranked_frames(rank, by_id)
     adj = v9judge.adjudicate_section_z1(
         vb, sec, initial, alternatives, frames,
         max_rounds=2, seed=seed, cache=cache)
-    final_ids = list(adj.get("final") or [])[:2]
-    chosen = []
-    dropped_used = []
-    for fid in final_ids:
-        if fid in used:
-            dropped_used.append(fid)
-            continue
-        f = by_id.get(fid)
-        if f is None:
-            continue
-        chosen.append({"frame_id": fid, "t": f["t"],
-                       "path": f["path"], "caption": ""})
-        used.add(fid)
+    chosen, dropped_used = _install_finals(adj, by_id, used)
     if dropped_used:
         adj = dict(adj, reason=(adj.get("reason") or "") +
                    f" (dropped already-installed: {','.join(dropped_used)})")
@@ -291,6 +308,47 @@ def _recorded_asr_identity(db, source_id: str) -> dict | None:
     return None
 
 
+
+def _base_counts(db, source_id: str) -> dict[str, int]:
+    return {
+        "transcript_segments": db.query_one(
+            "SELECT COUNT(*) c FROM transcript_segments WHERE source_id=?",
+            (source_id,))["c"],
+        "frames": db.query_one(
+            "SELECT COUNT(*) c FROM frames WHERE source_id=?", (source_id,))["c"],
+    }
+
+
+def _drop_stale_transcript(settings, db, source_id: str,
+                           inference_snapshot: dict | None,
+                           counts: dict[str, int]) -> int:
+    """Staleness gate: a stored transcript made by a different ASR server
+    must not be reused. Captions-mode transcripts carry no ASR identity
+    and stay reusable; unrecorded (pre-feature) ones are trusted once.
+
+    Returns the (possibly zeroed) transcript segment count.
+    """
+    n_trans = counts["transcript_segments"]
+    if n_trans <= 0:
+        return n_trans
+    recorded = _recorded_asr_identity(db, source_id)
+    if not (isinstance(recorded, dict) and recorded.get("url")):
+        return n_trans
+    effective = _effective_asr_identity(settings, inference_snapshot)
+    if recorded.get("url") == effective.get("url") and \
+            recorded.get("model") == effective.get("model"):
+        return n_trans
+    log.info("asr identity changed (%s -> %s); retranscribing %s",
+             recorded, effective, source_id)
+    db.execute("DELETE FROM transcript_segments WHERE source_id=?", (source_id,))
+    db.execute("DELETE FROM transcript_words WHERE source_id=?", (source_id,))
+    db.execute("DELETE FROM transcript_fts WHERE source_id=?", (source_id,))
+    # The per-job transcript.jsonl is rewritten by _persist; the
+    # stale job dir keeps its own copy, keyed by job id.
+    counts["transcript_segments"] = 0
+    return 0
+
+
 def _ensure_base(settings, db, service, source_id: str,
                  job_id: str | None = None,
                  inference_snapshot: dict | None = None) -> dict[str, Any]:
@@ -302,31 +360,11 @@ def _ensure_base(settings, db, service, source_id: str,
     from ..pipeline import StageContext
     from ..pipeline.stages import acquisition, frame_candidates, inspect, transcribe
 
-    counts = {}
-    n_trans = db.query_one(
-        "SELECT COUNT(*) c FROM transcript_segments WHERE source_id=?", (source_id,))["c"]
-    counts["transcript_segments"] = n_trans
-    n_frames = db.query_one(
-        "SELECT COUNT(*) c FROM frames WHERE source_id=?", (source_id,))["c"]
-    counts["frames"] = n_frames
-    # Staleness check: a stored transcript made by a different ASR server
-    # must not be reused. Captions-mode transcripts carry no ASR identity
-    # and stay reusable; unrecorded (pre-feature) ones are trusted once.
-    if n_trans > 0:
-        recorded = _recorded_asr_identity(db, source_id)
-        if isinstance(recorded, dict) and recorded.get("url"):
-            effective = _effective_asr_identity(settings, inference_snapshot)
-            if recorded.get("url") != effective.get("url") or \
-                    recorded.get("model") != effective.get("model"):
-                log.info("asr identity changed (%s -> %s); retranscribing %s",
-                         recorded, effective, source_id)
-                db.execute("DELETE FROM transcript_segments WHERE source_id=?", (source_id,))
-                db.execute("DELETE FROM transcript_words WHERE source_id=?", (source_id,))
-                db.execute("DELETE FROM transcript_fts WHERE source_id=?", (source_id,))
-                # The per-job transcript.jsonl is rewritten by _persist; the
-                # stale job dir keeps its own copy, keyed by job id.
-                n_trans = 0
-                counts["transcript_segments"] = 0
+    counts = _base_counts(db, source_id)
+    n_trans = counts["transcript_segments"]
+    n_frames = counts["frames"]
+    n_trans = _drop_stale_transcript(settings, db, source_id, inference_snapshot,
+                                     counts)
     if n_trans > 0 and n_frames > 0:
         if job_id:
             for name in BASE_STAGES:
@@ -395,6 +433,96 @@ def _live_snapshot(settings) -> dict[str, Any] | None:
         return None
 
 
+
+def _resolve_snapshot(settings, db, job_id: str | None,
+                      inference_snapshot: dict[str, Any] | None):
+    """Explicit arg wins, else the job's stored snapshot, else live config."""
+    if inference_snapshot is None and job_id is not None:
+        try:
+            snap_row = db.query_one("SELECT config_json FROM jobs WHERE job_id=?",
+                                    (job_id,))
+            snap_cfg = json.loads(snap_row["config_json"] or "{}") if snap_row else {}
+            inference_snapshot = snap_cfg.get("inference")
+        except Exception:  # noqa: BLE001
+            inference_snapshot = None
+    # Fallback: live config for CLI jobs that have no snapshot
+    if inference_snapshot is None:
+        inference_snapshot = _live_snapshot(settings)
+    return inference_snapshot
+
+
+def _select_images(manager, sections, frames, seed) -> tuple[dict, list]:
+    """V9-Z1 rubric judge over comparative VLM ranking, section by section.
+
+    Flow per section: rank_section proposes an ordered shortlist from
+    the selected vision backend; adjudicate_section_z1 then runs the
+    frozen editorial judge (batched veto pre-filter, comparative
+    0-2x4 rubric scoring, KEEP/REPLACE/EXPAND/USE_PAIR/OMIT policy,
+    directed refinement, re-verification). The judge's finals are what
+    get installed -- the rank order alone never publishes an image.
+    """
+    picks: dict[str, list[dict[str, Any]]] = {}
+    decisions = []
+    used: set[str] = set()
+    judge_cache: dict[str, Any] = {}
+    by_id = {f["frame_id"]: f for f in frames}
+    with manager.acquire("vision") as vb:
+        for sec in sections:
+            chosen, record = adjudicate_section_with_judge(
+                vb, sec, frames, used, by_id,
+                cache=judge_cache, seed=seed)
+            picks[sec["section_id"]] = chosen
+            decisions.append(record)
+    return picks, decisions
+
+
+def _auto_caption(picks, manager, make_recorder, v9select,
+                  enable_captions: bool) -> int:
+    """Optional opt-in vision captions; failure never fatal. Returns failures."""
+    failures = 0
+    if not enable_captions:
+        return failures
+    manager.recorder = make_recorder("v9_caption")
+    with manager.acquire("vision") as vb:
+        for plist in picks.values():
+            for pick in plist:
+                # Preserve edited captions, but allow auto captions to be
+                # replaced by the vision model when opt-in is enabled.
+                if pick.get("caption") and pick.get("caption_source") != "auto":
+                    continue
+                cap = v9select.caption_frame(vb, pick["path"])
+                if cap:
+                    pick["caption"] = cap
+                    pick["caption_source"] = "vision"
+                else:
+                    failures += 1
+    return failures
+
+
+def _build_report(settings, db, source_id: str, inference_snapshot, t0: float,
+                  article: dict, disc: dict, decisions: list,
+                  enable_captions: bool) -> dict[str, Any]:
+    return {"profile": settings.profile,
+            "settings_fingerprint": settings.fingerprint(),
+            "device_index": settings.device_index,
+            "device_map": _device_map(),
+            # Registry assignments are diagnostics only: they can name
+            # local models that never ran when remote inference served
+            # the role (§5). The reader shows models_effective.
+            "models": {r: {"repo": settings.model(r).repo,
+                           "revision": settings.model(r).revision}
+                       for r in ("asr", "vision", "text")},
+            "models_effective": effective_models(inference_snapshot, db, source_id),
+            "git_commit": _git_commit(),
+            "timings": {"total_s": round(time.time() - t0, 3)},
+            "vram": _vram_snapshot(),
+            "coverage": article["coverage"],
+            "frame_coverage": disc["coverage"],
+            "selection": decisions,
+            "captions_enabled": enable_captions,
+            }
+
+
 def run_source(settings, db, service, source_id: str, *,
                enable_captions: bool = False, enable_enrichment: bool = False,
                profile: str | None = None, job_id: str | None = None,
@@ -411,17 +539,8 @@ def run_source(settings, db, service, source_id: str, *,
     from . import select as v9select
     from . import writer as v9writer
 
-    # Resolve inference snapshot early so writer and selector both honour it
-    if inference_snapshot is None and job_id is not None:
-        try:
-            snap_row = db.query_one("SELECT config_json FROM jobs WHERE job_id=?", (job_id,))
-            snap_cfg = json.loads(snap_row["config_json"] or "{}") if snap_row else {}
-            inference_snapshot = snap_cfg.get("inference")
-        except Exception:  # noqa: BLE001
-            inference_snapshot = None
-    # Fallback: live config for CLI jobs that have no snapshot
-    if inference_snapshot is None:
-        inference_snapshot = _live_snapshot(settings)
+    inference_snapshot = _resolve_snapshot(settings, db, job_id,
+                                           inference_snapshot)
 
     t0 = time.time()
     result: dict[str, Any] = {"source_id": source_id, "stages": {}}
@@ -490,30 +609,12 @@ def run_source(settings, db, service, source_id: str, *,
         # 0-2x4 rubric scoring, KEEP/REPLACE/EXPAND/USE_PAIR/OMIT policy,
         # directed refinement, re-verification). The judge's finals are what
         # get installed -- the rank order alone never publishes an image.
-        # Resolve inference snapshot: explicit arg wins, else job's stored snapshot
-        if inference_snapshot is None and job_id is not None:
-            try:
-                snap_row = db.query_one("SELECT config_json FROM jobs WHERE job_id=?", (job_id,))
-                snap_cfg = json.loads(snap_row["config_json"] or "{}") if snap_row else {}
-                inference_snapshot = snap_cfg.get("inference")
-            except Exception:  # noqa: BLE001
-                inference_snapshot = None
         t = time.time()
         stage("v9_select")
         manager = ModelManager(settings, recorder=_v9_rec("v9_select"),
                                inference_snapshot=inference_snapshot)
-        picks: dict[str, list[dict[str, Any]]] = {}
-        decisions = []
-        used: set[str] = set()
-        judge_cache: dict[str, Any] = {}
-        by_id = {f["frame_id"]: f for f in frames}
-        with manager.acquire("vision") as vb:
-            for sec in sections:
-                chosen, record = adjudicate_section_with_judge(
-                    vb, sec, frames, used, by_id,
-                    cache=judge_cache, seed=settings.deterministic_seed)
-                picks[sec["section_id"]] = chosen
-                decisions.append(record)
+        picks, decisions = _select_images(
+            manager, sections, frames, settings.deterministic_seed)
         _record(db, v9job, "v9_select", "done",
                 {"sections_with_image": sum(1 for v in picks.values() if v),
                  "images": sum(len(v) for v in picks.values()),
@@ -530,22 +631,8 @@ def run_source(settings, db, service, source_id: str, *,
         # --- captions (optional feature, opt-in; failure never fatal) ---
         t = time.time()
         stage("v9_caption")
-        caption_failures = 0
-        if enable_captions:
-            manager.recorder = _v9_rec("v9_caption")
-            with manager.acquire("vision") as vb:
-                for plist in picks.values():
-                    for pick in plist:
-                        # Preserve edited captions, but allow auto captions to be
-                        # replaced by the vision model when opt-in is enabled.
-                        if pick.get("caption") and pick.get("caption_source") != "auto":
-                            continue
-                        cap = v9select.caption_frame(vb, pick["path"])
-                        if cap:
-                            pick["caption"] = cap
-                            pick["caption_source"] = "vision"
-                        else:
-                            caption_failures += 1
+        caption_failures = _auto_caption(
+            picks, manager, _v9_rec, v9select, enable_captions)
         _record(db, v9job, "v9_caption", "done",
                 {"captioned": sum(1 for v in picks.values() for p in v if p.get("caption")),
                  "failures": caption_failures}, started=t)
@@ -566,26 +653,8 @@ def run_source(settings, db, service, source_id: str, *,
                       "attribution_line": (f"Compiled from the video **{srow['title']}** by {srow['uploader']}" if srow["uploader"] else f"Compiled from the local video file **{srow['title']}**")}
         md, _assets = v9publish.assemble_markdown(
             article["title"], article["summary"], sections, picks, provenance)
-        report = {"profile": settings.profile,
-                  "settings_fingerprint": settings.fingerprint(),
-                  "device_index": settings.device_index,
-                  "device_map": _device_map(),
-                  # Registry assignments are diagnostics only: they can name
-                  # local models that never ran when remote inference served
-                  # the role (§5). The reader shows models_effective.
-                  "models": {r: {"repo": settings.model(r).repo,
-                                  "revision": settings.model(r).revision}
-                             for r in ("asr", "vision", "text")},
-                  "models_effective": effective_models(
-                      inference_snapshot, db, source_id),
-                  "git_commit": _git_commit(),
-                  "timings": {"total_s": round(time.time() - t0, 3)},
-                  "vram": _vram_snapshot(),
-                  "coverage": article["coverage"],
-                  "frame_coverage": disc["coverage"],
-                  "selection": decisions,
-                  "captions_enabled": enable_captions,
-                  }
+        report = _build_report(settings, db, source_id, inference_snapshot,
+                               t0, article, disc, decisions, enable_captions)
         article_id = f"art9-{source_id}"
         pub = v9publish.persist(settings, db, article_id=article_id, source_id=source_id,
                                 job_id=v9job, title=article["title"], markdown=md,
