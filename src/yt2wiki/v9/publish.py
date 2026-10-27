@@ -21,6 +21,11 @@ from .run import looks_like_decision_trace, neutral_caption
 
 log = logging.getLogger("yt2wiki.v9.publish")
 
+# Inline Markdown link: `[label](target)` not preceded by `!` (an image).
+_MD_LINK_RE = r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)"
+_ASSETS_PREFIX = "assets/"
+ARTICLE_MD_NAME = "article.md"
+
 
 def _target_seconds(target: str) -> float | None:
     """Seconds encoded in an explicit `t=` link target, if any."""
@@ -54,7 +59,7 @@ def drop_far_links(body: str, url: str | None, t_start: float, t_end: float,
                 return ""  # drop false provenance entirely (no plain label)
         return m.group(0)
 
-    return _re.sub(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)", fix, body)
+    return _re.sub(_MD_LINK_RE, fix, body)
 
 
 def _strip_bare_float_ranges(text: str, t_start: float | None = None,
@@ -127,13 +132,13 @@ def _strip_inline_timestamp_links(body: str) -> str:
 
         def drop(m: _re.Match[str]) -> str:
             label, target = m.group(1), m.group(2)
-            if target.startswith("assets/"):
+            if target.startswith(_ASSETS_PREFIX):
                 return m.group(0)
             if _re.match(r"^\d{1,2}:\d{2}(?::\d{2})?(?:\s*[-–]\s*\d{1,2}:\d{2}(?::\d{2})?)?$", label.strip()):
                 return ""  # consolidated into the section reference
             return m.group(0)
 
-        part = _re.sub(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)", drop, part)
+        part = _re.sub(_MD_LINK_RE, drop, part)
         # Do NOT strip plain m:ss — that would delete clock times (10:30) and
         # commands (ffmpeg -ss 00:01:30). Far citations are already de-linked to ""
         # by drop_far_links or removed above.
@@ -340,7 +345,7 @@ def normalize_timestamps(md: str, url: str | None, duration_s: float | None = No
         return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
 
     def emit(secs: float, target: str | None) -> str:
-        if target is not None and (target.startswith("assets/")
+        if target is not None and (target.startswith(_ASSETS_PREFIX)
                                    or target.strip().lower() in ("none", "null", "")):
             target = None
         # Targets truncate (int) while labels round (fmt): a [203.7] citation
@@ -380,7 +385,7 @@ def normalize_timestamps(md: str, url: str | None, duration_s: float | None = No
 
     def fix(m: "re.Match[str]") -> str:
         label, target = m.group(1), m.group(2)
-        if target.startswith("assets/"):
+        if target.startswith(_ASSETS_PREFIX):
             return m.group(0)
         return fix_label(label, target)
 
@@ -391,7 +396,7 @@ def normalize_timestamps(md: str, url: str | None, duration_s: float | None = No
         return fix_label(label, None)
 
     # linked citations first, then bare [..] that are not images/links
-    out = re.sub(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)", fix, md)
+    out = re.sub(_MD_LINK_RE, fix, md)
     out = re.sub(r"(?<!!)(?<![\w\]])\[(\d[\d:.\-]*)\](?!\()", fix_bare, out)
     return out
 
@@ -434,7 +439,7 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
                               record_dir=canonical_assets,
                               headings={s["section_id"]: s.get("heading") or "Illustration"
                                         for s in sections})
-    (stage / "article.md").write_text(markdown, encoding="utf-8")
+    (stage / ARTICLE_MD_NAME).write_text(markdown, encoding="utf-8")
     body_html = markdown_to_html(markdown)
     html = render_html(article, body_html, embed_images=False, asset_dir=stage_assets)
     (stage / "article.html").write_text(html, encoding="utf-8")
@@ -462,7 +467,7 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
     # The zip is a derived bundle: build it from the staged files so a zip
     # failure also lands before the commit, then promote it with the rest.
     with zipfile.ZipFile(stage / "article.zip", "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(stage / "article.md", "article.md")
+        zf.write(stage / ARTICLE_MD_NAME, ARTICLE_MD_NAME)
         for f in sorted(stage_assets.glob("*")):
             if f.is_file():
                 zf.write(f, f"assets/{f.name}")

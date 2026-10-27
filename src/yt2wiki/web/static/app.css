@@ -42,7 +42,6 @@ a { color: var(--green-strong); }
   display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px;
   border-radius: 999px; background: var(--green); color: #fff; font: 700 .7rem/1 var(--font);
 }
-.nav .icon-only { padding: 8px 9px; }
 @media (max-width: 640px) {
   .wrap { padding: 0 16px; }
   .topbar .wrap { gap: 10px; }
@@ -429,8 +428,9 @@ dialog.lightbox img { max-width: min(96vw, 1600px); max-height: calc(100vh - 130
 .lb-bar .ts { color: #9fdcb6; text-decoration: none; font-variant-numeric: tabular-nums; }
 .lb-bar { display: flex; align-items: center; gap: 14px; padding: 14px 18px 20px; font-size: .88rem; color: #cfd6d1; }
 .lb-bar a { color: #9fdcb6; }
-.lb-btn { position: fixed; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%;
-  border: 0; background: rgba(255,255,255,.1); color: #fff; cursor: pointer; }
+.lb-btn { position: fixed; display: inline-flex; align-items: center; gap: 7px; min-width: 44px; height: 44px; padding: 0 15px; border-radius: 999px;
+  border: 0; background: rgba(255,255,255,.1); color: #fff; cursor: pointer; font: inherit; }
+.lb-btn svg { flex: none; }
 .lb-btn:hover { background: rgba(255,255,255,.2); }
 .lb-close { top: 16px; right: 16px; }
 .lb-prev { left: 16px; top: 50%; transform: translateY(-50%); }

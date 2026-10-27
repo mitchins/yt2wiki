@@ -16,6 +16,8 @@ from .base import BaseBackend
 
 log = logging.getLogger("yt2w.remote")
 
+_NOT_LOADED_MSG = "backend not loaded"
+
 
 class TruncatedResponseError(RuntimeError):
     """The server stopped generation at its token limit (`finish_reason="length"`).
@@ -92,7 +94,7 @@ class RemoteOpenAIBackend(BaseBackend):
 
     def chat(self, messages: Sequence[dict[str, str]], *, max_new_tokens: int = 2048, temperature: float = 0.1, top_p: float = 0.9, stop: Sequence[str] = (), json_mode: bool = False, response_schema: dict[str, Any] | None = None, schema_name: str = "response") -> str:
         if not self.loaded:
-            raise RuntimeError("backend not loaded")
+            raise RuntimeError(_NOT_LOADED_MSG)
         payload: dict[str, Any] = {
             "messages": list(messages),
             "max_tokens": max_new_tokens,
@@ -154,9 +156,7 @@ class RemoteOpenAIBackend(BaseBackend):
 
     def rank_images(self, images: Sequence[Any], prompt: str, *, max_new_tokens: int = 400, temperature: float = 0.0, system: str | None = None, response_schema: dict[str, Any] | None = None, schema_name: str = "response") -> str:
         if not self.loaded:
-            raise RuntimeError("backend not loaded")
-        if not self.loaded:
-            raise RuntimeError("backend not loaded")
+            raise RuntimeError(_NOT_LOADED_MSG)
         content: list[dict[str, Any]] = []
         for i, im in enumerate(images):
             content.append({"type":"text","text":f"Image {i+1}:"})

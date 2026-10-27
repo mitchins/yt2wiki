@@ -206,7 +206,7 @@ class StageContext:
             )
         self.db.log("info", message, job_id=self.job_id, source_id=self.source_id)
 
-    current_stage = ""
+    current_stage: str = ""
 
 
 @dataclass

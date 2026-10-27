@@ -58,6 +58,8 @@ _SAFE_ROLE_KEYS = (
 
 UNKNOWN = "unknown"
 
+ARTICLE_MD_NAME = "article.md"
+
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -289,7 +291,7 @@ def snapshot_generation_files(paths, article_id: str,
     artifacts: dict[str, str] = {}
     try:
         gdir.mkdir(parents=True, exist_ok=False)
-        for name in ("article.md", "article.html", "article.standalone.html"):
+        for name in (ARTICLE_MD_NAME, "article.html", "article.standalone.html"):
             src = src_dir / name
             if src.is_file():
                 shutil.copy2(src, gdir / name)
@@ -554,7 +556,7 @@ def restore_generation(db, paths, generation_id: str) -> dict[str, Any]:
         dest = adir / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(gdir / rel, dest)
-    md = (adir / "article.md").read_text(encoding="utf-8") \
-        if (adir / "article.md").is_file() else ""
+    md = (adir / ARTICLE_MD_NAME).read_text(encoding="utf-8") \
+        if (adir / ARTICLE_MD_NAME).is_file() else ""
     return {"article_id": article_id, "generation_id": generation_id,
             "markdown": md, "artifacts": sorted(gen_artifacts)}

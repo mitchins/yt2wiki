@@ -23,7 +23,7 @@
       <a href="/" {% if nav == 'library' %}aria-current="page"{% endif %}>{{ icon("book") }}<span>Library</span></a>
       <a href="/add" {% if nav == 'add' %}aria-current="page"{% endif %}>{{ icon("plus") }}<span>Add<span class="long"> video</span></span></a>
       <a href="/jobs" {% if nav == 'jobs' %}aria-current="page"{% endif %}>{{ icon("queue") }}<span>Jobs</span>{% if nav_active_jobs %}<span class="count" aria-label="{{ nav_active_jobs }} in progress">{{ nav_active_jobs }}</span>{% endif %}</a>
-      <a class="icon-only" href="/settings" {% if nav == 'settings' %}aria-current="page"{% endif %} aria-label="Settings" title="Settings">{{ icon("gear") }}</a>
+      <a href="/settings" {% if nav == 'settings' %}aria-current="page"{% endif %} title="Settings">{{ icon("gear") }}<span>Settings</span></a>
     </nav>
   </div>
 </header>

@@ -28,6 +28,10 @@ from .. import StageContext
 
 log = logging.getLogger("yt2wiki.stage.verify")
 
+# Canonical verifier direction label for findings sourced from the article
+# side of the bidirectional check (see also the prompt schema below).
+_DIR_ARTICLE_TO_EVIDENCE = "article->evidence"
+
 PROMPT_VERSION = "v3"
 SYSTEM = (
     "You audit a generated technical article against the observations extracted "
@@ -433,7 +437,7 @@ def _rule_unsupported(ctx: StageContext, markdown: str, evidence: Sequence[Evide
         for b in broken:
             out.append(
                 {
-                    "direction": "article->evidence",
+                    "direction": _DIR_ARTICLE_TO_EVIDENCE,
                     "severity": "warning",
                     "code": "broken_citation",
                     "message": f"{label} cites evidence record {b}, which does not exist.",
@@ -455,7 +459,7 @@ def _rule_unsupported(ctx: StageContext, markdown: str, evidence: Sequence[Evide
                 if not (bound or span_recs or block["ev_ids"]):
                     out.append(
                         {
-                            "direction": "article->evidence",
+                            "direction": _DIR_ARTICLE_TO_EVIDENCE,
                             "severity": "info",
                             "code": "missing_citation",
                             "message": f"{label} states a supported claim with no citation.",
@@ -470,7 +474,7 @@ def _rule_unsupported(ctx: StageContext, markdown: str, evidence: Sequence[Evide
                         elsewhere.evidence_id not in cite_ids:
                     out.append(
                         {
-                            "direction": "article->evidence",
+                            "direction": _DIR_ARTICLE_TO_EVIDENCE,
                             "severity": "warning",
                             "code": "mismatched_citation",
                             "message": (
@@ -486,7 +490,7 @@ def _rule_unsupported(ctx: StageContext, markdown: str, evidence: Sequence[Evide
                     continue
             out.append(
                 {
-                    "direction": "article->evidence",
+                    "direction": _DIR_ARTICLE_TO_EVIDENCE,
                     "severity": "critical" if score < 0.06 else "warning",
                     "code": "unsupported_action",
                     "message": (
@@ -512,7 +516,7 @@ def _rule_unsupported(ctx: StageContext, markdown: str, evidence: Sequence[Evide
         if not supported:
             out.append(
                 {
-                    "direction": "article->evidence",
+                    "direction": _DIR_ARTICLE_TO_EVIDENCE,
                     "severity": "critical",
                     "code": "unsupported_command",
                     "message": f"Command in article has no supporting observation: `{cmd[:120]}`",
@@ -573,7 +577,7 @@ def _rule_contradictions(markdown: str, evidence: Sequence[Evidence]) -> list[di
         src = key_source[key][want]
         out.append(
             {
-                "direction": "article->evidence",
+                "direction": _DIR_ARTICLE_TO_EVIDENCE,
                 "severity": "critical",
                 "code": "contradiction",
                 "message": (
@@ -646,7 +650,7 @@ def _rule_value_mismatch(
             continue
         out.append(
             {
-                "direction": "article->evidence",
+                "direction": _DIR_ARTICLE_TO_EVIDENCE,
                 "severity": "critical",
                 "code": "value_mismatch",
                 "message": f"Article states `{value}` which does not match any value in the source.",
@@ -707,7 +711,7 @@ def _confirm_llm_findings(raw: Sequence[dict], evidence: Sequence[Evidence]) -> 
         if ref and ref not in valid_ids:
             confirmed.append(
                 {
-                    "direction": str(f.get("direction") or "article->evidence"),
+                    "direction": str(f.get("direction") or _DIR_ARTICLE_TO_EVIDENCE),
                     "severity": "warning",
                     "code": "broken_citation",
                     "message": (
@@ -724,7 +728,7 @@ def _confirm_llm_findings(raw: Sequence[dict], evidence: Sequence[Evidence]) -> 
             continue
         confirmed.append(
             {
-                "direction": str(f.get("direction") or "article->evidence"),
+                "direction": str(f.get("direction") or _DIR_ARTICLE_TO_EVIDENCE),
                 "severity": str(f.get("severity") or "warning"),
                 "code": f"llm_{f.get('code') or 'unspecified'}",
                 "message": str(f.get("message") or "")[:400],

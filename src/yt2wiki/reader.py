@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 _TS = r"\d{1,2}:\d{2}(?::\d{2})?"
+_ASSETS_PREFIX = "assets/"
 _TS_LABEL = re.compile(rf"^{_TS}(?:\s*[-–]\s*{_TS})?$")
 
 _FIGURE = re.compile(
@@ -136,8 +137,8 @@ def enhance(body_html: str, *,
         alt, src, caption = m.group(1), m.group(2), m.group(3)
         url = src
         size = None
-        if src.startswith("assets/"):
-            name = src[len("assets/"):]
+        if src.startswith(_ASSETS_PREFIX):
+            name = src[len(_ASSETS_PREFIX):]
             if asset_url is not None:
                 url = asset_url(name)
                 if url is None:
@@ -155,10 +156,10 @@ def enhance(body_html: str, *,
 
     def link(m: "re.Match[str]") -> str:
         bang, href, label = m.group(1), m.group(2), m.group(3)
-        if href.startswith("assets/"):
+        if href.startswith(_ASSETS_PREFIX):
             # An inline image the block renderer left as a link: point it at
             # the served asset, or keep just the text when the file is gone.
-            url = asset_url(href[len("assets/"):]) if asset_url is not None else href
+            url = asset_url(href[len(_ASSETS_PREFIX):]) if asset_url is not None else href
             return f'<a href="{url}">{label}</a>' if url else label
         external = href.startswith(("http://", "https://"))
         attrs = ' target="_blank" rel="noopener noreferrer"' if external else ""
