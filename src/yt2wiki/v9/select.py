@@ -73,25 +73,27 @@ def candidates_for_section(frames: Sequence[dict[str, Any]], t_start: float, t_e
     return sorted(picked, key=lambda f: float(f["t"]))
 
 
-def rank_section(backend, section: dict[str, Any],
-                 candidates: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """Comparative rank; falls back to independent relevance scoring."""
+
+def _readable_images(candidates: Sequence[dict[str, Any]]) -> tuple[list, list]:
+    """Open candidate images; drops unreadable ones from both lists."""
     from PIL import Image
+
     images, valid = [], []
-    for c in candidates[:8]:
+    for c in candidates:
         try:
             images.append(Image.open(c["path"]).convert("RGB"))
             valid.append(c)
         except Exception:  # noqa: BLE001
             continue
-    if not valid:
-        return {"best": [], "reason": "no readable candidates"}
-    raw = ""
+    return images, valid
+
+
+def _comparative_rank(backend, section: dict[str, Any], images: list) -> str:
     schema_kw: dict[str, Any] = {}
     if getattr(backend, "supports_structured_schema", False):
         schema_kw = {"response_schema": RANK_SCHEMA, "schema_name": "rank"}
     try:
-        raw = backend.rank_images(
+        return backend.rank_images(
             images,
             RANK_PROMPT.format(heading=section["heading"][:120],
                                body=section["body"][:2500], n=len(images)),
@@ -100,33 +102,49 @@ def rank_section(backend, section: dict[str, Any],
             **schema_kw)
     except Exception as exc:  # noqa: BLE001
         log.warning("comparative rank failed: %s", exc)
+        return ""
+
+
+def _parse_rank(raw: str, n_sent: int) -> tuple[list[int], str]:
+    """Grounded rank verdict; ([], "") sends the caller to the heuristic.
+
+    The verdict must account for exactly the images sent. A schema cannot
+    stop a made-up verdict on a malformed prompt, so a mismatch fails the
+    rank outright. The count must be a real JSON integer: bool/float/str
+    approximations (True, 2.9, "2") fail even when they would coerce.
+    """
+    try:
+        from ..backends.llm import extract_json
+
+        payload = extract_json(raw)
+        received = payload.get("images_received")
+        if (received is None or isinstance(received, bool)
+                or not isinstance(received, int) or received != n_sent):
+            raise ValueError(f"images_received={received!r} for {n_sent} sent")
+        if str(payload.get("reason") or "") == "NO_IMAGE":
+            raise ValueError("model reports no images received")
+        best = [int(i) - 1 for i in (payload.get("best") or []) if 0 < int(i) <= n_sent]
+        second = int(payload.get("second") or 0)
+        if 0 < second <= n_sent and (second - 1) not in best:
+            best.append(second - 1)
+        reason = str(payload.get("reason") or payload.get("second_reason") or "")
+        return best, reason
+    except Exception:  # noqa: BLE001
+        log.warning("rank parse failed: %r", raw[:200])
+        return [], ""
+
+
+def rank_section(backend, section: dict[str, Any],
+                 candidates: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Comparative rank; falls back to independent relevance scoring."""
+    images, valid = _readable_images(candidates[:8])
+    if not valid:
+        return {"best": [], "reason": "no readable candidates"}
+    raw = _comparative_rank(backend, section, images)
     best: list[int] = []
     reason = ""
     if raw:
-        try:
-            from ..backends.llm import extract_json
-            payload = extract_json(raw)
-            # Grounding check: the verdict must account for exactly the
-            # images sent. A schema cannot stop a made-up verdict on a
-            # malformed prompt, so a mismatch fails the rank outright and
-            # the heuristic fallback below takes over. The count must be a
-            # real JSON integer: bool/float/str approximations (True, 2.9,
-            # "2") fail even when they would coerce to the right number.
-            received = payload.get("images_received")
-            if (received is None or isinstance(received, bool)
-                    or not isinstance(received, int)
-                    or received != len(valid)):
-                raise ValueError(
-                    f"images_received={received!r} for {len(valid)} sent")
-            if str(payload.get("reason") or "") == "NO_IMAGE":
-                raise ValueError("model reports no images received")
-            best = [int(i) - 1 for i in (payload.get("best") or []) if 0 < int(i) <= len(valid)]
-            second = int(payload.get("second") or 0)
-            if 0 < second <= len(valid) and (second - 1) not in best:
-                best.append(second - 1)
-            reason = str(payload.get("reason") or payload.get("second_reason") or "")
-        except Exception:  # noqa: BLE001
-            log.warning("rank parse failed: %r", raw[:200])
+        best, reason = _parse_rank(raw, len(valid))
     if not best:
         # Independent fallback: reuse rank_images per image is wasteful; use a
         # cheap relevance heuristic (scene/keyframe kinds + window centrality).
