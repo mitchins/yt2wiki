@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yt2wiki.article import Article, Section, markdown_to_html
+from yt2wiki.article import Article, markdown_to_html
 from yt2wiki.literals import Literal
 from yt2wiki.records import Evidence, Procedure, ProcedureStep
 
@@ -34,18 +34,22 @@ def test_render_block_fence_variants():
     from yt2wiki.article import _consume_fence, _render_block
 
     frag, nxt = _consume_fence(["```bash", "echo hi", "```", "after"], 0)
-    assert nxt == 3 and "echo hi" in frag[0]
+    assert nxt == 3
+    assert 'echo hi' in frag[0]
     frag, nxt = _consume_fence(["```", "unclosed"], 0)
     assert nxt == 3
     out = _render_block(["```py", "x"], 0, None)
-    assert out is not None and out[2] is None
+    assert out is not None
+    assert out[2] is None
 
 
 def test_render_block_headings_clamped():
     from yt2wiki.article import _render_block
 
     out, nxt, lst = _render_block(["####### deep"], 0, "ul")
-    assert "<h6>" in "".join(out) and nxt == 1 and lst is None
+    assert '<h6>' in ''.join(out)
+    assert nxt == 1
+    assert lst is None
     out, nxt, lst = _render_block(["# Top"], 0, None)
     assert "<h1>Top</h1>" in "".join(out)
 
@@ -54,7 +58,8 @@ def test_render_block_quote_and_lists():
     from yt2wiki.article import _consume_quote, _emit_list_close, _render_block
 
     frag, nxt = _consume_quote(["> hello world", "> more", "next"], 0)
-    assert nxt == 2 and "hello" in frag[0]
+    assert nxt == 2
+    assert 'hello' in frag[0]
     assert _render_block(["> x"], 0, None) is not None
     out: list[str] = []
     _emit_list_close(out, None)
@@ -62,11 +67,14 @@ def test_render_block_quote_and_lists():
     _emit_list_close(out, "ul")
     assert out == ["</ul>"]
     frag, nxt, lst = _render_block(["1. first"], 0, None)
-    assert lst == "ol" and "<li>" in frag[-1]
+    assert lst == 'ol'
+    assert '<li>' in frag[-1]
     frag, nxt, lst = _render_block(["1. second"], 0, "ol")
-    assert lst == "ol" and "<ol" not in "".join(frag)
+    assert lst == 'ol'
+    assert '<ol' not in ''.join(frag)
     frag, nxt, lst = _render_block(["- item"], 0, "ol")
-    assert lst == "ul" and "</ol>" in "".join(frag)
+    assert lst == 'ul'
+    assert '</ol>' in ''.join(frag)
     frag, nxt, lst = _render_block(["- item2"], 0, "ul")
     assert lst == "ul"
 
@@ -75,17 +83,20 @@ def test_render_block_image_caption_blank_paragraph():
     from yt2wiki.article import _render_block
 
     frag, nxt, lst = _render_block(["![a](assets/f1.jpg)"], 0, "ul")
-    assert lst is None and "<figure>" in "".join(frag)
+    assert lst is None
+    assert '<figure>' in ''.join(frag)
     frag, nxt, lst = _render_block(["![x](javascript:alert(1))"], 0, None)
     assert "<figure>" not in "".join(frag)
     frag, nxt, lst = _render_block(["*Caption here*"], 0, None)
     assert "<figcaption>" in "".join(frag)
     assert _render_block(["*Caption here*"], 0, "ul") is None  # paragraph text in lists
     frag, nxt, lst = _render_block([""], 0, "ol")
-    assert lst is None and "</ol>" in "".join(frag)
+    assert lst is None
+    assert '</ol>' in ''.join(frag)
     assert _render_block(["just text"], 0, None) is None
     html = markdown_to_html("# H\n\n1. one\n\n- two\n\n![a](assets/f.jpg)\n\n*Cap*\n\ntext")
-    assert "<h1>" in html and "<figcaption>" in html
+    assert '<h1>' in html
+    assert '<figcaption>' in html
 
 
 # ------------------------------------------------- pipeline __init__
@@ -128,7 +139,8 @@ def test_cached_stage_row_miss_and_hit(tmp_path):
         ('{"a": 1}', fp, "job-pr4", "compose"),
     )
     row = _cached_stage_row(db, ctx, "compose", False)
-    assert row is not None and ctx.artifacts.get("a") == 1
+    assert row is not None
+    assert ctx.artifacts.get('a') == 1
     # force bypasses the cache
     assert _cached_stage_row(db, ctx, "compose", True) is None
     # stale fingerprint misses
@@ -145,7 +157,8 @@ def test_fail_and_record_stage_failure(tmp_path):
     _fail_stage(db, "job-pr4", "verify", "boom")
     row = db.query_one("SELECT state, error FROM stages WHERE job_id=? AND stage=?",
                        ("job-pr4", "verify"))
-    assert row["state"] == "failed" and "boom" in row["error"]
+    assert row['state'] == 'failed'
+    assert 'boom' in row['error']
     _record_stage_failure(db, "job-pr4", "verify", ValueError("bad"), ctx.source_id)
     job = db.query_one("SELECT state FROM jobs WHERE job_id=?", ("job-pr4",))
     assert job["state"] == "failed"
@@ -188,12 +201,14 @@ def test_scope_section_variants():
     assert _scope_section(art, _proc(), [], None) is None
     art2 = Article(source_id="s", title="t", scope="Do X")
     sec = _scope_section(art2, _proc(), [], None)
-    assert sec is not None and sec.body == ["Do X"]
+    assert sec is not None
+    assert sec.body == ['Do X']
     step = ProcedureStep(position=1, text="Plug it", evidence_ids=["ev-aaa111"])
     proc = _proc(steps=[step])
     ev = [_ev()]
     sec = _scope_section(art2, proc, ev, "https://youtu.be/x")
-    assert sec is not None and any("cite:" in b for b in sec.body)
+    assert sec is not None
+    assert any(('cite:' in b for b in sec.body))
     sec = _scope_section(art2, proc, [_ev(t_start=None)], None)
     assert sec is not None
 
@@ -211,7 +226,8 @@ def test_warning_block_and_section():
                                       warnings=["Keep fingers clear"],
                                       evidence_ids=["ev-aaa111"])])
     sec = _warnings_section(proc, [_ev()], None)
-    assert sec is not None and sec.heading == "Before you start"
+    assert sec is not None
+    assert sec.heading == 'Before you start'
 
 
 def test_steps_commands_configs_expected_trouble_unresolved():
@@ -238,7 +254,8 @@ def test_steps_commands_configs_expected_trouble_unresolved():
                       literals=[Literal(kind="command", literal="make install")],
                       t_start=1.0, t_end=2.0)
     sec = _commands_section(ctx, _proc(), [ev_cmd])
-    assert sec is not None and "make install" in "\n".join(sec.body)
+    assert sec is not None
+    assert 'make install' in '\n'.join(sec.body)
     assert _configs_section([]) is None
     ev_cfg = Evidence(evidence_id="ev-k1", kind="config", text="freq",
                       literals=[Literal(kind="keyvalue", literal="freq=3000")],
@@ -253,10 +270,12 @@ def test_steps_commands_configs_expected_trouble_unresolved():
     ev_err = _ev(eid="ev-e1", kind="error", text="It smoked")
     ev_fix = _ev(eid="ev-e2", kind="correction", text="Unplug it", t=20.0)
     sec = _troubleshooting_section([ev_err, ev_fix])
-    assert sec is not None and any("What the source does" in b for b in sec.body)
+    assert sec is not None
+    assert any(('What the source does' in b for b in sec.body))
     assert _unresolved_section(_proc(), []) is None
     sec = _unresolved_section(_proc(unresolved=["Check manual"]), [_ev(eid="ev-u1", kind="unresolved", text="Mystery")])
-    assert sec is not None and len(sec.body) == 3
+    assert sec is not None
+    assert len(sec.body) == 3
 
 
 def test_cite_and_step_lines():
@@ -284,7 +303,8 @@ def test_cite_and_step_lines():
     assert warns == ["   > **Warning** — Mind the heat sink fins"]
     frames = {"f1": {"frame_id": "f1", "path": "/tmp/f1.jpg", "t": 5.0, "summary": "Plug"}}
     lines = _step_frame_lines(step, frames, [_ev()], "https://youtu.be/x")
-    assert lines and "assets/f1.jpg" in lines[0]
+    assert lines
+    assert 'assets/f1.jpg' in lines[0]
     lines = _step_frame_lines(step, frames, [_ev()], None)
     assert "of the source video" in lines[0]
     assert _step_frame_lines(step, {}, [], None) == []
@@ -317,7 +337,8 @@ def test_extract_chunk_paths():
 
     out = evm._extract_chunk(ctx, Backend(), 0, chunk, frames, "m", None,
                              SimpleNamespace(text_max_tokens=100, text_temperature=0.0))
-    assert len(out) == 2 and out[0].kind == "observation"
+    assert len(out) == 2
+    assert out[0].kind == 'observation'
 
     class Boom:
         def chat_with_dump(self, *a, **k):
@@ -359,8 +380,10 @@ def test_parse_step_shapes():
                            "evidence_ids": [1], "frame_ids": ["f"],
                            "warnings": [" w ", " "], "expected_result": " ok ",
                            "alternatives": [" alt ", ""]})
-    assert step is not None and step.position == 1
-    assert step.evidence_ids == ["1"] and step.warnings == [" w "]
+    assert step is not None
+    assert step.position == 1
+    assert step.evidence_ids == ['1']
+    assert step.warnings == [' w ']
 
 
 # --------------------------------------------------------------- transcribe
@@ -379,7 +402,8 @@ def test_chapter_and_numeric_lines():
     lines = _numeric_description_lines("Step 1: open it\nshort\n" + "x" * 100 + "1\nno digits here")
     assert lines == ["Step 1: open it"]
     hint = _vocabulary_hint(SimpleNamespace(), row)
-    assert "Intro" in hint and "open it" in hint
+    assert 'Intro' in hint
+    assert 'open it' in hint
     assert _vocabulary_hint(SimpleNamespace(), {"title": "", "uploader": ""}) == ""
 
 
@@ -407,11 +431,14 @@ def test_citation_blocks_shapes():
           "   <!-- cite: step=1 ev=ev-aaa111 t=214.0-219.0 frames=- -->\n")
     blocks = _citation_blocks(md)
     kinds = [b["kind"] for b in blocks]
-    assert "step" in kinds and "callout" in kinds and "prose" in kinds
+    assert 'step' in kinds
+    assert 'callout' in kinds
+    assert 'prose' in kinds
     assert _citation_blocks("") == []
     cur: dict = {"lines": [], "ev_ids": [], "t_spans": []}
     _absorb_citation(cur, "See (ev-aaa111) at ?t=42.")
-    assert "ev-aaa111" in cur["ev_ids"] and cur["t_spans"] == [(42.0, 42.0)]
+    assert 'ev-aaa111' in cur['ev_ids']
+    assert cur['t_spans'] == [(42.0, 42.0)]
     with pytest.raises(AssertionError):
         _absorb_citation(None, "x")
 
@@ -432,13 +459,16 @@ def test_block_check_helpers():
              "ev_ids": ["ev-zzz"], "t_spans": [(10.0, 20.0)]}
     by_id = {"ev-aaa111": _ev()}
     bound, broken, spans = _block_bindings(block, by_id, [_ev(), _ev(eid="ev-far", t=9999.0)])
-    assert broken == ["ev-zzz"] and spans == [_ev(), _ev(eid="ev-far", t=9999.0)][0:1]
+    assert broken == ['ev-zzz']
+    assert spans == [_ev(), _ev(eid='ev-far', t=9999.0)][0:1]
     f = _broken_citation_finding("Step 1", block, "ev-zzz")
     assert f["code"] == "broken_citation"
-    assert "cite:" not in _checkable_text(block) and "Source" not in _checkable_text(block)
+    assert 'cite:' not in _checkable_text(block)
+    assert 'Source' not in _checkable_text(block)
     check = _BlockCheck(label="Step 1", block=block, bound=[], span_recs=[],
                         evidence=[_ev()])
-    assert check.anchored == [_ev()] or check.cite_ids == []
+    assert check.anchored == []
+    assert check.cite_ids == []
     check2 = _BlockCheck(label="Step 1", block=block, bound=[_ev()], span_recs=[],
                          evidence=[])
     assert check2.cite_ids == ["ev-aaa111"]
@@ -461,7 +491,8 @@ def test_keyvalue_helpers():
     assert kv.get("freq") == "3000"
     assert _article_keyvalues("plain prose, no code") == {}
     by_val, by_ev = _evidence_keyvalues([_ev()])
-    assert isinstance(by_val, dict) and isinstance(by_ev, dict)
+    assert isinstance(by_val, dict)
+    assert isinstance(by_ev, dict)
     lit_ev = _ev(eid="ev-kv", kind="config")
     lit_ev.literals = [Lit(kind="keyvalue", literal="FREQ = 3000 MHz")]
     by_val, by_ev = _evidence_keyvalues([lit_ev])
@@ -487,10 +518,12 @@ def test_load_images_skips_missing(tmp_path):
 
     chunk = [{"frame_id": "f1", "path": str(tmp_path / "nope.jpg")}]
     images, payloads = _load_images(chunk)
-    assert images == [] and payloads == []
+    assert images == []
+    assert payloads == []
     Image.new("RGB", (32, 32), (1, 2, 3)).save(tmp_path / "ok.jpg")
     images, payloads = _load_images([{"frame_id": "f2", "path": str(tmp_path / "ok.jpg")}])
-    assert len(images) == 1 and payloads[0]["frame_id"] == "f2"
+    assert len(images) == 1
+    assert payloads[0]['frame_id'] == 'f2'
 
 
 def test_describe_and_dense_pass_with_stub():
@@ -513,7 +546,8 @@ def test_describe_and_dense_pass_with_stub():
     ctx = SimpleNamespace(db=SimpleNamespace(execute=lambda *a: None),
                           settings=fake_settings, artifacts={})
     stored, dense = vi._describe_batch(Backend(), ctx, ["img"], [{"frame_id": "f1"}], t, 1)
-    assert stored == 1 and dense == []
+    assert stored == 1
+    assert dense == []
 
 
 def test_dense_text_pass_merge_and_store(tmp_path):
@@ -542,11 +576,14 @@ def test_dense_text_pass_merge_and_store(tmp_path):
                     for _ in images]
 
     tiles, meta = vi._dense_tiles(frame)
-    assert tiles and meta and meta[0]["source"] == "fd1"
+    assert tiles
+    assert meta
+    assert meta[0]['source'] == 'fd1'
     assert vi._dense_tiles({"frame_id": "nope", "path": str(tmp_path / "missing.jpg")}) == ([], [])
     crops, stored = vi._dense_text_pass(
         DenseBackend(), ctx, [(frame, {"visible_text": []})], 4)
-    assert stored == 1 and crops >= 0
+    assert stored == 1
+    assert crops >= 0
     # malformed tile reply is skipped, frame still stored
     class BadBackend:
         def describe_batch(self, images, *a, **k):

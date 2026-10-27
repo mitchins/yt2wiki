@@ -451,11 +451,11 @@ def _rule_unsupported(ctx: StageContext, markdown: str, evidence: Sequence[Evide
         label = f"Step {block['step']}" if block["step"] is not None else "Callout"
         for b in broken:
             out.append(_broken_citation_finding(label, block, b))
-        ctx = _BlockCheck(label=label, block=block, bound=bound,
-                          span_recs=span_recs, evidence=evidence)
+        check = _BlockCheck(label=label, block=block, bound=bound,
+                            span_recs=span_recs, evidence=evidence)
         text = _checkable_text(block)
         for sent in _sentences(text):
-            out.extend(_sentence_findings(ctx, sent))
+            out.extend(_sentence_findings(check, sent))
     out.extend(_unsupported_command_findings(markdown, evidence))
     return out
 
