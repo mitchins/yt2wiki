@@ -247,6 +247,74 @@ def load_stage_functions() -> dict[str, tuple[int, Callable[[StageContext], dict
     }
 
 
+def _cached_stage_row(db: Database, ctx: StageContext, stage_name: str,
+                      force: bool) -> Any:
+    """Stage row when this stage completed with the current fingerprint.
+
+    Loads artifacts for *every* completed stage, not just the ones this
+    invocation was asked to run: the input-hash chain is what makes a
+    downstream stage's fingerprint stable across partial runs.
+    """
+    row = db.query_one(
+        "SELECT * FROM stages WHERE job_id=? AND stage=?", (ctx.job_id, stage_name)
+    )
+    cached = (
+        not force
+        and row is not None
+        and row["state"] == "done"
+        and row["artifacts_json"]
+        and row["fingerprint"] == ctx.stage_fingerprint(stage_name)
+    )
+    if cached:
+        ctx.artifacts.update(json_loads(row["artifacts_json"], {}) or {})
+        return row
+    return None
+
+
+def _begin_stage(db: Database, ctx: StageContext, stage_name: str, idx: int) -> None:
+    db.execute(
+        """INSERT INTO stages(job_id, stage, state, attempts, started_at, fingerprint)
+           VALUES(?,?, 'running', COALESCE((SELECT attempts FROM stages WHERE job_id=? AND stage=?),0)+1, ?, ?)
+           ON CONFLICT(job_id, stage) DO UPDATE SET
+             state='running', attempts=attempts+1, started_at=excluded.started_at,
+             finished_at=NULL, error=NULL, metrics_json=NULL,
+             fingerprint=excluded.fingerprint""",
+        (ctx.job_id, stage_name, ctx.job_id, stage_name, time.time(),
+         ctx.stage_fingerprint(stage_name)),
+    )
+    db.execute(
+        "UPDATE jobs SET stage=?, stage_index=?, updated_at=? WHERE job_id=?",
+        (stage_name, idx, time.time(), ctx.job_id),
+    )
+
+
+def _fail_stage(db: Database, job_id: str, stage_name: str, message: str) -> None:
+    db.execute(
+        "UPDATE stages SET state='failed', error=?, finished_at=? WHERE job_id=? AND stage=?",
+        (message, time.time(), job_id, stage_name),
+    )
+
+
+def _record_stage_failure(db: Database, job_id: str, stage_name: str, exc: Exception,
+                          source_id: str) -> None:
+    tb = traceback.format_exc()
+    _fail_stage(db, job_id, stage_name, f"{type(exc).__name__}: {exc}")
+    db.execute(
+        "UPDATE jobs SET state='failed', error=?, updated_at=? WHERE job_id=?",
+        (f"{stage_name}: {type(exc).__name__}: {exc}", time.time(), job_id),
+    )
+    db.log("error", f"stage {stage_name} failed: {tb[-2500:]}", job_id=job_id, source_id=source_id)
+
+
+def _summarise_gpu(summary: dict[str, Any], settings: Settings) -> None:
+    gpus = nvidia_smi_gpus()
+    if gpus and settings.device_index is not None:
+        g = next((g for g in gpus if g.index == settings.device_index), None)
+        if g:
+            summary["gpu_used_gb"] = g.used_gb
+            summary["gpu_name"] = g.name
+
+
 def run_job(
     job_id: str,
     db: Database,
@@ -289,24 +357,10 @@ def run_job(
 
     for stage_name in STAGES:
         idx, fn = registry[stage_name]
-        stage_row = db.query_one(
-            "SELECT * FROM stages WHERE job_id=? AND stage=?", (job_id, stage_name)
-        )
-        cached = (
-            not force
-            and stage_row is not None
-            and stage_row["state"] == "done"
-            and stage_row["artifacts_json"]
-            and stage_row["fingerprint"] == ctx.stage_fingerprint(stage_name)
-        )
-        if cached:
-            # Load artifacts for *every* completed stage, not just the ones this
-            # invocation was asked to run: the input-hash chain is what makes a
-            # downstream stage's fingerprint stable across partial runs.
-            ctx.artifacts.update(json_loads(stage_row["artifacts_json"], {}) or {})
+        stage_row = _cached_stage_row(db, ctx, stage_name, force)
         if stage_name not in wanted:
             continue
-        if cached:
+        if stage_row is not None:
             summary["stages"][stage_name] = {
                 "state": "cached",
                 "metrics": json_loads(stage_row["metrics_json"], {}),
@@ -314,19 +368,7 @@ def run_job(
             continue
 
         ctx.current_stage = stage_name
-        db.execute(
-            """INSERT INTO stages(job_id, stage, state, attempts, started_at, fingerprint)
-               VALUES(?,?, 'running', COALESCE((SELECT attempts FROM stages WHERE job_id=? AND stage=?),0)+1, ?, ?)
-               ON CONFLICT(job_id, stage) DO UPDATE SET
-                 state='running', attempts=attempts+1, started_at=excluded.started_at,
-                 finished_at=NULL, error=NULL, metrics_json=NULL,
-                 fingerprint=excluded.fingerprint""",
-            (job_id, stage_name, job_id, stage_name, time.time(), ctx.stage_fingerprint(stage_name)),
-        )
-        db.execute(
-            "UPDATE jobs SET stage=?, stage_index=?, updated_at=? WHERE job_id=?",
-            (stage_name, idx, time.time(), job_id),
-        )
+        _begin_stage(db, ctx, stage_name, idx)
         started = time.time()
         try:
             ctx.check_cancel()
@@ -351,26 +393,14 @@ def run_job(
             summary["stages"][stage_name] = {"state": "done", "metrics": metrics}
             db.log("info", f"stage {stage_name} done in {metrics['stage_wall_s']}s", job_id=job_id)
         except CancelRequested as exc:
-            db.execute(
-                "UPDATE stages SET state='failed', error=?, finished_at=? WHERE job_id=? AND stage=?",
-                ("cancelled", time.time(), job_id, stage_name),
-            )
+            _fail_stage(db, job_id, stage_name, "cancelled")
             db.execute("UPDATE jobs SET state='cancelled', error=?, updated_at=? WHERE job_id=?",
                        (str(exc), time.time(), job_id))
             summary["stages"][stage_name] = {"state": "cancelled"}
             summary["cancelled"] = True
             return summary
         except Exception as exc:  # noqa: BLE001
-            tb = traceback.format_exc()
-            db.execute(
-                "UPDATE stages SET state='failed', error=?, finished_at=? WHERE job_id=? AND stage=?",
-                (f"{type(exc).__name__}: {exc}", time.time(), job_id, stage_name),
-            )
-            db.execute(
-                "UPDATE jobs SET state='failed', error=?, updated_at=? WHERE job_id=?",
-                (f"{stage_name}: {type(exc).__name__}: {exc}", time.time(), job_id),
-            )
-            db.log("error", f"stage {stage_name} failed: {tb[-2500:]}", job_id=job_id, source_id=source_id)
+            _record_stage_failure(db, job_id, stage_name, exc, source_id)
             summary["stages"][stage_name] = {
                 "state": "failed",
                 "error": f"{type(exc).__name__}: {exc}",
@@ -387,11 +417,6 @@ def run_job(
         summary["ok"] = True
     summary["wall_s"] = round(time.time() - start_all, 3)
     summary["gpu"] = cuda_available()
-    gpus = nvidia_smi_gpus()
-    if gpus and settings.device_index is not None:
-        g = next((g for g in gpus if g.index == settings.device_index), None)
-        if g:
-            summary["gpu_used_gb"] = g.used_gb
-            summary["gpu_name"] = g.name
+    _summarise_gpu(summary, settings)
     db.log("info", f"job finished ok={summary.get('ok')} in {summary['wall_s']}s", job_id=job_id)
     return summary

@@ -56,6 +56,101 @@ TILE_GRID = (2, 2)
 TILE_OVERLAP = 0.12
 
 
+
+def _load_images(chunk: list[dict[str, Any]]) -> tuple[list[Any], list[dict[str, Any]]]:
+    """Open every readable frame image in the chunk; skip unreadable ones."""
+    images: list[Any] = []
+    payloads: list[dict[str, Any]] = []
+    for frame in chunk:
+        path = Path(frame["path"])
+        if not path.is_file():
+            continue
+        try:
+            from PIL import Image
+
+            images.append(Image.open(path).convert("RGB"))
+            payloads.append(frame)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("unreadable frame %s: %s", frame["frame_id"], exc)
+    return images, payloads
+
+
+def _describe_batch(backend, ctx: StageContext, images: list[Any],
+                    payloads: list[dict[str, Any]], t, batch: int
+                    ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """One vision batch: describe, retry truncated frames, store plain frames.
+
+    Returns the text-dense frames held back for the crop pass (empty when the
+    dense-text pass is disabled).
+    """
+    results = backend.describe_batch(
+        images,
+        FRAME_PROMPT,
+        max_new_tokens=int(t.vision_max_new_tokens),
+        temperature=t.vision_temperature,
+        system=SYSTEM,
+        batch_size=batch,
+    )
+    dense_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for frame, raw, image in zip(payloads, results, images):
+        payload = _safe_json(raw)
+        if payload.get("parse_error"):
+            # The model hit the token budget mid-JSON.  Retry that frame
+            # alone with double the room before giving up on it.
+            retry = backend.describe_batch(
+                [image], FRAME_PROMPT,
+                max_new_tokens=int(t.vision_max_new_tokens) * 2,
+                temperature=0.0, system=SYSTEM, batch_size=1,
+            )
+            if retry:
+                payload = _safe_json(retry[0])
+        text_lines = list(payload.get("visible_text") or [])
+        if t.vision_dense_text_pass and _looks_text_dense(payload, text_lines):
+            dense_candidates.append((frame, payload))
+        else:
+            _store(ctx, frame, payload)
+    return dense_candidates
+
+
+def _dense_text_pass(backend, ctx: StageContext,
+                     dense_candidates: list[tuple[dict[str, Any], dict[str, Any]]],
+                     batch: int) -> int:
+    """OCR the crop tiles of text-dense frames; store them. Returns tiles used."""
+    tiles: list[Any] = []
+    owners: list[dict[str, Any]] = []
+    meta: list[dict[str, Any]] = []
+    for frame, payload in dense_candidates:
+        t_tiles, t_meta = _dense_tiles(frame)
+        tiles.extend(t_tiles)
+        meta.extend(t_meta)
+        owners.extend([frame] * len(t_tiles))
+    tile_text = backend.describe_batch(
+        tiles, CROP_PROMPT, max_new_tokens=320, temperature=0.0,
+        system=SYSTEM, batch_size=batch,
+    )
+    grouped: dict[str, list[str]] = {}
+    used: dict[str, list[dict[str, Any]]] = {}
+    for frame, m, raw in zip(owners, meta, tile_text):
+        try:
+            tile_payload = _safe_json(raw)
+        except Exception:  # noqa: BLE001
+            continue
+        lines = [str(x) for x in (tile_payload.get("text_lines") or [])]
+        grouped.setdefault(frame["frame_id"], []).extend(lines)
+        used.setdefault(frame["frame_id"], []).append(m)
+    crops_used = 0
+    for frame, payload in dense_candidates:
+        extra = grouped.get(frame["frame_id"]) or []
+        if extra:
+            payload["visible_text"] = _merge_text_lines(
+                payload.get("visible_text") or [], extra
+            )
+            payload["crop_tiles"] = used.get(frame["frame_id"]) or []
+            crops_used += len(payload["crop_tiles"])
+        _store(ctx, frame, payload)
+    return crops_used
+
+
 def run(ctx: StageContext) -> dict[str, Any]:
     t = ctx.settings.tuning
     frames = ctx.db.query(
@@ -91,81 +186,14 @@ def run(ctx: StageContext) -> dict[str, Any]:
         for start in range(0, len(todo), batch):
             chunk = todo[start:start + batch]
             ctx.check_cancel()
-            images: list[Any] = []
-            payloads: list[dict[str, Any]] = []
-            for frame in chunk:
-                path = Path(frame["path"])
-                if not path.is_file():
-                    continue
-                try:
-                    from PIL import Image
-
-                    images.append(Image.open(path).convert("RGB"))
-                    payloads.append(frame)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("unreadable frame %s: %s", frame["frame_id"], exc)
+            images, payloads = _load_images(chunk)
             if not images:
                 continue
-            results = backend.describe_batch(
-                images,
-                FRAME_PROMPT,
-                max_new_tokens=int(t.vision_max_new_tokens),
-                temperature=t.vision_temperature,
-                system=SYSTEM,
-                batch_size=batch,
-            )
-            dense_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
-            for frame, raw, image in zip(payloads, results, images):
-                payload = _safe_json(raw)
-                if payload.get("parse_error"):
-                    # The model hit the token budget mid-JSON.  Retry that frame
-                    # alone with double the room before giving up on it.
-                    retry = backend.describe_batch(
-                        [image], FRAME_PROMPT,
-                        max_new_tokens=int(t.vision_max_new_tokens) * 2,
-                        temperature=0.0, system=SYSTEM, batch_size=1,
-                    )
-                    if retry:
-                        payload = _safe_json(retry[0])
-                text_lines = list(payload.get("visible_text") or [])
-                if t.vision_dense_text_pass and _looks_text_dense(payload, text_lines):
-                    dense_candidates.append((frame, payload))
-                else:
-                    _store(ctx, frame, payload)
-                    processed += 1
+            dense_candidates = _describe_batch(
+                backend, ctx, images, payloads, t, batch)
             if dense_candidates and t.vision_dense_text_pass:
-                tiles: list[Any] = []
-                owners: list[dict[str, Any]] = []
-                meta: list[dict[str, Any]] = []
-                for frame, payload in dense_candidates:
-                    t_tiles, t_meta = _dense_tiles(frame)
-                    tiles.extend(t_tiles)
-                    meta.extend(t_meta)
-                    owners.extend([frame] * len(t_tiles))
-                tile_text = backend.describe_batch(
-                    tiles, CROP_PROMPT, max_new_tokens=320, temperature=0.0,
-                    system=SYSTEM, batch_size=batch,
-                )
-                grouped: dict[str, list[str]] = {}
-                used: dict[str, list[dict[str, Any]]] = {}
-                for frame, m, raw in zip(owners, meta, tile_text):
-                    try:
-                        tile_payload = _safe_json(raw)
-                    except Exception:  # noqa: BLE001
-                        continue
-                    lines = [str(x) for x in (tile_payload.get("text_lines") or [])]
-                    grouped.setdefault(frame["frame_id"], []).extend(lines)
-                    used.setdefault(frame["frame_id"], []).append(m)
-                for frame, payload in dense_candidates:
-                    extra = grouped.get(frame["frame_id"]) or []
-                    if extra:
-                        payload["visible_text"] = _merge_text_lines(
-                            payload.get("visible_text") or [], extra
-                        )
-                        payload["crop_tiles"] = used.get(frame["frame_id"]) or []
-                        crops_used += len(payload["crop_tiles"])
-                    _store(ctx, frame, payload)
-                    processed += 1
+                crops_used += _dense_text_pass(backend, ctx, dense_candidates, batch)
+            processed += len(payloads)
             ctx.progress(f"interpreted {processed + len(frames) - len(todo)}/{len(frames)} frames")
             ctx.artifacts["_force_vision"] = False
 

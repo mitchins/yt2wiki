@@ -94,50 +94,8 @@ def run(ctx: StageContext) -> dict[str, Any]:
     raw_dump = ctx.work_dir("evidence") / "raw_replies.txt"
     with manager.acquire("text") as backend:
         for i, chunk in enumerate(chunks):
-            ctx.check_cancel()
-            window_start = float(chunk[0]["start"])
-            window_end = float(chunk[-1]["end"])
-            transcript = "\n".join(
-                f"[{float(r['start']):.1f}-{float(r['end']):.1f}] {r['text'].strip()}"
-                for r in chunk
-            )
-            frames = _frames_for_window(frame_index, window_start, window_end)
-            prompt = CHUNK_PROMPT.format(
-                window_start=window_start,
-                window_end=window_end,
-                transcript=transcript[:12000],
-                frames=frames[:9000],
-            )
-            try:
-                payload = backend.chat_with_dump(
-                    [{"role": "system", "content": SYSTEM},
-                     {"role": "user", "content": prompt}],
-                    dump_path=raw_dump,
-                    max_new_tokens=int(t.text_max_tokens),
-                    temperature=t.text_temperature,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("chunk %d extraction failed: %s", i, exc)
-                dump = ctx.work_dir("evidence") / f"chunk_{i:03d}.error.txt"
-                try:
-                    dump.write_text("PROMPT TAIL:\n" + prompt[-1500:] +
-                                    "\n\n===== ERROR =====\n" + str(exc), encoding="utf-8")
-                except OSError:
-                    pass
-                ctx.db.log(
-                    "warning",
-                    f"evidence chunk {i} failed: {exc}; prompt+error saved to {dump}",
-                    source_id=ctx.source_id,
-                )
-                continue
-            for obs in payload.get("observations", []) or []:
-                if not isinstance(obs, dict):
-                    continue
-                evidence = _to_evidence(
-                    ctx, obs, window_start, window_end, frame_index, model_key
-                )
-                if evidence is not None:
-                    collected.append(evidence)
+            collected.extend(_extract_chunk(
+                ctx, backend, i, chunk, chunks, frame_index, model_key, raw_dump, t))
             if len(chunks) > 4 and i % max(1, len(chunks) // 4) == 0:
                 ctx.progress(f"extracted evidence from {i + 1}/{len(chunks)} windows")
 
@@ -162,6 +120,65 @@ def run(ctx: StageContext) -> dict[str, Any]:
         "frames_used": len(frame_index),
         "elapsed_s": round(time.time() - started, 3),
     }
+
+
+def _extract_chunk(ctx: StageContext, backend, i: int, chunk: list, chunks: list,
+                   frame_index: list, model_key: str, raw_dump, t) -> list[Evidence]:
+    """One transcript window -> zero or more evidence records.
+
+    A failed chunk is recorded (prompt tail + error) and skipped: the pass
+    continues rather than losing the whole transcript to one bad window.
+    """
+    ctx.check_cancel()
+    window_start = float(chunk[0]["start"])
+    window_end = float(chunk[-1]["end"])
+    transcript = "\n".join(
+        f"[{float(r['start']):.1f}-{float(r['end']):.1f}] {r['text'].strip()}"
+        for r in chunk
+    )
+    frames = _frames_for_window(frame_index, window_start, window_end)
+    prompt = CHUNK_PROMPT.format(
+        window_start=window_start,
+        window_end=window_end,
+        transcript=transcript[:12000],
+        frames=frames[:9000],
+    )
+    try:
+        payload = backend.chat_with_dump(
+            [{"role": "system", "content": SYSTEM},
+             {"role": "user", "content": prompt}],
+            dump_path=raw_dump,
+            max_new_tokens=int(t.text_max_tokens),
+            temperature=t.text_temperature,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _dump_chunk_error(ctx, i, prompt, exc)
+        return []
+    out: list[Evidence] = []
+    for obs in payload.get("observations", []) or []:
+        if not isinstance(obs, dict):
+            continue
+        evidence = _to_evidence(
+            ctx, obs, window_start, window_end, frame_index, model_key
+        )
+        if evidence is not None:
+            out.append(evidence)
+    return out
+
+
+def _dump_chunk_error(ctx: StageContext, i: int, prompt: str, exc: Exception) -> None:
+    log.warning("chunk %d extraction failed: %s", i, exc)
+    dump = ctx.work_dir("evidence") / f"chunk_{i:03d}.error.txt"
+    try:
+        dump.write_text("PROMPT TAIL:\n" + prompt[-1500:] +
+                        "\n\n===== ERROR =====\n" + str(exc), encoding="utf-8")
+    except OSError:
+        pass
+    ctx.db.log(
+        "warning",
+        f"evidence chunk {i} failed: {exc}; prompt+error saved to {dump}",
+        source_id=ctx.source_id,
+    )
 
 
 # ----------------------------------------------------------------------
@@ -288,21 +305,23 @@ def _consolidate(ctx: StageContext, collected: Sequence[Evidence]) -> list[Evide
             # `observations_raw`.
             filtered += 1
             continue
-        key = cand.support_key()
-        merged = False
-        for i, existing in enumerate(out):
-            if existing.t_start is not None and cand.t_start is not None:
-                if abs(existing.t_start - cand.t_start) > 45:
-                    continue
-            if key == existing.support_key() or _near_duplicate(existing, cand):
-                if _richness(cand) > _richness(existing):
-                    out[i] = cand
-                merged = True
-                break
-        if not merged:
-            out.append(cand)
+        _merge_candidate(out, cand)
     ctx.artifacts["evidence_filtered_identifiers"] = filtered
     return out
+
+
+def _merge_candidate(out: list[Evidence], cand: Evidence) -> None:
+    """Collapse near-duplicates onto the richer record, else append."""
+    key = cand.support_key()
+    for i, existing in enumerate(out):
+        if existing.t_start is not None and cand.t_start is not None:
+            if abs(existing.t_start - cand.t_start) > 45:
+                continue
+        if key == existing.support_key() or _near_duplicate(existing, cand):
+            if _richness(cand) > _richness(existing):
+                out[i] = cand
+            return
+    out.append(cand)
 
 
 def _incidental_identifier(e: Evidence) -> bool:
@@ -349,14 +368,16 @@ PAIRS:
 Return only JSON."""
 
 
-def _adjudicate_contradictions(
-    ctx: StageContext, backend, items: Sequence[Evidence]
-) -> list[dict[str, Any]]:
-    """Ask the model only about specific, rule-detected value disagreements."""
+
+_ADJUDICABLE_KINDS = frozenset({"command", "config", "measurement", "identifier"})
+
+
+def _detect_contradiction_pairs(items: Sequence[Evidence]) -> list[dict[str, Any]]:
+    """Specific, rule-detected value disagreements between adjacent records."""
     pairs: list[dict[str, Any]] = []
     for i, a in enumerate(items):
         for b in items[i + 1:]:
-            if b.kind not in ("command", "config", "measurement", "identifier"):
+            if b.kind not in _ADJUDICABLE_KINDS:
                 continue
             if _near_duplicate(a, b) and _values_differ(a, b):
                 pairs.append({
@@ -365,6 +386,14 @@ def _adjudicate_contradictions(
                     "later": {"evidence_id": b.evidence_id, "text": b.text,
                               "t": round(b.t_start or 0, 1)},
                 })
+    return pairs
+
+
+def _adjudicate_contradictions(
+    ctx: StageContext, backend, items: Sequence[Evidence]
+) -> list[dict[str, Any]]:
+    """Ask the model only about specific, rule-detected value disagreements."""
+    pairs = _detect_contradiction_pairs(items)
     if not pairs:
         return []
     pairs = pairs[:12]
