@@ -44,6 +44,24 @@ _ARTICLE_BY_ID_SQL = "SELECT * FROM articles WHERE article_id=?"
 _CAPTION_SQL = "UPDATE article_assets SET caption=? WHERE article_id=? AND frame_id=?"
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 
+# Shared OpenAPI error declarations: only statuses a route actually emits
+# are declared, merged via _responses() so route-specific docs win.
+_AUTH_RESPONSES = {
+    401: {"description": "Operator login required (POST /api/auth/login)."},
+    403: {"description": "Missing/invalid CSRF token, or operator password not configured."},
+}
+_D_NOT_READY = {"description": "Inference services not ready."}
+_D_UNKNOWN_ARTICLE = {"description": "Unknown article id."}
+_D_INVALID_FILENAME = {"description": "Invalid filename."}
+_D_UNKNOWN_JOB = {"description": "Unknown job id."}
+
+
+def _responses(*groups: dict[int, dict[str, str]]) -> dict[int, dict[str, str]]:
+    out: dict[int, dict[str, str]] = {}
+    for group in groups:
+        out.update(group)
+    return out
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.load()
@@ -143,7 +161,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return page(request, _ADD_PAGE, {"nav": "add", "mode": mode, "error": "",
                                           "url": "", "jobs": active_jobs()})
 
-    @app.post("/add/url")
+    @app.post("/add/url",
+              responses=_responses(_AUTH_RESPONSES, {
+                  400: {"description": "Missing/invalid URL, unknown profile or unreachable video."},
+                  409: _D_NOT_READY}))
     def add_url_form(request: Request, url: str = Form(""), back: str = Form(""),
                      csrf_token: str = Form("")) -> Any:
         try:
@@ -159,7 +180,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         status_code=exc.status_code)
         return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
-    @app.post("/add/upload")
+    @app.post("/add/upload",
+              responses=_responses(_AUTH_RESPONSES, {
+                  400: {"description": "Missing/empty file or unknown profile."},
+                  409: _D_NOT_READY}))
     async def add_upload_form(request: Request, file: UploadFile = File(None),
                               csrf_token: str = Form("")) -> Any:
         try:
@@ -194,7 +218,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return page(request, "jobs.html", {"nav": "jobs", "current": current,
                                            "queued": queued, "history": history})
 
-    @app.get("/jobs/{job_id}", response_class=HTMLResponse)
+    @app.get("/jobs/{job_id}", response_class=HTMLResponse,
+              responses={404: _D_UNKNOWN_JOB})
     def job_page(request: Request, job_id: str, error: str = Query("")) -> Any:
         job = service.get_job(job_id)
         if job is None:
@@ -213,7 +238,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                           "article": article, "error": error,
                                           "source": service.get_source(job["source_id"])})
 
-    @app.post("/jobs/{job_id}/retry")
+    @app.post("/jobs/{job_id}/retry", responses=_AUTH_RESPONSES)
     def job_retry(request: Request, job_id: str, csrf_token: str = Form("")) -> Any:
         _require_operator(request, csrf=False)
         _require_operator_form(request, csrf_token)
@@ -224,14 +249,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return RedirectResponse(f"/jobs/{job_id}?error={_quote(str(exc.detail))}",
                                     status_code=303)
 
-    @app.post("/jobs/{job_id}/cancel")
+    @app.post("/jobs/{job_id}/cancel", responses=_AUTH_RESPONSES)
     def job_cancel_form(request: Request, job_id: str, csrf_token: str = Form("")) -> Any:
         _require_operator(request, csrf=False)
         _require_operator_form(request, csrf_token)
         app.state.runner.cancel_queued(job_id)
         return RedirectResponse("/jobs", status_code=303)
 
-    @app.get("/articles/{article_id}", response_class=HTMLResponse)
+    @app.get("/articles/{article_id}", response_class=HTMLResponse,
+              responses={404: _D_UNKNOWN_ARTICLE})
     def read_article(request: Request, article_id: str) -> Any:
         ctx = views.article_context(db, settings.paths, article_id)
         if ctx is None:
@@ -263,7 +289,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "provenance": meta.get("provenance", {}),
         })
 
-    @app.get("/articles/{article_id}/edit", response_class=HTMLResponse)
+    @app.get("/articles/{article_id}/edit", response_class=HTMLResponse,
+              responses={404: _D_UNKNOWN_ARTICLE})
     def edit_article(request: Request, article_id: str) -> Any:
         row = db.query_one(_ARTICLE_BY_ID_SQL, (article_id,))
         if row is None:
@@ -315,7 +342,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "authenticated": session is not None,
                 "csrf_token": (session or {}).get("csrf", "")}
 
-    @app.post("/api/auth/login")
+    @app.post("/api/auth/login",
+              responses={403: {"description": "Operator password is not configured."},
+                         401: {"description": "Wrong password."}})
     def api_auth_login(request: Request, payload: dict = Body(...)) -> Any:
         if not operator_auth.password_configured():
             raise HTTPException(403,
@@ -346,7 +375,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         resp.delete_cookie(operator_auth.SESSION_COOKIE, path="/")
         return resp
 
-    @app.get("/assets/{article_id}/{filename}")
+    @app.get("/assets/{article_id}/{filename}",
+              responses={400: _D_INVALID_FILENAME,
+                         404: {"description": "Asset missing or not an image."}})
     def asset(article_id: str, filename: str) -> Any:
         if "/" in filename or ".." in filename or "/" in article_id or ".." in article_id:
             raise HTTPException(400, _MSG_INVALID_FILENAME)
@@ -355,7 +386,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "asset not found")
         return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
-    @app.get("/frames/{source_id}/{filename}")
+    @app.get("/frames/{source_id}/{filename}",
+              responses={400: _D_INVALID_FILENAME,
+                         404: {"description": "Frame not found."}})
     def source_frame(source_id: str, filename: str) -> Any:
         if ("/" in filename or ".." in filename or ".." in source_id
                 or not filename.lower().endswith(_IMAGE_EXTS)):
@@ -507,13 +540,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------
     # api
-    @app.post("/api/sources/url")
+    @app.post("/api/sources/url",
+              responses=_responses(_AUTH_RESPONSES, {
+                  400: {"description": "Missing/invalid URL, unknown profile or unreachable video."},
+                  409: _D_NOT_READY}))
     def api_add_url(request: Request, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         job = submit_url(payload.get("url") or "", payload.get("profile") or "")
         return {"source_id": service.get_job(job)["source_id"], "job_id": job}
 
-    @app.post("/api/sources/upload")
+    @app.post("/api/sources/upload",
+              responses=_responses(_AUTH_RESPONSES, {
+                  400: {"description": "Missing/empty file or unknown profile."},
+                  409: _D_NOT_READY}))
     async def api_upload(
         request: Request,
         file: UploadFile = File(...),
@@ -527,7 +566,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_jobs_active() -> Any:
         return {"jobs": [_job_json(j) for j in active_jobs()]}
 
-    @app.get("/api/jobs/{job_id}")
+    @app.get("/api/jobs/{job_id}",
+              responses={404: _D_UNKNOWN_JOB})
     def api_job(job_id: str) -> Any:
         job = service.get_job(job_id)
         if job is None:
@@ -545,13 +585,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ]
         return out
 
-    @app.post("/api/jobs/{job_id}/cancel")
+    @app.post("/api/jobs/{job_id}/cancel",
+              responses=_AUTH_RESPONSES)
     def api_cancel(request: Request, job_id: str) -> Any:
         _require_operator(request)
         return {"cancelled": app.state.runner.cancel_queued(job_id)
                 or service.request_cancel(job_id)}
 
-    @app.post("/api/jobs/{job_id}/reprocess")
+    @app.post("/api/jobs/{job_id}/reprocess",
+              responses=_responses(_AUTH_RESPONSES, {
+                  404: _D_UNKNOWN_JOB,
+                  400: {"description": "Unknown profile."},
+                  409: _D_NOT_READY}))
     def api_reprocess(request: Request, job_id: str, payload: dict = Body(default={})) -> Any:
         _require_operator(request)
         job = service.get_job(job_id)
@@ -578,7 +623,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def api_readiness() -> Any:
         return readiness_summary()
 
-    @app.post("/api/settings/inference")
+    @app.post("/api/settings/inference",
+              responses=_responses(_AUTH_RESPONSES, {
+                  400: {"description": "Invalid inference configuration."}}))
     def api_save_inference(request: Request, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         try:
@@ -587,7 +634,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         return {"ok": True, "config": cfg}
 
-    @app.post("/api/settings/inference/test")
+    @app.post("/api/settings/inference/test",
+              responses=_responses(_AUTH_RESPONSES, {
+                  400: {"description": "Missing/invalid base URL or API-key variable."}}))
     def api_test_inference(request: Request, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         url = str(payload.get("url") or "").strip()
@@ -611,7 +660,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             inference.record_test(settings.paths, name, result)
         return result
 
-    @app.post("/api/settings/inference/save-test")
+    @app.post("/api/settings/inference/save-test",
+              responses=_responses(_AUTH_RESPONSES, {
+                  400: {"description": "Invalid inference configuration."},
+                  409: {"description": "Stale provider identity: retest before assigning roles."}}))
     def api_save_test_inference(request: Request, payload: dict = Body(...)) -> Any:
         """Guided setup: save one endpoint, test the actual server, assign
         roles whose qualification passed. The sequence is explicit and
@@ -632,7 +684,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": bool(result.get("ok")), "provider": saved["name"],
                 "result": result, "roles": assigned}
 
-    @app.post("/api/preview")
+    @app.post("/api/preview",
+              responses={400: {"description": "markdown is required."},
+                         404: _D_UNKNOWN_ARTICLE})
     def api_preview(payload: dict = Body(...)) -> Any:
         article_id = str(payload.get("article_id") or "")
         md = payload.get("markdown")
@@ -644,7 +698,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"title": view["title"], "lead_html": view["lead_html"],
                 "body_html": view["body_html"]}
 
-    @app.post("/api/articles/{article_id}/images/move")
+    @app.post("/api/articles/{article_id}/images/move",
+              responses=_responses(_AUTH_RESPONSES, {
+                  404: _D_UNKNOWN_ARTICLE,
+                  400: {"description": "Move rejected: image missing or invalid target section."}}))
     def api_image_move(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         fid = (payload.get("frame_id") or "").strip()
@@ -660,7 +717,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                          f"image moved to “{heading}” by user")
         return {"ok": True, "version": version}
 
-    @app.get("/api/articles/{article_id}/export.md")
+    @app.get("/api/articles/{article_id}/export.md",
+              responses={404: {"description": "Article markdown not found."}})
     def api_export_md(article_id: str) -> Any:
         path = settings.paths.article_markdown(article_id)
         if not path.is_file():
@@ -668,7 +726,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(path, media_type="text/markdown",
                             filename=f"{article_id}.md")
 
-    @app.get("/api/articles/{article_id}/export.zip")
+    @app.get("/api/articles/{article_id}/export.zip",
+              responses={404: {"description": "Export bundle not found."}})
     def api_export_zip(article_id: str) -> Any:
         path = settings.paths.article_dir(article_id) / "article.zip"
         if not path.is_file():
@@ -676,7 +735,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(path, media_type="application/zip",
                             filename=f"{article_id}.zip")
 
-    @app.get("/api/articles/{article_id}/standalone")
+    @app.get("/api/articles/{article_id}/standalone",
+              responses={404: {"description": "Standalone HTML not found."}})
     def api_export_standalone(article_id: str) -> Any:
         path = settings.paths.article_dir(article_id) / "article.standalone.html"
         if not path.is_file():
@@ -684,7 +744,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(path, media_type="text/html",
                             filename=f"{article_id}.html")
 
-    @app.post("/api/articles/{article_id}")
+    @app.post("/api/articles/{article_id}",
+              responses=_responses(_AUTH_RESPONSES, {
+                  400: {"description": "markdown is required (min length 20)."},
+                  404: _D_UNKNOWN_ARTICLE}))
     def api_edit_article(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         markdown = payload.get("markdown")
@@ -706,7 +769,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return [dict(r) for r in rows]
 
-    @app.post("/api/articles/{article_id}/revert")
+    @app.post("/api/articles/{article_id}/revert",
+              responses=_responses(_AUTH_RESPONSES, {
+                  404: {"description": "Unknown revision for this article."}}))
     def api_revert(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         revision_id = payload.get("revision_id")
@@ -784,7 +849,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                          f"restored version {row['version']}")
         return {"ok": True, "version": version}
 
-    @app.get("/api/articles/{article_id}/revisions/{revision_id}")
+    @app.get("/api/articles/{article_id}/revisions/{revision_id}",
+              responses={404: {"description": "Unknown revision for this article."}})
     def api_revision(article_id: str, revision_id: str) -> Any:
         row = db.query_one(
             "SELECT revision_id, version, markdown, edit_note, origin, created_at "
@@ -794,7 +860,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "revision not found")
         return dict(row)
 
-    @app.get("/api/v9/articles/{article_id}/sections")
+    @app.get("/api/v9/articles/{article_id}/sections",
+              responses={404: _D_UNKNOWN_ARTICLE})
     def api_v9_sections(article_id: str) -> Any:
         row = db.query_one("SELECT outline_json FROM articles WHERE article_id=?", (article_id,))
         if row is None:
@@ -807,7 +874,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return [{"section_id": s.get("section_id"), "heading": s.get("heading"),
                  "t_start": s.get("t_start"), "t_end": s.get("t_end")} for s in secs]
 
-    @app.get("/api/v9/articles/{article_id}/alternatives")
+    @app.get("/api/v9/articles/{article_id}/alternatives",
+              responses={404: {"description": "Unknown article id or section id."}})
     def api_v9_alternatives(article_id: str, section_id: str = Query(""),
                                   limit: int = Query(8)) -> Any:
         row = db.query_one(_ARTICLE_BY_ID_SQL, (article_id,))
@@ -847,7 +915,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"section_id": sec.get("section_id"), "window": [lo, hi],
                 "frames": [dict(r) for r in rows]}
 
-    @app.post("/api/articles/{article_id}/images/replace")
+    @app.post("/api/articles/{article_id}/images/replace",
+              responses=_responses(_AUTH_RESPONSES, {
+                  400: {"description": "Invalid frame identifiers or image not in article."},
+                  404: {"description": "Unknown article or replacement frame."}}))
     def api_image_replace(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         old = (payload.get("old_frame_id") or "").strip()
@@ -858,7 +929,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _swap_article_image(settings, db, article_id, old, new,
                                    caption=caption, note="image replaced by user")
 
-    @app.post("/api/articles/{article_id}/images/remove")
+    @app.post("/api/articles/{article_id}/images/remove",
+              responses=_responses(_AUTH_RESPONSES, {
+                  400: {"description": "frame_id required or invalid."},
+                  404: _D_UNKNOWN_ARTICLE}))
     def api_image_remove(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         old = (payload.get("frame_id") or "").strip()
@@ -867,7 +941,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _swap_article_image(settings, db, article_id, old, None,
                                    note="image removed by user")
 
-    @app.post("/api/articles/{article_id}/images/caption")
+    @app.post("/api/articles/{article_id}/images/caption",
+              responses=_responses(_AUTH_RESPONSES, {
+                  400: {"description": "frame_id required."},
+                  404: _D_UNKNOWN_ARTICLE}))
     def api_image_caption(request: Request, article_id: str, payload: dict = Body(...)) -> Any:
         _require_operator(request)
         fid = (payload.get("frame_id") or "").strip()
@@ -969,7 +1046,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return [_frame_out(r) for r in rows]
 
-    @app.post("/api/sources/{source_id}/reprocess")
+    @app.post("/api/sources/{source_id}/reprocess",
+              responses=_responses(_AUTH_RESPONSES, {
+                  404: {"description": "Unknown source id."},
+                  400: {"description": "Unknown profile."},
+                  409: _D_NOT_READY}))
     def api_reprocess_source(request: Request, source_id: str, payload: dict = Body(default={})) -> Any:
         _require_operator(request)
         if service.get_source(source_id) is None:
@@ -994,7 +1075,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return [dict(r) for r in rows]
 
-    @app.get("/media/{source_id}/{filename}")
+    @app.get("/media/{source_id}/{filename}",
+              responses={400: _D_INVALID_FILENAME,
+                         404: {"description": "Unknown source or media file missing."}})
     def media(source_id: str, filename: str) -> Any:
         if "/" in filename or ".." in filename:
             raise HTTPException(400, _MSG_INVALID_FILENAME)
