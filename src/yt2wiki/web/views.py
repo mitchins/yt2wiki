@@ -165,6 +165,45 @@ def _article_kinds(db, job_ids: list[str]) -> dict[str, str]:
     return {r["job_id"]: (_loads(r["metrics_json"], {}) or {}).get("kind", "") for r in rows}
 
 
+def _first_asset(assets, article_id: str, names) -> str | None:
+    for name in names:
+        if (assets / name).is_file():
+            return f"/assets/{article_id}/{name}"
+    return None
+
+
+def _any_image_asset(assets, article_id: str) -> str | None:
+    try:
+        for p in sorted(assets.iterdir()):
+            if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+                return f"/assets/{article_id}/{p.name}"
+    except OSError:
+        return None
+    return None
+
+
+def _outline_frame_names(outline: list[dict]) -> tuple[list[str], list[dict]]:
+    names: list[str] = []
+    for sec in outline or []:
+        names.extend(f"{fid}.jpg" for fid in (sec.get("frames") or []))
+    return names, outline or []
+
+
+def _ordered_outline_names(outline: list[dict]) -> list[str]:
+    m = len(outline) // 2
+    ordered_secs = sorted(outline, key=lambda s: abs(outline.index(s) - m))
+    ordered: list[str] = []
+    for sec in ordered_secs:
+        ordered.extend(f"{fid}.jpg" for fid in (sec.get("frames") or []))
+    return ordered
+
+
+def _markdown_frame_names(markdown: str) -> list[str]:
+    import re
+
+    return re.findall(r"!\[[^\]]*\]\(assets/([^)\s/]+)\)", markdown or "")
+
+
 def thumbnail_for(paths, article_id: str, outline_json: str | None, markdown: str) -> str | None:
     """Best representative thumbnail: prefer a middle-section installed frame.
 
@@ -178,37 +217,18 @@ def thumbnail_for(paths, article_id: str, outline_json: str | None, markdown: st
     # Outline order is already instructionally useful (vetoed decorative
     # images never reach outline). Prefer the middle section's frame.
     outline = _loads(outline_json, []) or []
-    names: list[str] = []
-    for sec in outline:
-        names.extend(f"{fid}.jpg" for fid in (sec.get("frames") or []))
+    names, outline = _outline_frame_names(outline)
     if names:
-        # Reorder by proximity to the centre section
-        m = len(outline) // 2
-        ordered_secs = sorted(outline, key=lambda s: abs(outline.index(s) - m))
-        ordered_names: list[str] = []
-        for sec in ordered_secs:
-            ordered_names.extend(f"{fid}.jpg" for fid in (sec.get("frames") or []))
-        for name in ordered_names:
-            if (assets / name).is_file():
-                return f"/assets/{article_id}/{name}"
-        # Fallback to original order
-        for name in names:
-            if (assets / name).is_file():
-                return f"/assets/{article_id}/{name}"
-    if not names:
-        import re
-        names = re.findall(r"!\[[^\]]*\]\(assets/([^)\s/]+)\)", markdown or "")
-        for name in names:
-            if (assets / name).is_file():
-                return f"/assets/{article_id}/{name}"
-    # Final fallback: any image asset (should not happen for published)
-    try:
-        for p in sorted(assets.iterdir()):
-            if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
-                return f"/assets/{article_id}/{p.name}"
-    except OSError:
-        pass
-    return None
+        ordered_names = _ordered_outline_names(outline)
+        hit = _first_asset(assets, article_id, ordered_names) or _first_asset(assets, article_id, names)
+        if hit:
+            return hit
+        return _any_image_asset(assets, article_id)
+    names = _markdown_frame_names(markdown)
+    hit = _first_asset(assets, article_id, names)
+    if hit:
+        return hit
+    return _any_image_asset(assets, article_id)
 
 
 def _is_v9(article_id: str) -> bool:
@@ -380,6 +400,16 @@ def _frame_exists(db, paths, source_id: str, frame_id: str) -> bool:
     return bool(row and row["path"] and Path(row["path"]).is_file())
 
 
+def _decision_candidates(rec, source_id: str, chosen: set, frame_ok) -> list:
+    cands = []
+    for c in (rec.get("candidates") or [])[:6]:
+        fid = c.get("frame_id")
+        if fid and frame_ok(fid):
+            cands.append({"frame_id": fid, "t": c.get("t"), "chosen": fid in chosen,
+                          "src": f"/frames/{source_id}/{fid}.jpg"})
+    return cands
+
+
 def _decisions(report: dict[str, Any], source_id: str,
                outline: list[dict[str, Any]] | None = None,
                frame_ok=lambda fid: True) -> list[dict[str, Any]]:
@@ -388,12 +418,7 @@ def _decisions(report: dict[str, Any], source_id: str,
     out = []
     for rec in report.get("selection") or []:
         chosen = set(rec.get("chosen") or [])
-        cands = []
-        for c in (rec.get("candidates") or [])[:6]:
-            fid = c.get("frame_id")
-            if fid and frame_ok(fid):
-                cands.append({"frame_id": fid, "t": c.get("t"), "chosen": fid in chosen,
-                              "src": f"/frames/{source_id}/{fid}.jpg"})
+        cands = _decision_candidates(rec, source_id, chosen, frame_ok)
         out.append({
             "section_id": rec.get("section_id", ""),
             "heading": headings.get(rec.get("section_id")) or rec.get("section_id", ""),
@@ -409,6 +434,30 @@ def _decisions(report: dict[str, Any], source_id: str,
 
 # ----------------------------------------------------------------------
 # jobs
+def _job_steps(pipeline: str, stages: dict, state: str, job: dict) -> list:
+    steps = []
+    if pipeline == "v9":
+        for key, label in JOB_STAGES:
+            st = stages.get(key)
+            if key in ("inspect", "v9_caption") and (st is None or st["state"] != "failed"):
+                continue  # internal sub-steps: shown only when they fail
+            if st is None and state not in ("queued", "running", "stale"):
+                continue  # finished before this stage was recorded: nothing to show
+            steps.append(_step(key, label, st, job))
+        return steps
+    for key, st in stages.items():
+        steps.append(_step(key, key.replace("_", " ").capitalize(), st, job))
+    return steps
+
+
+def _pipeline_of(cfg: dict, stages: dict) -> str:
+    if cfg.get("pipeline"):
+        return cfg["pipeline"]
+    if any(k.startswith("v9_") for k in stages):
+        return "v9"
+    return "legacy" if stages else "v9"
+
+
 def job_view(job: dict[str, Any], *, live: set[str]) -> dict[str, Any]:
     """A job row plus ordered, labelled stage progress.
 
@@ -420,20 +469,8 @@ def job_view(job: dict[str, Any], *, live: set[str]) -> dict[str, Any]:
     if state == "queued" and job["job_id"] not in live:
         state = "stale"
     stages = {s["stage"]: s for s in job.get("stages") or []}
-    pipeline = cfg.get("pipeline") or ("v9" if any(k.startswith("v9_") for k in stages) else
-                                       ("legacy" if stages else "v9"))
-    steps = []
-    if pipeline == "v9":
-        for key, label in JOB_STAGES:
-            st = stages.get(key)
-            if key in ("inspect", "v9_caption") and (st is None or st["state"] != "failed"):
-                continue  # internal sub-steps: shown only when they fail
-            if st is None and state not in ("queued", "running", "stale"):
-                continue  # finished before this stage was recorded: nothing to show
-            steps.append(_step(key, label, st, job))
-    else:
-        for key, st in stages.items():
-            steps.append(_step(key, key.replace("_", " ").capitalize(), st, job))
+    pipeline = _pipeline_of(cfg, stages)
+    steps = _job_steps(pipeline, stages, state, job)
     label, tone = JOB_STATE_LABELS.get(state, (state.title(), "muted"))
     now = time.time()
     started = job.get("started_at")

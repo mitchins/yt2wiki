@@ -91,22 +91,7 @@ def load_status(paths) -> dict[str, Any]:
     return _read_json(status_path(paths), {}) or {}
 
 
-def validate(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalise a submitted configuration or raise InferenceConfigError.
-
-    Every structural shape is checked before iterating or calling dictionary
-    methods, so malformed JSON yields a controlled error, never an unexpected
-    AttributeError/TypeError from the web layer.
-    """
-    if not isinstance(payload, dict):
-        raise InferenceConfigError("Configuration must be a JSON object with providers/roles.")
-    providers_in = payload.get("providers") or []
-    if isinstance(providers_in, dict):
-        if not all(isinstance(v, dict) for v in providers_in.values()):
-            raise InferenceConfigError("Each provider entry must be an object.")
-        providers_in = [{"name": k, **v} for k, v in providers_in.items()]
-    if not isinstance(providers_in, list):
-        raise InferenceConfigError("“providers” must be a list of endpoint objects.")
+def _normalise_providers(providers_in: list) -> dict[str, dict[str, str]]:
     providers: dict[str, dict[str, str]] = {}
     for p in providers_in:
         if not isinstance(p, dict):
@@ -123,15 +108,39 @@ def validate(payload: dict[str, Any]) -> dict[str, Any]:
         if not re.match(r"^https?://[^\s/]+", url):
             raise InferenceConfigError(f"“{name}” needs an http:// or https:// base URL.")
         providers[name] = {"url": url, "model": model[:200], "api_key_env": key_env}
-    roles_in = payload.get("roles") or {}
+    return providers
+
+
+def _normalise_roles(roles_in: Any, providers: dict[str, dict[str, str]]) -> dict[str, str]:
     if not isinstance(roles_in, dict):
         raise InferenceConfigError("“roles” must map role names to endpoint names.")
     roles = {}
     for role, _label in ROLES:
-        target = str((payload.get("roles") or {}).get(role) or "").strip().lower()
+        target = str((roles_in or {}).get(role) or "").strip().lower()
         if target and target not in providers:
             raise InferenceConfigError(f"{_label} is assigned to an endpoint that is not listed.")
         roles[role] = target
+    return roles
+
+
+def validate(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalise a submitted configuration or raise InferenceConfigError.
+
+    Every structural shape is checked before iterating or calling dictionary
+    methods, so malformed JSON yields a controlled error, never an unexpected
+    AttributeError/TypeError from the web layer.
+    """
+    if not isinstance(payload, dict):
+        raise InferenceConfigError("Configuration must be a JSON object with providers/roles.")
+    providers_in = payload.get("providers") or []
+    if isinstance(providers_in, dict):
+        if not all(isinstance(v, dict) for v in providers_in.values()):
+            raise InferenceConfigError("Each provider entry must be an object.")
+        providers_in = [{"name": k, **v} for k, v in providers_in.items()]
+    if not isinstance(providers_in, list):
+        raise InferenceConfigError("“providers” must be a list of endpoint objects.")
+    providers = _normalise_providers(providers_in)
+    roles = _normalise_roles(payload.get("roles") or {}, providers)
     return {"providers": providers, "roles": roles}
 
 
@@ -245,36 +254,40 @@ def provider_status(paths, name: str) -> dict[str, Any]:
     return status
 
 
+def _asr_env_readiness(paths, cfg: dict, role: str, label: str) -> dict[str, Any]:
+    """Env-supplied ASR is Ready only when that exact URL was already qualified.
+
+    Readiness never probes the network (that would stall every page load);
+    validation happens once in save-test and is cached by endpoint identity.
+    """
+    from ..config import Settings as _Settings
+    try:
+        env_url = (_Settings.load(data_dir=paths.root).asr_identity() or {}).get("url")
+    except Exception:  # noqa: BLE001 - readiness must never raise
+        env_url = ""
+    env_url = (env_url or "").rstrip("/")
+    if env_url:
+        for pname, prov in (cfg.get("providers") or {}).items():
+            if _identity(prov)[0] == env_url and \
+                    provider_status(paths, pname).get("qualified_for_asr"):
+                return {"state": "Ready",
+                        "detail": f"Server URL from environment matches the validated test for “{pname}”.",
+                        "provider": pname, "role": role, "label": label}
+        return {"state": NEEDS_SETUP,
+                "detail": f"Server URL from environment ({env_url}) has no validated test yet. "
+                          "Save & test it in the Transcription card below.",
+                "provider": "", "role": role, "label": label}
+    return {"state": NEEDS_SETUP,
+            "detail": "No transcription endpoint assigned. Add a Whisper HTTP server below.",
+            "provider": "", "role": role, "label": label}
+
+
 def readiness(paths, role: str, label: str) -> dict[str, Any]:
     """Small understandable status: Ready / Needs setup / Failed + reason."""
     cfg = load(paths)
     name = (cfg.get("roles") or {}).get(role)
     if role == "asr" and not name:
-        # An ASR server supplied through the environment is only Ready when
-        # the exact URL matches a stored, still-valid qualification. The URL
-        # alone proves nothing, and readiness never probes the network here
-        # (that would stall every page load); validation happens once in
-        # save-test and is cached by endpoint identity.
-        from ..config import Settings as _Settings
-        try:
-            env_url = (_Settings.load(data_dir=paths.root).asr_identity() or {}).get("url")
-        except Exception:  # noqa: BLE001 - readiness must never raise
-            env_url = ""
-        env_url = (env_url or "").rstrip("/")
-        if env_url:
-            for pname, prov in (cfg.get("providers") or {}).items():
-                if _identity(prov)[0] == env_url and \
-                        provider_status(paths, pname).get("qualified_for_asr"):
-                    return {"state": "Ready",
-                            "detail": f"Server URL from environment matches the validated test for “{pname}”.",
-                            "provider": pname, "role": role, "label": label}
-            return {"state": NEEDS_SETUP,
-                    "detail": f"Server URL from environment ({env_url}) has no validated test yet. "
-                              "Save & test it in the Transcription card below.",
-                    "provider": "", "role": role, "label": label}
-        return {"state": NEEDS_SETUP,
-                "detail": "No transcription endpoint assigned. Add a Whisper HTTP server below.",
-                "provider": "", "role": role, "label": label}
+        return _asr_env_readiness(paths, cfg, role, label)
     if not name:
         return {"state": NEEDS_SETUP,
                 "detail": f"No endpoint assigned for {label.lower()}. Save and test one below.",
@@ -340,6 +353,30 @@ def read_payload_file(paths, path: str | Path) -> dict[str, Any]:
     return data
 
 
+def _probe_models(url: str, headers: dict, timeout: float) -> dict[str, Any]:
+    import httpx
+    t0 = time.time()
+    try:
+        r = httpx.get(f"{url}/models", headers=headers, timeout=timeout)
+    except httpx.HTTPError:
+        return {"models": [], "llm_like": False, "latency_ms": 0, "refused": None}
+    latency = round((time.time() - t0) * 1000)
+    if r.status_code in (401, 403):
+        return {"refused": {"ok": False, "error": "The endpoint refused the API key.",
+                            "status": r.status_code, "checked_at": time.time(), "url": url,
+                            "qualified_for_writer": False, "qualified_for_vision": False}}
+    models: list[str] = []
+    llm_like = False
+    if r.status_code == 200:
+        try:
+            data = r.json()
+            models = [str(m.get("id")) for m in (data.get("data") or []) if m.get("id")]
+            llm_like = True
+        except (ValueError, AttributeError):
+            llm_like = False
+    return {"models": models, "llm_like": llm_like, "latency_ms": latency, "refused": None}
+
+
 def test_endpoint(url: str, api_key_env: str = "", *, timeout: float = 6.0,
                 model: str = "") -> dict[str, Any]:
     """Reachability + capability qualification.
@@ -350,8 +387,6 @@ def test_endpoint(url: str, api_key_env: str = "", *, timeout: float = 6.0,
     connectivity is not qualification — an endpoint may be reachable but
     not qualified for a role.
     """
-    import httpx
-
     url = url.rstrip("/")
     headers = {}
     if api_key_env:
@@ -360,26 +395,10 @@ def test_endpoint(url: str, api_key_env: str = "", *, timeout: float = 6.0,
             return {"ok": False, "error": f"Environment variable {api_key_env} is not set.",
                     "checked_at": time.time(), "url": url}
         headers["Authorization"] = f"Bearer {key}"
-    t0 = time.time()
-    models: list[str] = []
-    llm_like = False
-    try:
-        r = httpx.get(f"{url}/models", headers=headers, timeout=timeout)
-    except httpx.HTTPError:
-        r = None  # connection failed; fall through to the ASR probe
-    else:
-        latency = round((time.time() - t0) * 1000)
-        if r.status_code in (401, 403):
-            return {"ok": False, "error": "The endpoint refused the API key.",
-                    "status": r.status_code, "checked_at": time.time(), "url": url,
-                    "qualified_for_writer": False, "qualified_for_vision": False}
-        if r.status_code == 200:
-            try:
-                data = r.json()
-                models = [str(m.get("id")) for m in (data.get("data") or []) if m.get("id")]
-                llm_like = True
-            except (ValueError, AttributeError):
-                llm_like = False
+    probed = _probe_models(url, headers, timeout)
+    if probed.get("refused"):
+        return probed["refused"]
+    models, llm_like, latency = probed["models"], probed["llm_like"], probed["latency_ms"]
     if not llm_like:
         # Not an LLM-style /models endpoint — maybe a transcription server.
         # Probe the /asr contract with a synthetic tone (proves the protocol,
@@ -451,6 +470,64 @@ def _qualify_writer(url: str, headers: dict[str, str], model: str, timeout: floa
         return False
 
 
+def _jpeg_b64(im) -> str:
+    import base64
+    import io
+    from PIL import ImageDraw
+    buf = io.BytesIO()
+    d = ImageDraw.Draw(im)
+    d.text((4, 4), "V9", fill=(0, 0, 0))
+    im.save(buf, format="JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _vision_probe_content(prompt_template) -> tuple[list, str]:
+    from PIL import Image
+    ims = [Image.new("RGB", (64, 64), (255, 220, 220)), Image.new("RGB", (64, 64), (220, 220, 255))]
+    sec = {"heading": "Battery and Repair Considerations",
+           "body": "Keep the battery below 25% before prying. Use heat to soften adhesive, pry from the bottom edge. The battery is L-shaped, 40 Wh, 5313 mAh."}
+    prompt = prompt_template.format(heading=sec["heading"][:150], body=sec["body"][:1200], n=2, current_pos=1)
+    content: list[dict[str, Any]] = []
+    for i, im in enumerate(ims):
+        content.append({"type": "text", "text": f"Image {i+1}:"})
+        content.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + _jpeg_b64(im)}})
+    content.append({"type": "text", "text": prompt})
+    return content, prompt
+
+
+def _vision_reply_ok(response, parse) -> bool:
+    try:
+        data = response.json()
+        raw = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+        if isinstance(raw, list):
+            raw = " ".join(p.get("text", "") for p in raw if isinstance(p, dict))
+        parsed = parse(raw, 2)
+        return bool(parsed is not None and parsed.get("scores") and parsed.get("decision") in (
+            "KEEP", "REPLACE", "EXPAND", "USE_PAIR", "OMIT"))
+    except Exception:
+        return False
+
+
+def _vision_probe_ok(url, headers, payload, timeout, schema_format, parse) -> bool:
+    import httpx
+    plain_fallback = False
+    for _ in range(3):
+        if plain_fallback:
+            payload.pop("response_format", None)
+        else:
+            payload["response_format"] = schema_format
+        try:
+            r = httpx.post(f"{url}/chat/completions", json=payload, headers=headers, timeout=timeout + 30)
+        except Exception:
+            continue
+        if r.status_code == 400 and not plain_fallback and "schema" in r.text.lower():
+            plain_fallback = True
+            continue
+        if r.status_code == 200 and _vision_reply_ok(r, parse):
+            return True
+    return False
+
+
 def _qualify_vision(url: str, headers: dict[str, str], model: str, timeout: float) -> bool:
     """Genuine V9 rubric probe: 2 images + full editorial judge prompt.
 
@@ -459,34 +536,11 @@ def _qualify_vision(url: str, headers: dict[str, str], model: str, timeout: floa
     endpoints that are reachable but cannot produce the required structured
     output (e.g. Gemma 4 26B's 68% invalid rate observed in V9-Z2).
     """
-    import base64
-    import io
-
-    import httpx
-    from PIL import Image, ImageDraw
-
     try:
         from ..v9.judge import RUBRIC_PROMPT, RUBRIC_SCHEMA, _parse_rubric
     except Exception:
         return False
-    # Two distinguishable frames; content must be real pixels
-    ims = [Image.new("RGB", (64, 64), (255, 220, 220)), Image.new("RGB", (64, 64), (220, 220, 255))]
-    # Add a tiny label so the model has something to ground
-    def b64(im):
-        buf = io.BytesIO()
-        d = ImageDraw.Draw(im)
-        d.text((4, 4), "V9", fill=(0, 0, 0))
-        im.save(buf, format="JPEG", quality=85)
-        return base64.b64encode(buf.getvalue()).decode()
-    # Build the same prompt the publisher sends, with 2 images
-    sec = {"heading": "Battery and Repair Considerations",
-           "body": "Keep the battery below 25% before prying. Use heat to soften adhesive, pry from the bottom edge. The battery is L-shaped, 40 Wh, 5313 mAh.", "t_start": 360.0, "t_end": 400.0}
-    prompt = RUBRIC_PROMPT.format(heading=sec["heading"][:150], body=sec["body"][:1200], n=2, current_pos=1)
-    content: list[dict[str, Any]] = []
-    for i, im in enumerate(ims):
-        content.append({"type": "text", "text": f"Image {i+1}:"})
-        content.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64(im)}})
-    content.append({"type": "text", "text": prompt})
+    content, prompt = _vision_probe_content(RUBRIC_PROMPT)
     payload: dict[str, Any] = {
         "messages": [{"role": "system", "content": "You judge images for technical documentation. Reply JSON only."},
                      {"role": "user", "content": content}],
@@ -507,33 +561,7 @@ def _qualify_vision(url: str, headers: dict[str, str], model: str, timeout: floa
     schema_format = {"type": "json_schema",
                      "json_schema": {"name": "rubric", "schema": RUBRIC_SCHEMA,
                                      "strict": True}}
-    plain_fallback = False
-    for _ in range(3):
-        if plain_fallback:
-            payload.pop("response_format", None)
-        else:
-            payload["response_format"] = schema_format
-        try:
-            r = httpx.post(f"{url}/chat/completions", json=payload, headers=headers, timeout=timeout + 30)
-        except Exception:
-            continue
-        if (r.status_code == 400 and not plain_fallback
-                and "schema" in r.text.lower()):
-            plain_fallback = True
-            continue
-        if r.status_code != 200:
-            continue
-        try:
-            data = r.json()
-            raw = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
-            if isinstance(raw, list):
-                raw = " ".join(p.get("text","") for p in raw if isinstance(p, dict))
-            parsed = _parse_rubric(raw, 2)
-            if parsed is not None and parsed.get("scores") and parsed.get("decision") in ("KEEP","REPLACE","EXPAND","USE_PAIR","OMIT"):
-                return True
-        except Exception:
-            continue
-    return False
+    return _vision_probe_ok(url, headers, payload, timeout, schema_format, _parse_rubric)
 
 
 def _probe_asr(url: str, headers: dict[str, str], model: str, timeout: float) -> dict[str, Any]:
