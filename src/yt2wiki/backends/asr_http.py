@@ -220,6 +220,52 @@ def _opt_float(value: Any) -> float | None:
     return f if math.isfinite(f) else None
 
 
+def _parse_words(i: int, raw_words: Any, problems: list[str]) -> list[Word]:
+    """Parse one segment's word list, recording structural problems."""
+    words: list[Word] = []
+    if not isinstance(raw_words, list):
+        problems.append(f"segment {i}: 'words' is not a list")
+        raw_words = []
+    for j, rw in enumerate(raw_words):
+        if not isinstance(rw, dict):
+            problems.append(f"segment {i} word {j}: not an object")
+            continue
+        ws, we = _opt_float(rw.get("start")), _opt_float(rw.get("end"))
+        wtext = rw.get("word") if isinstance(rw.get("word"), str) else ""
+        if ws is None or we is None or not wtext:
+            problems.append(f"segment {i} word {j}: bad timestamp/text")
+            continue
+        words.append(Word(start=ws, end=we, word=wtext,
+                          probability=_opt_float(rw.get("probability"))))
+    return words
+
+
+def _parse_segment(i: int, raw: Any, problems: list[str], *,
+                   require_words: bool, server: str) -> Segment | None:
+    """Parse one /asr segment; None when the segment is unusable."""
+    if not isinstance(raw, dict):
+        problems.append(f"segment {i}: not an object")
+        return None
+    start = _opt_float(raw.get("start"))
+    end = _opt_float(raw.get("end"))
+    text = raw.get("text") if isinstance(raw.get("text"), str) else ""
+    if start is None or end is None:
+        problems.append(f"segment {i}: non-numeric timestamps")
+        return None
+    words = _parse_words(i, raw.get("words") or [], problems)
+    if require_words and not words:
+        problems.append(
+            f"segment {i} [{start:.2f}-{end:.2f}]: no word timestamps "
+            f"(server {server} is text-only for this span)"
+        )
+    return Segment(
+        start=start, end=end, text=text.strip(), words=words,
+        avg_logprob=_opt_float(raw.get("avg_logprob")),
+        no_speech_prob=_opt_float(raw.get("no_speech_prob")),
+        compression_ratio=_opt_float(raw.get("compression_ratio")),
+    )
+
+
 def parse(
     data: dict[str, Any],
     *,
@@ -245,44 +291,10 @@ def parse(
         raw_segs = []
     segments: list[Segment] = []
     for i, raw in enumerate(raw_segs):
-        if not isinstance(raw, dict):
-            problems.append(f"segment {i}: not an object")
-            continue
-        start = _opt_float(raw.get("start"))
-        end = _opt_float(raw.get("end"))
-        text = raw.get("text") if isinstance(raw.get("text"), str) else ""
-        if start is None or end is None:
-            problems.append(f"segment {i}: non-numeric timestamps")
-            continue
-        words: list[Word] = []
-        raw_words = raw.get("words") or []
-        if not isinstance(raw_words, list):
-            problems.append(f"segment {i}: 'words' is not a list")
-            raw_words = []
-        for j, rw in enumerate(raw_words):
-            if not isinstance(rw, dict):
-                problems.append(f"segment {i} word {j}: not an object")
-                continue
-            ws, we = _opt_float(rw.get("start")), _opt_float(rw.get("end"))
-            wtext = rw.get("word") if isinstance(rw.get("word"), str) else ""
-            if ws is None or we is None or not wtext:
-                problems.append(f"segment {i} word {j}: bad timestamp/text")
-                continue
-            words.append(Word(start=ws, end=we, word=wtext,
-                              probability=_opt_float(rw.get("probability"))))
-        if require_words and not words:
-            problems.append(
-                f"segment {i} [{start:.2f}-{end:.2f}]: no word timestamps "
-                f"(server {server} is text-only for this span)"
-            )
-        segments.append(
-            Segment(
-                start=start, end=end, text=text.strip(), words=words,
-                avg_logprob=_opt_float(raw.get("avg_logprob")),
-                no_speech_prob=_opt_float(raw.get("no_speech_prob")),
-                compression_ratio=_opt_float(raw.get("compression_ratio")),
-            )
-        )
+        seg = _parse_segment(i, raw, problems, require_words=require_words,
+                             server=server)
+        if seg is not None:
+            segments.append(seg)
     segments.sort(key=lambda s: s.start)
     transcript = Transcript(
         language=language.strip(), language_probability=None,
@@ -297,6 +309,46 @@ def parse(
             f"({len(problems)} problems): " + "; ".join(problems[:12])
         )
     return transcript
+
+
+def _validate_words(i: int, s: Segment, problems: list[str]) -> int:
+    """Per-word shape checks for one segment; returns degenerate-word count."""
+    degenerate = 0
+    prev_w_end = s.start
+    for j, w in enumerate(s.words):
+        if not (math.isfinite(w.start) and math.isfinite(w.end)):
+            problems.append(f"segment {i} word {j}: non-finite timestamps")
+            continue
+        if not (w.start <= w.end):
+            problems.append(f"segment {i} word {j}: bad span")
+        elif w.start == w.end:
+            degenerate += 1
+        if w.start < s.start - _WORD_TOLERANCE_S or w.end > s.end + _WORD_TOLERANCE_S:
+            problems.append(
+                f"segment {i} word {j} [{w.start:.2f}-{w.end:.2f}] "
+                f"outside segment [{s.start:.2f}-{s.end:.2f}]")
+        if w.start < prev_w_end - _WORD_TOLERANCE_S:
+            problems.append(f"segment {i} word {j}: out of order")
+        prev_w_end = max(prev_w_end, w.start)
+    return degenerate
+
+
+def _validate_segment(i: int, s: Segment, duration_s: float,
+                      problems: list[str], prev_start: float) -> float:
+    """Per-segment shape checks; returns the updated prev_start marker."""
+    if not (math.isfinite(s.start) and math.isfinite(s.end)):
+        problems.append(f"segment {i}: non-finite timestamps")
+        return prev_start
+    if not (0 <= s.start < s.end):
+        problems.append(f"segment {i}: bad span [{s.start}, {s.end}]")
+    if s.end > duration_s + _END_TOLERANCE_S:
+        problems.append(
+            f"segment {i}: end {s.end:.2f} exceeds duration {duration_s:.2f}")
+    if s.start < prev_start - 0.01:
+        problems.append(f"segment {i}: starts before previous segment")
+    if not s.text.strip():
+        problems.append(f"segment {i}: empty text")
+    return max(prev_start, s.start)
 
 
 def validate(t: Transcript, duration_s: float, *,
@@ -322,36 +374,11 @@ def validate(t: Transcript, duration_s: float, *,
     degenerate_segs = 0
     prev_start = -math.inf
     for i, s in enumerate(t.segments):
-        if not (math.isfinite(s.start) and math.isfinite(s.end)):
-            problems.append(f"segment {i}: non-finite timestamps")
-            continue
-        if not (0 <= s.start < s.end):
-            problems.append(f"segment {i}: bad span [{s.start}, {s.end}]")
-        if s.end > duration_s + _END_TOLERANCE_S:
-            problems.append(
-                f"segment {i}: end {s.end:.2f} exceeds duration {duration_s:.2f}")
-        if s.start < prev_start - 0.01:
-            problems.append(f"segment {i}: starts before previous segment")
-        prev_start = max(prev_start, s.start)
-        if not s.text.strip():
-            problems.append(f"segment {i}: empty text")
-        prev_w_end = s.start
-        seg_degenerate = 0
-        for j, w in enumerate(s.words):
-            if not (math.isfinite(w.start) and math.isfinite(w.end)):
-                problems.append(f"segment {i} word {j}: non-finite timestamps")
-                continue
-            if not (w.start <= w.end):
-                problems.append(f"segment {i} word {j}: bad span")
-            elif w.start == w.end:
-                seg_degenerate += 1
-            if w.start < s.start - _WORD_TOLERANCE_S or w.end > s.end + _WORD_TOLERANCE_S:
-                problems.append(
-                    f"segment {i} word {j} [{w.start:.2f}-{w.end:.2f}] "
-                    f"outside segment [{s.start:.2f}-{s.end:.2f}]")
-            if w.start < prev_w_end - _WORD_TOLERANCE_S:
-                problems.append(f"segment {i} word {j}: out of order")
-            prev_w_end = max(prev_w_end, w.start)
+        finite = math.isfinite(s.start) and math.isfinite(s.end)
+        prev_start = _validate_segment(i, s, duration_s, problems, prev_start)
+        if not finite:
+            continue  # word checks need finite bounds (base behaviour)
+        seg_degenerate = _validate_words(i, s, problems)
         if seg_degenerate:
             degenerate += seg_degenerate
             degenerate_segs += 1

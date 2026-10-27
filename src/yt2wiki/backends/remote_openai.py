@@ -92,9 +92,11 @@ class RemoteOpenAIBackend(BaseBackend):
             return {"type": "json_object"}
         return None
 
-    def chat(self, messages: Sequence[dict[str, str]], *, max_new_tokens: int = 2048, temperature: float = 0.1, top_p: float = 0.9, stop: Sequence[str] = (), json_mode: bool = False, response_schema: dict[str, Any] | None = None, schema_name: str = "response") -> str:
-        if not self.loaded:
-            raise RuntimeError(_NOT_LOADED_MSG)
+    def _chat_payload(self, messages: Sequence[dict[str, str]], *, max_new_tokens: int,
+                      temperature: float, top_p: float, stop: Sequence[str],
+                      json_mode: bool, response_schema: dict[str, Any] | None,
+                      schema_name: str) -> dict[str, Any]:
+        """OpenAI-compatible request body for one chat call."""
         payload: dict[str, Any] = {
             "messages": list(messages),
             "max_tokens": max_new_tokens,
@@ -108,7 +110,10 @@ class RemoteOpenAIBackend(BaseBackend):
             payload["response_format"] = fmt
         if stop:
             payload["stop"] = list(stop)
-        data = self._post(payload)
+        return payload
+
+    def _parse_chat_response(self, data: dict[str, Any]) -> str:
+        """Extract assistant text from an OpenAI-compatible response body."""
         # OpenAI-compatible response
         try:
             choice = data["choices"][0]
@@ -135,6 +140,17 @@ class RemoteOpenAIBackend(BaseBackend):
         except Exception as exc:
             raise RuntimeError(f"remote chat parse failed: {exc} payload={data}") from exc
 
+    def chat(self, messages: Sequence[dict[str, str]], *, max_new_tokens: int = 2048, temperature: float = 0.1, top_p: float = 0.9, stop: Sequence[str] = (), json_mode: bool = False, response_schema: dict[str, Any] | None = None, schema_name: str = "response") -> str:
+        if not self.loaded:
+            raise RuntimeError(_NOT_LOADED_MSG)
+        payload = self._chat_payload(messages, max_new_tokens=max_new_tokens,
+                                     temperature=temperature, top_p=top_p,
+                                     stop=stop, json_mode=json_mode,
+                                     response_schema=response_schema,
+                                     schema_name=schema_name)
+        data = self._post(payload)
+        return self._parse_chat_response(data)
+
     def chat_json(self, messages: Sequence[dict[str, str]], *, max_new_tokens: int = 2048, temperature: float = 0.1, response_schema: dict[str, Any] | None = None, schema_name: str = "response", **kw) -> Any:
         raw = self.chat(messages, max_new_tokens=max_new_tokens, temperature=temperature, json_mode=True, response_schema=response_schema, schema_name=schema_name, **kw)
         from .llm import extract_json
@@ -154,9 +170,8 @@ class RemoteOpenAIBackend(BaseBackend):
         im.convert("RGB").save(buf, format="JPEG", quality=85)
         return base64.b64encode(buf.getvalue()).decode()
 
-    def rank_images(self, images: Sequence[Any], prompt: str, *, max_new_tokens: int = 400, temperature: float = 0.0, system: str | None = None, response_schema: dict[str, Any] | None = None, schema_name: str = "response") -> str:
-        if not self.loaded:
-            raise RuntimeError(_NOT_LOADED_MSG)
+    def _vision_content(self, images: Sequence[Any], prompt: str) -> list[dict[str, Any]]:
+        """Multimodal content parts: numbered image parts plus the prompt."""
         content: list[dict[str, Any]] = []
         for i, im in enumerate(images):
             content.append({"type":"text","text":f"Image {i+1}:"})
@@ -166,17 +181,11 @@ class RemoteOpenAIBackend(BaseBackend):
             except Exception as exc:
                 log.warning("remote encode failed for image %d: %s", i, exc)
         content.append({"type":"text","text":prompt})
-        msgs: list[dict[str, Any]] = []
-        if system:
-            msgs.append({"role":"system","content":system})
-        msgs.append({"role":"user","content":content})
-        payload: dict[str, Any] = {"messages": msgs, "max_tokens": max_new_tokens, "temperature": temperature}
-        if self.model_name:
-            payload["model"] = self.model_name
-        want_schema = response_schema is not None and self._schema_with_images is not False
-        fmt = self._response_format(False, response_schema if want_schema else None, schema_name)
-        if fmt is not None:
-            payload["response_format"] = fmt
+        return content
+
+    def _post_vision(self, payload: dict[str, Any], *, want_schema: bool,
+                     response_schema: dict[str, Any] | None) -> dict[str, Any]:
+        """POST the vision request, degrading schemas-once when refused."""
         try:
             data = self._post(payload)
         except httpx.HTTPStatusError as exc:
@@ -200,6 +209,10 @@ class RemoteOpenAIBackend(BaseBackend):
         else:
             if want_schema and response_schema is not None:
                 self._schema_with_images = True
+        return data
+
+    @staticmethod
+    def _parse_vision_response(data: dict[str, Any]) -> str:
         try:
             content = data["choices"][0]["message"]["content"]
             if content is None:
@@ -214,6 +227,24 @@ class RemoteOpenAIBackend(BaseBackend):
             raise
         except Exception as exc:
             raise RuntimeError(f"remote vision parse failed: {exc} payload={data}") from exc
+
+    def rank_images(self, images: Sequence[Any], prompt: str, *, max_new_tokens: int = 400, temperature: float = 0.0, system: str | None = None, response_schema: dict[str, Any] | None = None, schema_name: str = "response") -> str:
+        if not self.loaded:
+            raise RuntimeError(_NOT_LOADED_MSG)
+        msgs: list[dict[str, Any]] = []
+        if system:
+            msgs.append({"role":"system","content":system})
+        msgs.append({"role":"user","content":self._vision_content(images, prompt)})
+        payload: dict[str, Any] = {"messages": msgs, "max_tokens": max_new_tokens, "temperature": temperature}
+        if self.model_name:
+            payload["model"] = self.model_name
+        want_schema = response_schema is not None and self._schema_with_images is not False
+        fmt = self._response_format(False, response_schema if want_schema else None, schema_name)
+        if fmt is not None:
+            payload["response_format"] = fmt
+        data = self._post_vision(payload, want_schema=want_schema,
+                                 response_schema=response_schema)
+        return self._parse_vision_response(data)
 
     def describe_batch(self, images: Sequence[Any], prompt: str, *, max_new_tokens: int = 120, temperature: float = 0.0, system: str | None = None, batch_size: int = 4) -> list[str]:
         # One call per image (simple, handles any batch_size)

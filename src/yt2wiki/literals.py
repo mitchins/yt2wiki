@@ -91,6 +91,25 @@ def normalize_value(value: str) -> str:
     return s
 
 
+# Ordered scanners: high-confidence identifiers first so their spans are
+# claimed before looser patterns run. (pattern, kind, ctx_before, ctx_after,
+# value_fn) — value_fn None means "the whole match".
+_SCANNERS: tuple[tuple["re.Pattern[str]", str, int, int, Any], ...] = (
+    (IP_RE, "ip_address", 30, 30, None),
+    (MAC_RE, "mac_address", 30, 30, None),
+    (UUID_RE, "uuid", 30, 30, None),
+    (HEX_RE, "hex", 30, 30, None),
+    (MEASURE_RE, "measurement", 40, 40, None),
+    (PORT_RE, "port", 30, 30, lambda m: f"port {m.group(1)}"),
+    (APPSEC_RE, "version", 40, 40, None),
+    (VERSION_RE, "version", 40, 40, None),
+    (PATH_RE, "path", 30, 20, lambda m: m.group(0).rstrip(".,;:")),
+    (KEYVALUE_RE, "keyvalue", 25, 25, lambda m: f"{m.group(1)}={m.group(2)}"),
+    (FLAG_RE, "flag", 25, 25,
+     lambda m: m.group(1) + (f" {m.group(2)}" if m.group(2) else "")),
+)
+
+
 def extract_literals(
     text: str,
     *,
@@ -132,53 +151,12 @@ def extract_literals(
     def free(m: "re.Match[str]") -> bool:
         return not any(a <= m.start() < b for a, b in claimed)
 
-    for pattern, kind in (
-        (IP_RE, "ip_address"),
-        (MAC_RE, "mac_address"),
-        (UUID_RE, "uuid"),
-        (HEX_RE, "hex"),
-    ):
+    for pattern, kind, before, after, value_fn in _SCANNERS:
         for m in pattern.finditer(text):
             if not free(m):
                 continue
-            add(kind, m.group(0), text[max(0, m.start() - 30):m.end() + 30], m.span())
-
-    for m in MEASURE_RE.finditer(text):
-        if not free(m):
-            continue
-        add("measurement", m.group(0), text[max(0, m.start() - 40):m.end() + 40], m.span())
-
-    for m in PORT_RE.finditer(text):
-        if not free(m):
-            continue
-        add("port", f"port {m.group(1)}", text[max(0, m.start() - 30):m.end() + 30], m.span())
-
-    for m in APPSEC_RE.finditer(text):
-        if not free(m):
-            continue
-        add("version", m.group(0), text[max(0, m.start() - 40):m.end() + 40], m.span())
-
-    for m in VERSION_RE.finditer(text):
-        if not free(m):
-            continue
-        add("version", m.group(0), text[max(0, m.start() - 40):m.end() + 40], m.span())
-
-    for m in PATH_RE.finditer(text):
-        if not free(m):
-            continue
-        add("path", m.group(0).rstrip(".,;:"), text[max(0, m.start() - 30):m.end() + 20], m.span())
-
-    for m in KEYVALUE_RE.finditer(text):
-        if not free(m):
-            continue
-        add("keyvalue", f"{m.group(1)}={m.group(2)}",
-            text[max(0, m.start() - 25):m.end() + 25], m.span())
-
-    for m in FLAG_RE.finditer(text):
-        if not free(m):
-            continue
-        add("flag", m.group(1) + (f" {m.group(2)}" if m.group(2) else ""),
-            text[max(0, m.start() - 25):m.end() + 25], m.span())
+            value = value_fn(m) if value_fn else m.group(0)
+            add(kind, value, text[max(0, m.start() - before):m.end() + after], m.span())
 
     for line in text.splitlines():
         stripped = line.strip()
@@ -220,23 +198,34 @@ def _command_fragments(line: str) -> list[str]:
     ``&&``/``;``/``|``, and the "run the command ..." narrative form.
     """
     out: list[str] = []
+    for body, permissive in _fragment_bodies(line):
+        for fragment in _OPERATOR_SPLIT.split(body):
+            cleaned = _normalise_fragment(fragment, permissive=permissive)
+            if cleaned and cleaned not in out:
+                out.append(cleaned)
+    return out
+
+
+def _fragment_bodies(line: str) -> list[tuple[str, bool]]:
+    """Candidate command bodies: cue-following text first (permissive), then
+    the bare line (conservative)."""
     cues: list[str] = []
     for m in COMMAND_CUE_RE.finditer(line):
         cues.append(line[m.end():])
     bodies = cues + [line]
-    for body in bodies:
-        permissive = bool(cues) and body is cues[0]
-        for fragment in _OPERATOR_SPLIT.split(body):
-            frag = fragment.strip().lstrip("$#> ").strip()
-            if len(frag) < 3 or len(frag) > 160:
-                continue
-            if frag.rstrip()[-1:] in ".,;:!?":
-                continue
-            if looks_like_command(frag, permissive=permissive):
-                cleaned = _clean_command(frag)
-                if cleaned and cleaned not in out:
-                    out.append(cleaned)
-    return out
+    return [(body, bool(cues) and body is cues[0]) for body in bodies]
+
+
+def _normalise_fragment(fragment: str, *, permissive: bool) -> str:
+    """Length/punctuation gate, acceptance test and narration strip."""
+    frag = fragment.strip().lstrip("$#> ").strip()
+    if len(frag) < 3 or len(frag) > 160:
+        return ""
+    if frag.rstrip()[-1:] in ".,;:!?":
+        return ""
+    if not looks_like_command(frag, permissive=permissive):
+        return ""
+    return _clean_command(frag)
 
 
 def looks_like_command(fragment: str, *, permissive: bool = False) -> bool:

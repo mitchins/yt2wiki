@@ -122,62 +122,50 @@ def _caption_html(caption: str) -> str:
     return f'<span class="cap-label{quiet}">{caption}</span>'
 
 
-def enhance(body_html: str, *,
-            asset_url: Callable[[str], str | None] | None = None,
-            asset_size: Callable[[str], tuple[int, int] | None] | None = None,
-            zoom_links: bool = True,
-            numbered_sections: bool = False) -> tuple[str, list[TocEntry]]:
-    """Post-process `markdown_to_html` output for reading.
+def _figure_html(m: "re.Match[str]",
+                 asset_url: Callable[[str], str | None] | None,
+                 asset_size: Callable[[str], tuple[int, int] | None] | None,
+                 zoom_links: bool) -> str:
+    """Render one `![caption](assets/<file>)` figure; '' drops a missing asset."""
+    alt, src, caption = m.group(1), m.group(2), m.group(3)
+    url = src
+    size = None
+    if src.startswith(_ASSETS_PREFIX):
+        name = src[len(_ASSETS_PREFIX):]
+        if asset_url is not None:
+            url = asset_url(name)
+            if url is None:
+                return ""
+        if asset_size is not None:
+            size = asset_size(name)
+    dims = f' width="{size[0]}" height="{size[1]}"' if size else ""
+    img = f'<img src="{url}" alt="{alt}"{dims} loading="lazy" decoding="async">'
+    if zoom_links:
+        img = f'<a class="frame-zoom" href="{url}" data-zoom>{img}</a>'
+    cap = f"<figcaption>{_caption_html(caption)}</figcaption>" if caption else ""
+    return f'<figure class="frame">{img}{cap}</figure>'
 
-    `asset_url(filename)` maps an `assets/<file>` reference to a served URL,
-    returning None when the file is missing (the figure is then dropped).
-    """
 
-    def figure(m: "re.Match[str]") -> str:
-        alt, src, caption = m.group(1), m.group(2), m.group(3)
-        url = src
-        size = None
-        if src.startswith(_ASSETS_PREFIX):
-            name = src[len(_ASSETS_PREFIX):]
-            if asset_url is not None:
-                url = asset_url(name)
-                if url is None:
-                    return ""
-            if asset_size is not None:
-                size = asset_size(name)
-        dims = f' width="{size[0]}" height="{size[1]}"' if size else ""
-        img = f'<img src="{url}" alt="{alt}"{dims} loading="lazy" decoding="async">'
-        if zoom_links:
-            img = f'<a class="frame-zoom" href="{url}" data-zoom>{img}</a>'
-        cap = f"<figcaption>{_caption_html(caption)}</figcaption>" if caption else ""
-        return f'<figure class="frame">{img}{cap}</figure>'
+def _link_html(m: "re.Match[str]",
+               asset_url: Callable[[str], str | None] | None) -> str:
+    """Render one inline link, resolving asset links to their served URLs."""
+    bang, href, label = m.group(1), m.group(2), m.group(3)
+    if href.startswith(_ASSETS_PREFIX):
+        # An inline image the block renderer left as a link: point it at
+        # the served asset, or keep just the text when the file is gone.
+        url = asset_url(href[len(_ASSETS_PREFIX):]) if asset_url is not None else href
+        return f'<a href="{url}">{label}</a>' if url else label
+    external = href.startswith(("http://", "https://"))
+    attrs = ' target="_blank" rel="noopener noreferrer"' if external else ""
+    if _TS_LABEL.match(_strip_tags(label)):
+        return f'{bang}<a class="ts" href="{href}"{attrs}>{label.replace("-", "–")}</a>'
+    return f'{bang}<a href="{href}"{attrs}>{label}</a>'
 
-    out = _FIGURE.sub(figure, body_html)
 
-    def link(m: "re.Match[str]") -> str:
-        bang, href, label = m.group(1), m.group(2), m.group(3)
-        if href.startswith(_ASSETS_PREFIX):
-            # An inline image the block renderer left as a link: point it at
-            # the served asset, or keep just the text when the file is gone.
-            url = asset_url(href[len(_ASSETS_PREFIX):]) if asset_url is not None else href
-            return f'<a href="{url}">{label}</a>' if url else label
-        external = href.startswith(("http://", "https://"))
-        attrs = ' target="_blank" rel="noopener noreferrer"' if external else ""
-        if _TS_LABEL.match(_strip_tags(label)):
-            return f'{bang}<a class="ts" href="{href}"{attrs}>{label.replace("-", "–")}</a>'
-        return f'{bang}<a href="{href}"{attrs}>{label}</a>'
-
-    out = _LINK.sub(link, out)
-    out = _BARE_TS.sub(lambda m: f'<span class="ts">{m.group(1).replace("-", "–")}</span>', out)
-
-    def callout(m: "re.Match[str]") -> str:
-        kind = "warn" if m.group(1).lower() in ("warning", "caution", "important") else "tip"
-        return f'<blockquote class="callout {kind}"><p><strong>{m.group(1)}</strong>'
-
-    out = _CALLOUT.sub(callout, out)
-
+def _section_html(out: str, used: set[str],
+                  numbered_sections: bool) -> tuple[str, list[TocEntry]]:
+    """Wrap h2-delimited chunks in <section> elements and build the TOC."""
     toc: list[TocEntry] = []
-    used: set[str] = set()
     chunks = re.split(r"(?=<h2>)", out)
     rendered = []
     for chunk in chunks:
@@ -202,3 +190,26 @@ def enhance(body_html: str, *,
             body)
         rendered.append(f'<section class="sec" aria-labelledby="{anchor}">{head}{body}</section>')
     return "\n".join(rendered), toc
+
+
+def enhance(body_html: str, *,
+            asset_url: Callable[[str], str | None] | None = None,
+            asset_size: Callable[[str], tuple[int, int] | None] | None = None,
+            zoom_links: bool = True,
+            numbered_sections: bool = False) -> tuple[str, list[TocEntry]]:
+    """Post-process `markdown_to_html` output for reading.
+
+    `asset_url(filename)` maps an `assets/<file>` reference to a served URL,
+    returning None when the file is missing (the figure is then dropped).
+    """
+    out = _FIGURE.sub(lambda m: _figure_html(m, asset_url, asset_size, zoom_links),
+                      body_html)
+    out = _LINK.sub(lambda m: _link_html(m, asset_url), out)
+    out = _BARE_TS.sub(lambda m: f'<span class="ts">{m.group(1).replace("-", "–")}</span>', out)
+
+    def callout(m: "re.Match[str]") -> str:
+        kind = "warn" if m.group(1).lower() in ("warning", "caution", "important") else "tip"
+        return f'<blockquote class="callout {kind}"><p><strong>{m.group(1)}</strong>'
+
+    out = _CALLOUT.sub(callout, out)
+    return _section_html(out, set(), numbered_sections)

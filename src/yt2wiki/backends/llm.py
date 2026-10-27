@@ -201,30 +201,37 @@ def _strip_fence(text: str) -> str:
     return m.group(1).strip() if m else text.strip()
 
 
+def _step_string_state(ch: str, in_string: bool, escaped: bool) -> tuple[bool, bool]:
+    """Consume one char of a string-aware JSON scanner.
+
+    Returns the updated ``(in_string, escaped)`` state. Callers check the
+    returned ``in_string`` before treating the char as a bracket.
+    """
+    if in_string:
+        if escaped:
+            return True, False
+        if ch == "\\":
+            return True, True
+        if ch == '"':
+            return False, False
+        return True, False
+    if ch == '"':
+        return True, False
+    return False, False
+
+
 def _json_span(text: str) -> str | None:
-    start = None
-    for i, ch in enumerate(text):
-        if ch in "{[":
-            start = i
-            break
+    start = next((i for i, c in enumerate(text) if c in "{["), None)
     if start is None:
         return None
     depth = 0
-    in_string = False
-    escaped = False
+    in_string = escaped = False
     for i in range(start, len(text)):
         ch = text[i]
+        in_string, escaped = _step_string_state(ch, in_string, escaped)
         if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
             continue
-        if ch == '"':
-            in_string = True
-        elif ch in "{[":
+        if ch in "{[":
             depth += 1
         elif ch in "}]":
             depth -= 1
@@ -235,29 +242,17 @@ def _json_span(text: str) -> str | None:
 
 def _scan(text: str) -> tuple[int, list[str], bool]:
     """Return (start, open stack, in-string flag) for a JSON fragment."""
-    start = None
-    for i, ch in enumerate(text):
-        if ch in "{[":
-            start = i
-            break
-    if start is None:
+    start = next((i for i, c in enumerate(text) if c in "{["), -1)
+    if start == -1:
         return -1, [], False
     stack: list[str] = []
-    in_string = False
-    escaped = False
+    in_string = escaped = False
     for i in range(start, len(text)):
         ch = text[i]
+        in_string, escaped = _step_string_state(ch, in_string, escaped)
         if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
             continue
-        if ch == '"':
-            in_string = True
-        elif ch in "{[":
+        if ch in "{[":
             stack.append(ch)
         elif ch in "}]":
             if stack:

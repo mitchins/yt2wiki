@@ -334,59 +334,82 @@ def promoted_stage(article_dir: Path, stage_dir: Path, gid: str, *,
     staged_rels = {p.relative_to(stage_dir) for p in staged}
     completed: list[tuple[Path | None, Path, bool]] = []  # (backup, canonical, promoted?)
     try:
-        for src in staged:
-            rel = src.relative_to(stage_dir)
-            dest = article_dir / rel
-            backup: Path | None = None
-            if dest.is_file() or dest.is_symlink() or dest.is_dir():
-                backup = backup_dir / rel
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(dest), str(backup))
-            else:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-            # Record intent before the move: if the move itself fails, the
-            # rollback below still restores the moved-aside original.
-            completed.append((backup, dest, True))
-            shutil.move(str(src), str(dest))
+        _promote_staged(staged, stage_dir, article_dir, backup_dir, completed)
         if prune_assets:
-            canonical_assets = article_dir / "assets"
-            staged_assets = {r for r in staged_rels if r.parts[:1] == ("assets",)}
-            if canonical_assets.is_dir():
-                for existing in sorted(canonical_assets.glob("*")):
-                    rel = existing.relative_to(article_dir)
-                    if rel not in staged_assets and existing.is_file():
-                        backup = backup_dir / rel
-                        backup.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(existing), str(backup))
-                        # Prune moves are single-op: only record success, so a
-                        # failed prune never discards an untouched original.
-                        completed.append((backup, existing, False))
+            _prune_canonical_assets(article_dir, backup_dir, staged_rels, completed)
         yield
     except Exception:
-        restore_failed = False
-        for backup, dest, promoted in reversed(completed):
-            try:
-                # Remove only what promotion put there; never touch a file
-                # promotion did not create.
-                if promoted and (dest.is_file() or dest.is_symlink()):
-                    dest.unlink()
-                if backup is not None and backup.exists() and not dest.exists():
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(backup), str(dest))
-            except Exception:  # noqa: BLE001
-                restore_failed = True
-                log.exception("promotion rollback failed for %s", dest)
-        shutil.rmtree(stage_dir, ignore_errors=True)
-        if restore_failed:
-            # Keep the leftovers for manual inspection and say so loudly;
-            # re-running publication heals the canonical state.
-            log.error("promotion rollback incomplete; leftovers kept under %s",
-                      backup_dir)
-        else:
-            shutil.rmtree(backup_dir, ignore_errors=True)
+        _rollback_promotion(completed, stage_dir, backup_dir)
         raise
     else:
         shutil.rmtree(stage_dir, ignore_errors=True)
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
+
+
+def _promote_staged(staged: list[Path], stage_dir: Path, article_dir: Path,
+                    backup_dir: Path,
+                    completed: list[tuple[Path | None, Path, bool]]) -> None:
+    """Move staged files over canonical paths, backing up what they replace."""
+    for src in staged:
+        rel = src.relative_to(stage_dir)
+        dest = article_dir / rel
+        backup: Path | None = None
+        if dest.is_file() or dest.is_symlink() or dest.is_dir():
+            backup = backup_dir / rel
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(dest), str(backup))
+        else:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        # Record intent before the move: if the move itself fails, the
+        # rollback below still restores the moved-aside original.
+        completed.append((backup, dest, True))
+        shutil.move(str(src), str(dest))
+
+
+def _prune_canonical_assets(article_dir: Path, backup_dir: Path,
+                            staged_rels: set[Path],
+                            completed: list[tuple[Path | None, Path, bool]]) -> None:
+    """Move canonical assets absent from the stage into the backup dir."""
+    canonical_assets = article_dir / "assets"
+    staged_assets = {r for r in staged_rels if r.parts[:1] == ("assets",)}
+    if not canonical_assets.is_dir():
+        return
+    for existing in sorted(canonical_assets.glob("*")):
+        rel = existing.relative_to(article_dir)
+        if rel not in staged_assets and existing.is_file():
+            backup = backup_dir / rel
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(existing), str(backup))
+            # Prune moves are single-op: only record success, so a
+            # failed prune never discards an untouched original.
+            completed.append((backup, existing, False))
+
+
+def _rollback_promotion(completed: list[tuple[Path | None, Path, bool]],
+                        stage_dir: Path, backup_dir: Path) -> None:
+    """Undo promotion in reverse order; log loudly if restoration is partial."""
+    restore_failed = False
+    for backup, dest, promoted in reversed(completed):
+        try:
+            # Remove only what promotion put there; never touch a file
+            # promotion did not create.
+            if promoted and (dest.is_file() or dest.is_symlink()):
+                dest.unlink()
+            if backup is not None and backup.exists() and not dest.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(backup), str(dest))
+        except Exception:  # noqa: BLE001
+            restore_failed = True
+            log.exception("promotion rollback failed for %s", dest)
+    shutil.rmtree(stage_dir, ignore_errors=True)
+    if restore_failed:
+        # Keep the leftovers for manual inspection and say so loudly;
+        # re-running publication heals the canonical state.
+        log.error("promotion rollback incomplete; leftovers kept under %s",
+                  backup_dir)
+    else:
         shutil.rmtree(backup_dir, ignore_errors=True)
 
 
