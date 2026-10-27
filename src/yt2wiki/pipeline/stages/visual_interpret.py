@@ -109,7 +109,8 @@ def _describe_batch(backend, ctx: StageContext, images: list[Any],
             dense_candidates.append((frame, payload))
         else:
             _store(ctx, frame, payload)
-    return dense_candidates
+    stored = len(payloads) - len(dense_candidates)
+    return stored, dense_candidates
 
 
 def _dense_text_pass(backend, ctx: StageContext,
@@ -148,7 +149,7 @@ def _dense_text_pass(backend, ctx: StageContext,
             payload["crop_tiles"] = used.get(frame["frame_id"]) or []
             crops_used += len(payload["crop_tiles"])
         _store(ctx, frame, payload)
-    return crops_used
+    return crops_used, len(dense_candidates)
 
 
 def run(ctx: StageContext) -> dict[str, Any]:
@@ -189,11 +190,14 @@ def run(ctx: StageContext) -> dict[str, Any]:
             images, payloads = _load_images(chunk)
             if not images:
                 continue
-            dense_candidates = _describe_batch(
+            stored, dense_candidates = _describe_batch(
                 backend, ctx, images, payloads, t, batch)
+            processed += stored
             if dense_candidates and t.vision_dense_text_pass:
-                crops_used += _dense_text_pass(backend, ctx, dense_candidates, batch)
-            processed += len(payloads)
+                crops, stored_dense = _dense_text_pass(
+                    backend, ctx, dense_candidates, batch)
+                crops_used += crops
+                processed += stored_dense
             ctx.progress(f"interpreted {processed + len(frames) - len(todo)}/{len(frames)} frames")
             ctx.artifacts["_force_vision"] = False
 

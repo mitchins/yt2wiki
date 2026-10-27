@@ -40,9 +40,8 @@ def test_list_type_switch_closes_previous_list():
     assert html.count('<ul class="plain">') == 1
 
 
-def test_rule_ladder_order_preserved():
+def test_rule_ladder_codes_and_details():
     """broken_citation -> mismatched -> unsupported stays per-sentence, in order."""
-    from yt2wiki.literals import Literal
     from yt2wiki.pipeline.stages.verify import _rule_unsupported
     from yt2wiki.records import Evidence
 
@@ -66,9 +65,8 @@ def test_rule_ladder_order_preserved():
           " <!-- cite: step=3 ev=ev-bbb222 t=100-105 frames=- -->\n")
     findings = _rule_unsupported(None, md, ev)
     codes = [f["code"] for f in findings]
-    assert "broken_citation" in codes
-    assert "mismatched_citation" in codes
-    assert "unsupported_action" in codes
+    assert codes[0] == "broken_citation"   # emitted before sentence findings
+    assert {"mismatched_citation", "unsupported_action"} <= set(codes)
     # detail fields the verifier relies on survive the refactor
     mismatched = next(f for f in findings if f["code"] == "mismatched_citation")
     assert mismatched["detail"]["supported_by"] == "ev-aaa111"

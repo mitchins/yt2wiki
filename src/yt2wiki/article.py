@@ -231,6 +231,29 @@ ul.plain { padding-left:20px; }
 """
 
 
+def _consume_fence(lines: list[str], i: int) -> tuple[list[str], int]:
+    """Fenced code block starting at line ``i``; returns (html, next_i)."""
+    lang = lines[i].strip()[3:].strip()
+    i += 1
+    buf: list[str] = []
+    while i < len(lines) and not lines[i].strip().startswith("```"):
+        buf.append(lines[i])
+        i += 1
+    i += 1
+    code = html.escape("\n".join(buf))
+    return [f'<pre data-lang="{html.escape(lang)}"><code>{code}</code></pre>'], i
+
+
+def _consume_quote(lines: list[str], i: int) -> tuple[list[str], int]:
+    """Blockquote starting at line ``i``; returns (html, next_i)."""
+    buf: list[str] = []
+    while i < len(lines) and lines[i].strip().startswith(">"):
+        buf.append(lines[i].strip().lstrip(">").strip())
+        i += 1
+    body = " ".join(x for x in buf if x)
+    return [f"<blockquote><p>{_inline(body)}</p></blockquote>"], i
+
+
 def _emit_list_close(out: list[str], in_list: str | None) -> None:
     if in_list:
         out.append(f"</{in_list}>")
@@ -248,16 +271,9 @@ def _render_block(lines: list[str], i: int,
     out: list[str] = []
 
     if stripped.startswith("```"):
-        lang = stripped[3:].strip()
-        i += 1
-        buf: list[str] = []
-        while i < len(lines) and not lines[i].strip().startswith("```"):
-            buf.append(lines[i])
-            i += 1
-        i += 1
+        frag, i = _consume_fence(lines, i)
         _emit_list_close(out, in_list)
-        code = html.escape("\n".join(buf))
-        out.append(f'<pre data-lang="{html.escape(lang)}"><code>{code}</code></pre>')
+        out.extend(frag)
         return out, i, None
 
     if stripped.startswith("#"):
@@ -268,13 +284,9 @@ def _render_block(lines: list[str], i: int,
         return out, i + 1, None
 
     if stripped.startswith("> "):
+        frag, i = _consume_quote(lines, i)
         _emit_list_close(out, in_list)
-        buf = []
-        while i < len(lines) and lines[i].strip().startswith(">"):
-            buf.append(lines[i].strip().lstrip(">").strip())
-            i += 1
-        body = " ".join(x for x in buf if x)
-        out.append(f"<blockquote><p>{_inline(body)}</p></blockquote>")
+        out.extend(frag)
         return out, i, None
 
     m = re.match(r"^(\d+)\.\s+(.*)$", stripped)

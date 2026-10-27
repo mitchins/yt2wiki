@@ -95,7 +95,7 @@ def run(ctx: StageContext) -> dict[str, Any]:
     with manager.acquire("text") as backend:
         for i, chunk in enumerate(chunks):
             collected.extend(_extract_chunk(
-                ctx, backend, i, chunk, chunks, frame_index, model_key, raw_dump, t))
+                ctx, backend, i, chunk, frame_index, model_key, raw_dump, t))
             if len(chunks) > 4 and i % max(1, len(chunks) // 4) == 0:
                 ctx.progress(f"extracted evidence from {i + 1}/{len(chunks)} windows")
 
@@ -122,7 +122,7 @@ def run(ctx: StageContext) -> dict[str, Any]:
     }
 
 
-def _extract_chunk(ctx: StageContext, backend, i: int, chunk: list, chunks: list,
+def _extract_chunk(ctx: StageContext, backend, i: int, chunk: list,
                    frame_index: list, model_key: str, raw_dump, t) -> list[Evidence]:
     """One transcript window -> zero or more evidence records.
 
