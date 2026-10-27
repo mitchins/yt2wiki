@@ -48,6 +48,13 @@
     md.focus();
     return false;
   };
+  const replaceFrame = async (oldId, newId) => {
+    if (!guardDirty()) return;
+    try {
+      await post(`/api/articles/${id}/images/replace`, { old_frame_id: oldId, new_frame_id: newId });
+      toast("Image replaced"); setTimeout(() => location.reload(), 400);
+    } catch (e) { toast(e.message); }
+  };
 
   // ---- save
   $("[data-save]").addEventListener("click", async (ev) => {
@@ -139,13 +146,7 @@
         const s = document.createElement("span");
         s.textContent = fmtT(f.t);
         b.append(im, s);
-        b.addEventListener("click", async () => {
-          if (!guardDirty()) return;
-          try {
-            await post(`/api/articles/${id}/images/replace`, { old_frame_id: fid, new_frame_id: f.frame_id });
-            toast("Image replaced"); setTimeout(() => location.reload(), 400);
-          } catch (e) { toast(e.message); }
-        });
+        b.addEventListener("click", () => replaceFrame(fid, f.frame_id));
         grid.appendChild(b);
       });
       if (!grid.children.length) grid.textContent = "No other frames in this part of the video.";
