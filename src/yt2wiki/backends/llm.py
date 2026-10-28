@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Sequence
@@ -192,28 +193,12 @@ class TransformersLLM(BaseBackend):
             return "cuda" if self.device == "cuda" else "cpu"
 
 
-_FENCE_TAGS = ("json", "jsonc", "JSON")  # alternation order, as in the old regex
+_CODE_FENCE = re.compile(r"```(?:json|jsonc|JSON)?\s*(.*?)```", re.DOTALL)
 
 
 def _strip_fence(text: str) -> str:
-    """Return the first fenced block, or the stripped text (linear, S8786).
-
-    Equivalent of ``re.search(r"```(?:json|jsonc|JSON)?\\s*(.*?)```", ...,
-    re.DOTALL)``: an optional tag in alternation order, then everything to
-    the first closing fence. An unclosed fence returns the stripped text.
-    """
-    start = text.find("```")
-    if start < 0:
-        return text.strip()
-    rest = start + 3
-    for tag in _FENCE_TAGS:
-        if text.startswith(tag, rest):
-            rest += len(tag)
-            break
-    end = text.find("```", rest)
-    if end < 0:
-        return text.strip()
-    return text[rest:end].strip()
+    m = _CODE_FENCE.search(text)
+    return m.group(1).strip() if m else text.strip()
 
 
 def _step_string_state(ch: str, in_string: bool, escaped: bool) -> tuple[bool, bool]:

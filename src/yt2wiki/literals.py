@@ -25,9 +25,7 @@ UNITS = (
 MEASURE_RE = re.compile(
     rf"(?<![\w.])(\d+(?:[.,]\d+)?)\s*({UNITS})(?![\w])"
 )
-# Possessive quantifiers (S8786): the gap between "port" and the digits is
-# unambiguous, so backtracking is forbidden without changing the language.
-PORT_RE = re.compile(r"(?<![\w.])port\s*+[:=]?\s*+(\d{2,5})(?!\d)(?!\.\d)", re.IGNORECASE)
+PORT_RE = re.compile(r"(?<![\w.])port\s*[:=]?\s*(\d{2,5})(?!\d)(?!\.\d)", re.IGNORECASE)
 IP_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
 MAC_RE = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")
 UUID_RE = re.compile(
