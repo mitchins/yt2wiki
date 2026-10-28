@@ -110,6 +110,42 @@ _SCANNERS: tuple[tuple["re.Pattern[str]", str, int, int, Any], ...] = (
 )
 
 
+class _LiteralCollector:
+    """Accumulates deduplicated literals with span-claim tracking."""
+
+    def __init__(self, *, t_start: float | None = None,
+                 t_end: float | None = None) -> None:
+        self.out: list[Literal] = []
+        self.seen: set[str] = set()
+        self.claimed: list[tuple[int, int]] = []
+        self.t_start = t_start
+        self.t_end = t_end
+
+    def free(self, start: int, end: int) -> bool:
+        return not any(a <= start < b for a, b in self.claimed)
+
+    def add(self, kind: str, value: str, context: str,
+            span: tuple[int, int] | None = None) -> None:
+        value = value.strip().strip("`'\"")
+        if not value or len(value) < 2:
+            return
+        key = f"{kind}:{normalize_value(value).lower()}"
+        if key in self.seen:
+            return
+        self.seen.add(key)
+        self.out.append(
+            Literal(
+                kind=kind,
+                literal=value,
+                context=context.strip()[:240],
+                t_start=self.t_start,
+                t_end=self.t_end,
+            )
+        )
+        if span:
+            self.claimed.append(span)
+
+
 def extract_literals(
     text: str,
     *,
@@ -124,48 +160,23 @@ def extract_literals(
     """
     if not text:
         return []
-    out: list[Literal] = []
-    seen: set[str] = set()
-    claimed: list[tuple[int, int]] = []
-
-    def add(kind: str, value: str, context: str, span: tuple[int, int] | None = None) -> None:
-        value = value.strip().strip("`'\"")
-        if not value or len(value) < 2:
-            return
-        key = f"{kind}:{normalize_value(value).lower()}"
-        if key in seen:
-            return
-        seen.add(key)
-        out.append(
-            Literal(
-                kind=kind,
-                literal=value,
-                context=context.strip()[:240],
-                t_start=t_start,
-                t_end=t_end,
-            )
-        )
-        if span:
-            claimed.append(span)
-
-    def free(m: "re.Match[str]") -> bool:
-        return not any(a <= m.start() < b for a, b in claimed)
+    acc = _LiteralCollector(t_start=t_start, t_end=t_end)
 
     for pattern, kind, before, after, value_fn in _SCANNERS:
         for m in pattern.finditer(text):
-            if not free(m):
+            if not acc.free(m.start(), m.end()):
                 continue
             value = value_fn(m) if value_fn else m.group(0)
-            add(kind, value, text[max(0, m.start() - before):m.end() + after], m.span())
+            acc.add(kind, value, text[max(0, m.start() - before):m.end() + after], m.span())
 
     for line in text.splitlines():
         stripped = line.strip()
         if len(stripped) < 4:
             continue
         for fragment in _command_fragments(stripped):
-            add("command", _clean_command(fragment), stripped[:240])
+            acc.add("command", _clean_command(fragment), stripped[:240])
 
-    return out[:max_values]
+    return acc.out[:max_values]
 
 
 _LEADING_CONJUNCTION = re.compile(

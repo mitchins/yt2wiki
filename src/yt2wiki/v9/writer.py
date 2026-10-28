@@ -746,18 +746,46 @@ def _title_neutral_fallback(exc, transcript_hits: int, video_title: str) -> tupl
     return None
 
 
+def _title_messages(segs, chapters, duration_s: float, video_title: str,
+                    extra: str) -> list[dict[str, str]]:
+    """System + user messages for one title/summary attempt."""
+    context = _title_context(segs, chapters, duration_s)
+    user = (TITLE_PROMPT + f"\n\nVideo title: {video_title}\n{context}")
+    if extra:
+        user += ("\n\nCorrection: the previous reply was unusable. "
+                 "Return ONLY a JSON object with title, summary and kind.")
+    return [{"role": "system", "content": "Return JSON only."},
+            {"role": "user", "content": user}]
+
+
+def _title_validate_response(out: Any, transcript_hits: int,
+                             saved_title: dict[str, Any]) -> dict[str, Any]:
+    """Validate a title attempt, banking valid titles against later failure.
+
+    A title that promises construction while the transcript shows no
+    actions is a promotional artefact, not a how-to title; a persistently
+    narrating summary must not take a valid title down with it.
+    """
+    checked = validate_title_response(out)
+    if transcript_hits == 0 and _title_promises_construction(checked["title"]):
+        raise _SectionInvalid(
+            "invalid_content",
+            "title promises construction the transcript never shows")
+    problems = editorial_violations(checked["summary"] or "")
+    if problems:
+        if str(checked["title"]).strip():
+            saved_title["title"] = str(checked["title"]).strip()[:120]
+            saved_title["kind"] = checked["kind"]
+        raise _SectionInvalid("editorial", "; ".join(problems))
+    return checked
+
+
 def _write_title(chat, segs, chapters, srow, video_title) -> tuple[dict[str, Any], str]:
     """Title/summary pass with neutralising fallbacks (never fail the job
     over summary narration). Returns (thead, title_fallback_note)."""
     def _title_call(extra: str) -> dict[str, Any]:
-        context = _title_context(segs, chapters, srow["duration_s"])
-        user = (TITLE_PROMPT + f"\n\nVideo title: {video_title}\n{context}")
-        if extra:
-            user += ("\n\nCorrection: the previous reply was unusable. "
-                     "Return ONLY a JSON object with title, summary and kind.")
         return chat(
-            [{"role": "system", "content": "Return JSON only."},
-             {"role": "user", "content": user}],
+            _title_messages(segs, chapters, srow["duration_s"], video_title, extra),
             max_new_tokens=400, temperature=0.1)
 
     # Action evidence in the raw transcript: a title that promises
@@ -771,18 +799,7 @@ def _write_title(chat, segs, chapters, srow, video_title) -> tuple[dict[str, Any
     saved_title: dict[str, Any] = {"title": "", "kind": "explainer"}
 
     def _title_validate(out: Any, **ignored: Any) -> dict[str, Any]:
-        checked = validate_title_response(out)
-        if transcript_hits == 0 and _title_promises_construction(checked["title"]):
-            raise _SectionInvalid(
-                "invalid_content",
-                "title promises construction the transcript never shows")
-        problems = editorial_violations(checked["summary"] or "")
-        if problems:
-            if str(checked["title"]).strip():
-                saved_title["title"] = str(checked["title"]).strip()[:120]
-                saved_title["kind"] = checked["kind"]
-            raise _SectionInvalid("editorial", "; ".join(problems))
-        return checked
+        return _title_validate_response(out, transcript_hits, saved_title)
 
     try:
         return (_run_attempt(_title_call, validate=_title_validate,
@@ -840,6 +857,17 @@ def _write_sections(chat, plan, segs, video_title,
 
 
 
+def _article_header(thead: dict[str, Any],
+                    video_title: str) -> tuple[str, str, str]:
+    """Title, summary and normalised kind for the finished article."""
+    title = str(thead.get("title") or video_title)[:120]
+    summary = str(thead.get("summary") or "")
+    kind = str(thead.get("kind") or "explainer").strip().lower()
+    if kind not in ("procedure", "explainer", "experimental"):
+        kind = "explainer"
+    return title, summary, kind
+
+
 def write_article(settings, db, source_id: str, *, backend=None,
                   inference_snapshot: dict[str, Any] | None = None,
                   recorder=None) -> dict[str, Any]:
@@ -883,11 +911,7 @@ def write_article(settings, db, source_id: str, *, backend=None,
 
     thead, title_fallback = _write_title(
         _chat, segs, chapters, srow, video_title)
-    title = str(thead.get("title") or video_title)[:120]
-    summary = str(thead.get("summary") or "")
-    kind = str(thead.get("kind") or "explainer").strip().lower()
-    if kind not in ("procedure", "explainer", "experimental"):
-        kind = "explainer"
+    title, summary, kind = _article_header(thead, video_title)
 
     sections, represented = _write_sections(
         _chat, plan, segs, video_title, rule)

@@ -351,54 +351,77 @@ def _citation_blocks(markdown: str) -> list[dict[str, Any]]:
     from *Source:* links.  Blocks without citations resolve to an empty
     binding (checked against all evidence).
     """
-    lines = markdown.splitlines()
-    blocks: list[dict[str, Any]] = []
-    cur: dict[str, Any] | None = None
-    section = ""
-    step_num: int | None = None
+    builder = _BlockBuilder()
+    for line in markdown.splitlines():
+        builder.feed(line)
+    return builder.result()
 
-    def flush() -> None:
-        nonlocal cur
-        if cur and any(ln.strip() for ln in cur["lines"]):
-            blocks.append(cur)
-        cur = None
 
-    def fresh(kind: str, step: int | None) -> dict[str, Any]:
-        return {"kind": kind, "step": step, "section": section, "lines": [],
-                "ev_ids": [], "t_spans": []}
+class _BlockBuilder:
+    """Accumulates citation blocks line by line (split of _citation_blocks).
 
-    def absorb(line: str) -> None:
-        _absorb_citation(cur, line)
+    Owns the in-progress block, current section and step number that used
+    to live in nested closures; each feeder handles one line shape.
+    """
 
-    for line in lines:
+    def __init__(self) -> None:
+        self.blocks: list[dict[str, Any]] = []
+        self.cur: dict[str, Any] | None = None
+        self.section = ""
+        self.step_num: int | None = None
+
+    def flush(self) -> None:
+        if self.cur and any(ln.strip() for ln in self.cur["lines"]):
+            self.blocks.append(self.cur)
+        self.cur = None
+
+    def fresh(self, kind: str, step: int | None) -> dict[str, Any]:
+        return {"kind": kind, "step": step, "section": self.section,
+                "lines": [], "ev_ids": [], "t_spans": []}
+
+    def feed_heading(self, heading: str) -> None:
+        self.flush()
+        self.section = heading
+        self.step_num = None
+
+    def feed_step(self, numbered: int, line: str) -> None:
+        self.flush()
+        self.step_num = numbered
+        self.cur = self.fresh("step", self.step_num)
+        _absorb_citation(self.cur, line)
+
+    def feed_quote(self, line: str) -> None:
+        # Callouts inside a step stay in its block (they inherit its
+        # binding); standalone callouts form their own blocks.
+        if self.cur is None or self.cur["kind"] != "step":
+            if self.cur is None or self.cur["kind"] != "callout":
+                self.flush()
+                self.cur = self.fresh("callout", self.step_num)
+        _absorb_citation(self.cur, line)
+
+    def feed_prose(self, line: str) -> None:
+        if self.cur is None:
+            self.cur = self.fresh("prose", None)
+        _absorb_citation(self.cur, line)
+
+    def feed(self, line: str) -> None:
         s = line.strip()
         heading = _heading_of(s)
-        numbered = _numbered_of(s)
         if heading is not None:
-            flush()
-            section = heading
-            step_num = None
-            continue
+            self.feed_heading(heading)
+            return
+        numbered = _numbered_of(s)
         if numbered is not None:
-            flush()
-            step_num = numbered
-            cur = fresh("step", step_num)
-            absorb(line)
-            continue
+            self.feed_step(numbered, line)
+            return
         if s.startswith(">"):
-            # Callouts inside a step stay in its block (they inherit its
-            # binding); standalone callouts form their own blocks.
-            if cur is None or cur["kind"] != "step":
-                if cur is None or cur["kind"] != "callout":
-                    flush()
-                    cur = fresh("callout", step_num)
-            absorb(line)
-            continue
-        if cur is None:
-            cur = fresh("prose", None)
-        absorb(line)
-    flush()
-    return blocks
+            self.feed_quote(line)
+            return
+        self.feed_prose(line)
+
+    def result(self) -> list[dict[str, Any]]:
+        self.flush()
+        return self.blocks
 
 
 def _sentences(text: str) -> list[str]:
