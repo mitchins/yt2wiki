@@ -101,8 +101,8 @@ def test_collector_dedupes_and_claims():
     acc.add("ip", "192.168.1.1", "ctx", (0, 11))
     acc.add("version", "192.168.1.1", "ctx", (0, 11))
     assert len(acc.out) == 2  # same kind+value deduped, other kind kept
-    assert not acc.free(3, 5)  # inside the claimed span
-    assert acc.free(11, 20)  # boundary start is free
+    assert not acc.free(3)  # inside the claimed span
+    assert acc.free(11)  # boundary start is free
 
 
 def test_collector_rejects_short_and_quoted():

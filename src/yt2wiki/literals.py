@@ -121,7 +121,7 @@ class _LiteralCollector:
         self.t_start = t_start
         self.t_end = t_end
 
-    def free(self, start: int, end: int) -> bool:
+    def free(self, start: int) -> bool:
         return not any(a <= start < b for a, b in self.claimed)
 
     def add(self, kind: str, value: str, context: str,
@@ -164,7 +164,7 @@ def extract_literals(
 
     for pattern, kind, before, after, value_fn in _SCANNERS:
         for m in pattern.finditer(text):
-            if not acc.free(m.start(), m.end()):
+            if not acc.free(m.start()):
                 continue
             value = value_fn(m) if value_fn else m.group(0)
             acc.add(kind, value, text[max(0, m.start() - before):m.end() + after], m.span())
