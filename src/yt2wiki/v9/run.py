@@ -84,6 +84,26 @@ def load_prev_captions(db, article_id: str) -> dict[str, dict[str, str]]:
     return prev
 
 
+def _pick_caption(pick: dict[str, Any], prev: dict[str, str] | None,
+                  enable_captions: bool, heading: str) -> tuple[str, str, str]:
+    """Caption, alt text and source for one selected pick (linear branch).
+
+    Same priority as ever: preserved human/benign captions, then genuine
+    vision descriptions from the opt-in captioning pass, otherwise a
+    neutral section-subject reference.
+    """
+    if prev:
+        return prev["caption"], prev.get("alt_text") or "", "edited"
+    if enable_captions and pick.get("caption") \
+            and pick.get("caption_source") == "vision":
+        # Genuine vision description (opt-in pass): grounded, keep.
+        alt = pick.get("alt_text") or (
+            (pick["caption"].split(".")[0] or pick["caption"])[:120])
+        return pick["caption"], alt, pick["caption_source"]
+    cap, alt = neutral_caption(heading)
+    return cap, alt, "auto"
+
+
 def assign_captions(sections: list[dict[str, Any]],
                     picks: dict[str, list[dict[str, Any]]],
                     prev_captions: dict[str, dict[str, str]],
@@ -101,22 +121,10 @@ def assign_captions(sections: list[dict[str, Any]],
         heading = sec.get("heading") or "Illustration"
         for pick in plist:
             prev = (prev_captions or {}).get(pick.get("frame_id"))
-            if prev:
-                pick["caption"] = prev["caption"]
-                pick["alt_text"] = prev.get("alt_text") or ""
-                pick["caption_source"] = "edited"
-                continue
-            if enable_captions and pick.get("caption") \
-                    and pick.get("caption_source") == "vision":
-                # Genuine vision description (opt-in pass): grounded, keep.
-                if not pick.get("alt_text"):
-                    pick["alt_text"] = (pick["caption"].split(".")[0]
-                                        or pick["caption"])[:120]
-                continue
-            cap, alt = neutral_caption(heading)
+            cap, alt, source = _pick_caption(pick, prev, enable_captions, heading)
             pick["caption"] = cap
-            pick["caption_source"] = "auto"
             pick["alt_text"] = alt
+            pick["caption_source"] = source
 
 
 def effective_models(inference_snapshot: dict | None, db,
@@ -349,6 +357,39 @@ def _drop_stale_transcript(settings, db, source_id: str,
     return 0
 
 
+def _base_stage_reusable(name: str, n_trans: int, n_frames: int,
+                         video_ok: bool) -> bool:
+    """A base stage whose outputs already exist is skipped, not rerun."""
+    if name == "acquisition" and n_trans > 0 and video_ok:
+        return True
+    if name in ("inspect", "transcribe") and n_trans > 0:
+        return True
+    return name == "frame_candidates" and n_frames > 0
+
+
+def _record_reused(db, job_id: str, names) -> None:
+    for name in names:
+        _record(db, job_id, name, "skipped", {"reused": True})
+
+
+def _run_base_stage(db, job_id: str | None, name: str, mod, ctx):
+    """Run one base stage with per-job recording; returns its metrics."""
+    ctx.current_stage = name
+    t = time.time()
+    if job_id:
+        _set_stage(db, job_id, name)
+        _record(db, job_id, name, "running")
+    # The returned metrics and stage artifacts carry per-job provenance
+    # (e.g. transcribe's asr_server / asr_unsupported_options / asr_warnings);
+    # record them instead of dropping them.
+    out = mod.run(ctx) or {}
+    if job_id:
+        _record(db, job_id, name, "done",
+                out if isinstance(out, dict) else {},
+                started=t, artifacts=dict(ctx.artifacts))
+    return out
+
+
 def _ensure_base(settings, db, service, source_id: str,
                  job_id: str | None = None,
                  inference_snapshot: dict | None = None) -> dict[str, Any]:
@@ -366,8 +407,7 @@ def _ensure_base(settings, db, service, source_id: str,
                                      counts)
     if n_trans > 0 and n_frames > 0:
         if job_id:
-            for name in BASE_STAGES:
-                _record(db, job_id, name, "skipped", {"reused": True})
+            _record_reused(db, job_id, BASE_STAGES)
         return {"reused": True, **counts}
     from pathlib import Path as _P
     video_ok = _P(settings.paths.source_video(source_id)).is_file()
@@ -378,25 +418,11 @@ def _ensure_base(settings, db, service, source_id: str,
                        inference_snapshot=inference_snapshot)
     for name, mod in (("acquisition", acquisition), ("inspect", inspect),
                       ("transcribe", transcribe), ("frame_candidates", frame_candidates)):
-        if ((name == "acquisition" and n_trans > 0 and video_ok)
-                or (name in ("inspect", "transcribe") and n_trans > 0)
-                or (name == "frame_candidates" and n_frames > 0)):
+        if _base_stage_reusable(name, n_trans, n_frames, video_ok):
             if job_id:
                 _record(db, job_id, name, "skipped", {"reused": True})
             continue
-        ctx.current_stage = name
-        t = time.time()
-        if job_id:
-            _set_stage(db, job_id, name)
-            _record(db, job_id, name, "running")
-        # The returned metrics and stage artifacts carry per-job provenance
-        # (e.g. transcribe's asr_server / asr_unsupported_options / asr_warnings);
-        # record them instead of dropping them.
-        out = mod.run(ctx) or {}
-        if job_id:
-            _record(db, job_id, name, "done",
-                    out if isinstance(out, dict) else {},
-                    started=t, artifacts=dict(ctx.artifacts))
+        _run_base_stage(db, job_id, name, mod, ctx)
     return {"reused": False, "job": job,
             "transcript_segments": db.query_one(
                 "SELECT COUNT(*) c FROM transcript_segments WHERE source_id=?", (source_id,))["c"],

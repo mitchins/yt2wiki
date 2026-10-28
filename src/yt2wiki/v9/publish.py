@@ -294,41 +294,55 @@ def assemble_markdown(article_title: str, summary: str, sections: list[dict[str,
         "\n".join(lines).rstrip() + "\n", provenance.get("url"), duration_s=duration)
     return md, asset_rows
 
+_PLAIN_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+_CLOCK_RE = re.compile(r"(\d+):(\d{1,2})(?::(\d{1,2}))?")
+_RANGE_RE = re.compile(r"(\d+):(\d{1,2})-(\d+):(\d{1,2})")
+
+
+def _clock_values(mm: "re.Match[str]", *, loose_seconds: bool) -> list[float]:
+    """All plausible second-values for one `m:ss` model-written label."""
+    out: list[float] = []
+    a, b, c = int(mm.group(1)), int(mm.group(2)), mm.group(3)
+    if c is not None:
+        return [a * 3600 + b * 60 + int(c)]
+    if b >= 60:
+        # Not a valid clock reading: "7:83" means 783s, not 7m83s.
+        return [a * 100 + b]
+    out.append(a * 60 + b)  # plain mm:ss, preferred
+    # A single trailing digit reads as a decimal point ("159:0" = 159.0s).
+    # Two-digit seconds additionally allow the transcript-seconds reading
+    # inside ranges ("13:00-20:00" in a 524s video = 13-20s).
+    if b <= 9 and (len(mm.group(2)) == 1 or loose_seconds):
+        out.append(a + b / 10.0)  # "159:0" for 159.0s
+    return out
+
+
+def _range_values(rm: "re.Match[str]") -> list[float]:
+    """All plausible second-values for one `m:ss-m:ss` label."""
+    a, b, c, d = (int(rm.group(1)), int(rm.group(2)), int(rm.group(3)), int(rm.group(4)))
+    out = [a * 60 + b, c * 60 + d]
+    if b >= 60:
+        out.append(a * 100 + b)
+    if d >= 60:
+        out.append(c * 100 + d)
+    if b <= 9:
+        out.append(a + b / 10.0)
+    if d <= 9:
+        out.append(c + d / 10.0)
+    return out
+
+
 def _citation_candidates(label: str, *, loose_seconds: bool = False) -> list[float]:
     """All plausible second-values for a model-written timestamp label."""
-    import re
-
-    out: list[float] = []
-    if re.fullmatch(r"\d+(?:\.\d+)?", label):
+    if _PLAIN_NUM_RE.fullmatch(label):
         return [float(label)]
-    mm = re.fullmatch(r"(\d+):(\d{1,2})(?::(\d{1,2}))?", label)
-    if mm:
-        a, b, c = int(mm.group(1)), int(mm.group(2)), mm.group(3)
-        if c is not None:
-            return [a * 3600 + b * 60 + int(c)]
-        if b >= 60:
-            # Not a valid clock reading: "7:83" means 783s, not 7m83s.
-            out.append(a * 100 + b)
-            return out
-        out.append(a * 60 + b)  # plain mm:ss, preferred
-        # A single trailing digit reads as a decimal point ("159:0" = 159.0s).
-        # Two-digit seconds additionally allow the transcript-seconds reading
-        # inside ranges ("13:00-20:00" in a 524s video = 13-20s).
-        if b <= 9 and (len(mm.group(2)) == 1 or loose_seconds):
-            out.append(a + b / 10.0)  # "159:0" for 159.0s
-    rm = re.fullmatch(r"(\d+):(\d{1,2})-(\d+):(\d{1,2})", label)
-    if rm:
-        a, b, c, d = (int(rm.group(1)), int(rm.group(2)), int(rm.group(3)), int(rm.group(4)))
-        out.append(a * 60 + b)
-        out.append(c * 60 + d)
-        if b >= 60:
-            out.append(a * 100 + b)
-        if d >= 60:
-            out.append(c * 100 + d)
-        if b <= 9:
-            out.append(a + b / 10.0)
-        if d <= 9:
-            out.append(c + d / 10.0)
+    out: list[float] = []
+    mm = _CLOCK_RE.fullmatch(label)
+    if mm is not None:
+        out.extend(_clock_values(mm, loose_seconds=loose_seconds))
+    rm = _RANGE_RE.fullmatch(label)
+    if rm is not None:
+        out.extend(_range_values(rm))
     return out
 
 
