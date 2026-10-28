@@ -384,6 +384,8 @@ def test_rendering_pipeline_uses_new_parsers():
     md = ("# T\n\n1. First step\n2. Second step\n\n- bullet\n\n"
           "![alt](http://e.com/x.png)\n\n*caption line*\n")
     out = markdown_to_html(md)
-    assert "<ol" in out and "<li>First step</li>" in out
-    assert "<ul" in out and "<li>bullet</li>" in out
+    assert "<ol" in out
+    assert "<li>First step</li>" in out
+    assert "<ul" in out
+    assert "<li>bullet</li>" in out
     assert '<img alt="alt" src="http://e.com/x.png">' in out

@@ -34,6 +34,27 @@ def _is_ws(ch: str) -> bool:
     return ch.isspace()
 
 
+def _match_source_tail(tail: str) -> str | None:
+    """Link after ``source at`` when preceded by whitespace (linear, exact).
+
+    Matches the old ``\\s+source at\\s+(.+)$``: leading whitespace, the
+    literal marker, more whitespace, then a non-empty link.
+    """
+    k = 0
+    while k < len(tail) and _is_ws(tail[k]):
+        k += 1
+    head = "source at"
+    if not tail.startswith(head, k):
+        return None
+    rest = tail[k + len(head):]
+    m = 0
+    while m < len(rest) and _is_ws(rest[m]):
+        m += 1
+    if not m or m >= len(rest):
+        return None
+    return rest[m:]
+
+
 def _split_source_at(caption: str) -> tuple[str, str] | None:
     """Split ``label — source at link`` without regex (linear, S8786).
 
@@ -46,19 +67,9 @@ def _split_source_at(caption: str) -> tuple[str, str] | None:
     idx = text.find("—")
     while idx != -1:
         if idx > 0 and _is_ws(text[idx - 1]):
-            tail = text[idx + 1:]
-            k = 0
-            while k < len(tail) and _is_ws(tail[k]):
-                k += 1
-            head = "source at"
-            if tail.startswith(head, k):
-                # The old ``\s+(.+)$``: whitespace, then a non-empty link.
-                rest = tail[k + len(head):]
-                m = 0
-                while m < len(rest) and _is_ws(rest[m]):
-                    m += 1
-                if m and m < len(rest):
-                    return text[:idx].strip(), rest[m:]
+            link = _match_source_tail(text[idx + 1:])
+            if link is not None:
+                return text[:idx].strip(), link
         idx = text.find("—", idx + 1)
     return None
 _CALLOUT = re.compile(
