@@ -44,7 +44,7 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label class="field"><span>YouTube link</span>
         <input class="input" name="url" type="url" inputmode="url" autocomplete="off" required value="{{ url }}"
-               placeholder="https://www.youtube.com/watch?v=…" autofocus>
+                placeholder="https://www.youtube.com/watch?v=…">
       </label>
       {% if error %}<p class="notice" role="alert">{{ icon("info") }}<span>{{ error }}</span></p>{% endif %}
       <div><button class="btn" type="submit">Make guide</button></div>
