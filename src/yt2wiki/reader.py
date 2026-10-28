@@ -25,7 +25,53 @@ _FIGURE = re.compile(
 )
 _LINK = re.compile(r'(!?)<a href="([^"]*)">(.*?)</a>', re.S)
 _BARE_TS = re.compile(rf"(?<![\w>\]])\[({_TS}(?:\s*[-–]\s*{_TS})?)\](?!\()")
-_SOURCE_AT = re.compile(r"^(.*?)\s+—\s+source at\s+(.+)$", re.S)
+def _is_ws(ch: str) -> bool:
+    """Single-character ``\\s`` test without quantifiers (linear, exact).
+
+    ``str.isspace`` matches regex ``\\s`` character-for-character (verified
+    over the BMP in test_sonar_prB_regex).
+    """
+    return ch.isspace()
+
+
+def _match_source_tail(tail: str) -> str | None:
+    """Link after ``source at`` when preceded by whitespace (linear, exact).
+
+    Matches the old ``\\s+source at\\s+(.+)$``: leading whitespace, the
+    literal marker, more whitespace, then a non-empty link.
+    """
+    k = 0
+    while k < len(tail) and _is_ws(tail[k]):
+        k += 1
+    head = "source at"
+    if not tail.startswith(head, k):
+        return None
+    rest = tail[k + len(head):]
+    m = 0
+    while m < len(rest) and _is_ws(rest[m]):
+        m += 1
+    if not m or m >= len(rest):
+        return None
+    return rest[m:]
+
+
+def _split_source_at(caption: str) -> tuple[str, str] | None:
+    """Split ``label — source at link`` without regex (linear, S8786).
+
+    Equivalent of ``re.match(r"^(.*?)\\s+—\\s+source at\\s+(.+)$", ...,
+    re.S)`` on the stripped caption: the first em-dash preceded by
+    whitespace splits the label; ``source at`` follows whitespace and
+    precedes a non-empty link.
+    """
+    text = caption.strip()
+    idx = text.find("—")
+    while idx != -1:
+        if idx > 0 and _is_ws(text[idx - 1]):
+            link = _match_source_tail(text[idx + 1:])
+            if link is not None:
+                return text[:idx].strip(), link
+        idx = text.find("—", idx + 1)
+    return None
 _CALLOUT = re.compile(
     r"<blockquote><p>\s*<strong>(Warning|Caution|Important|Tip|Note)</strong>",
     re.I,
@@ -112,9 +158,9 @@ def _strip_tags(fragment: str) -> str:
 
 def _caption_html(caption: str) -> str:
     """Restrained caption: 'Source frame' label plus a timestamp link."""
-    m = _SOURCE_AT.match(caption.strip())
-    if m:
-        label, link = m.group(1).strip(), m.group(2).strip()
+    split = _split_source_at(caption)
+    if split is not None:
+        label, link = split[0].strip(), split[1].strip()
         quiet = " quiet" if label.lower() == "source frame" else ""
         return (f'<span class="cap-label{quiet}">{label}</span>'
                 f'<span class="cap-ts">{link}</span>')

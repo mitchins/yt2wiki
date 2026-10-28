@@ -259,6 +259,110 @@ def _emit_list_close(out: list[str], in_list: str | None) -> None:
         out.append(f"</{in_list}>")
 
 
+def _ordered_item(stripped: str) -> str | None:
+    """Text of a leading ``N. item`` line, else None (linear, S8786).
+
+    Twin of :func:`pipeline.stages.verify._numbered_of` plus the text half;
+    kept local so the block renderer never depends on a pipeline stage.
+    ``str.isdecimal`` matches exactly what ``\\d`` matches; ``int`` keeps
+    the original overflow behaviour on absurd digit runs.
+    """
+    head, sep, rest = stripped.partition(".")
+    if not sep or not head or not head.isdecimal():
+        return None
+    if not rest[:1].isspace():
+        return None
+    return rest.lstrip()
+
+
+def _bullet_item(stripped: str) -> str | None:
+    """Text of a leading ``- ``/``* `` item, else None (linear, S8786)."""
+    if stripped[:1] not in ("-", "*") or not stripped[1:2].isspace():
+        return None
+    return stripped[1:].lstrip()
+
+
+def _image_item(stripped: str) -> tuple[str, str] | None:
+    """Split a full-line ``![alt](target)`` image (linear, S8786).
+
+    ``partition`` takes the *first* ``](`` exactly like the lazy ``.*?``
+    it replaces, so alt text containing ``](`` behaves identically.
+    """
+    if not stripped.startswith("![") or not stripped.endswith(")"):
+        return None
+    alt, sep, target = stripped[2:-1].partition("](")
+    if not sep:
+        return None
+    return alt, target
+
+
+_NONSPACE_RUN = re.compile(r"\S+")
+
+
+def _link_byline_source(text: str) -> str:
+    """Link the ``Source video: <url>`` tail of an attribution paragraph.
+
+    Linear single-pass equivalent of the old
+    ``re.sub(r"\\s+Source video: (https?://\\S+)", ...)``: the marker,
+    the preceding-whitespace consumption and the ``\\S+`` URL run are
+    unchanged; only the backtracking search is gone. Skips are
+    boundary-safe: a later marker's whitespace run always starts after
+    the current marker (markers hold no leading whitespace), so jumping
+    past a failed marker can never strand one.
+    """
+    marker = "Source video: "
+    out: list[str] = []
+    i = 0
+    while True:
+        j = text.find(marker, i)
+        if j < 0:
+            out.append(text[i:])
+            break
+        k = j
+        while k > i and text[k - 1].isspace():
+            k -= 1
+        url_m = _NONSPACE_RUN.match(text, j + len(marker))
+        if (
+            k == j
+            or url_m is None
+            or not url_m.group(0).startswith(("http://", "https://"))
+        ):
+            out.append(text[i:j + 1])
+            i = j + 1
+            continue
+        url = url_m.group(0)
+        out.append(text[i:k])
+        out.append(f'<br>Source video: <a href="{url}">{url}</a>')
+        i = url_m.end()
+    return "".join(out)
+
+
+def _break_byline_note(text: str) -> str:
+    """Break before the compilation note (linear, S8786).
+
+    Equivalent of ``re.sub(r"\\s+(This illustrated guide was compiled)", ...)``.
+    """
+    marker = "This illustrated guide was compiled"
+    out: list[str] = []
+    i = 0
+    while True:
+        j = text.find(marker, i)
+        if j < 0:
+            out.append(text[i:])
+            break
+        k = j
+        while k > i and text[k - 1].isspace():
+            k -= 1
+        if k == j:
+            out.append(text[i:j + 1])
+            i = j + 1
+            continue
+        out.append(text[i:k])
+        out.append(f"<br>{marker}")
+        i = j + len(marker)
+    return "".join(out)
+
+
 def _render_block(lines: list[str], i: int,
                   in_list: str | None) -> tuple[list[str], int, str | None] | None:
     """Render one block element starting at line ``i``.
@@ -289,27 +393,27 @@ def _render_block(lines: list[str], i: int,
         out.extend(frag)
         return out, i, None
 
-    m = re.match(r"^(\d+)\.\s+(.*)$", stripped)
-    if m:
+    item = _ordered_item(stripped)
+    if item is not None:
         if in_list != "ol":
             _emit_list_close(out, in_list)
             out.append('<ol class="steps">')
-        out.append(f"<li>{_inline(m.group(2))}</li>")
+        out.append(f"<li>{_inline(item)}</li>")
         return out, i + 1, "ol"
 
-    m = re.match(r"^[-*]\s+(.*)$", stripped)
-    if m:
+    item = _bullet_item(stripped)
+    if item is not None:
         if in_list != "ul":
             _emit_list_close(out, in_list)
             out.append('<ul class="plain">')
-        out.append(f"<li>{_inline(m.group(1))}</li>")
+        out.append(f"<li>{_inline(item)}</li>")
         return out, i + 1, "ul"
 
-    m = re.match(r"^!\[(.*?)\]\((.*?)\)$", stripped)
-    if m:
+    img = _image_item(stripped)
+    if img is not None:
         _emit_list_close(out, in_list)
-        if _safe_href(m.group(2)):
-            out.append(f'<figure><img alt="{html.escape(m.group(1))}" src="{html.escape(m.group(2))}"></figure>')
+        if _safe_href(img[1]):
+            out.append(f'<figure><img alt="{html.escape(img[0])}" src="{html.escape(img[1])}"></figure>')
         return out, i + 1, None
 
     # A lone *emphasised* line is a figure caption; a lone **bold** line
@@ -411,9 +515,8 @@ def render_html(article: Article, body_html: str, *, embed_images: bool = False,
         text = m.group(1)
         # V9 attribution quotes are three lines joined into one paragraph;
         # put the source link and the compilation note on their own lines.
-        text = re.sub(r"\s+Source video: (https?://\S+)",
-                      r'<br>Source video: <a href="\1">\1</a>', text)
-        text = re.sub(r"\s+(This illustrated guide was compiled)", r"<br>\1", text)
+        text = _link_byline_source(text)
+        text = _break_byline_note(text)
         byline = f'<p class="attribution">{text}</p>'
         body_html = body_html[m.end():]
     body_html, toc = enhance(body_html, zoom_links=False)

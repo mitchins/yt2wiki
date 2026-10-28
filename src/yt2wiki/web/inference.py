@@ -436,6 +436,34 @@ def test_endpoint(url: str, api_key_env: str = "", *, timeout: float = 6.0,
     return base
 
 
+def _extract_ok_object(content: str):
+    """Find a ``{"ok": true}`` object without backtracking (linear, S8786).
+
+    Equivalent intent of the old ``re.search(r"\\{.*ok.*\\}", content,
+    re.S)`` + ``json.loads``: scan brace-delimited candidates left to
+    right with ``JSONDecoder.raw_decode`` (string-aware, no backtracking)
+    and return the first ``{"ok": true}`` dict. More robust than the
+    greedy span on multi-object content, and identical on the canonical
+    single-object health replies.
+    """
+    from json import JSONDecoder
+
+    decode = JSONDecoder().raw_decode
+    start = 0
+    while True:
+        open_idx = content.find("{", start)
+        if open_idx < 0:
+            return None
+        try:
+            obj, _ = decode(content, open_idx)
+        except Exception:  # noqa: BLE001 - not JSON here; keep scanning
+            start = open_idx + 1
+            continue
+        if isinstance(obj, dict) and obj.get("ok") is True:
+            return obj
+        start = open_idx + 1
+
+
 def _qualify_writer(url: str, headers: dict[str, str], model: str, timeout: float) -> bool:
     import httpx
 
@@ -461,10 +489,7 @@ def _qualify_writer(url: str, headers: dict[str, str], model: str, timeout: floa
         obj = json.loads(content) if content.strip().startswith("{") else None
         if obj is None:
             # Try to extract json from prose
-            import re
-            m = re.search(r"\{.*ok.*\}", content, re.S)
-            if m:
-                obj = json.loads(m.group(0))
+            obj = _extract_ok_object(content)
         return isinstance(obj, dict) and obj.get("ok") is True
     except Exception:
         return False
