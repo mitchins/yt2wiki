@@ -124,7 +124,8 @@ def test_pipeline_neutralises_injection(payload):
     assert "<script" not in out
     assert "<img" not in out
     assert "javascript:" not in out
-    assert "onerror=\"" not in out and "onmouseover=\"" not in out
+    assert "onerror=\"" not in out
+    assert "onmouseover=\"" not in out
     assert "data:text/html" not in out
 
 
@@ -148,7 +149,8 @@ def test_snippet_plain_text_escapes():
     # FTS-snippet pre-cleaning strips markdown residue ("[#*>`]+") before
     # escaping; executable markup must still be inert.
     out = _snippet_html("plain <b>bold</b> text")
-    assert "<b>" not in out and "</b>" not in out
+    assert "<b>" not in out
+    assert "</b>" not in out
     assert "&lt;" in out
 
 

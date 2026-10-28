@@ -147,7 +147,11 @@ def _strip_inline_timestamp_links(body: str) -> str:
         out_parts.append(part)
     body = "".join(out_parts)
     body = _re.sub(r"\n{2,}", "\n\n", body)
-    body = _re.sub(r" +\n", "\n", body)
+    # Trailing spaces before a newline carry no meaning; strip them per line
+    # (linear, S8786 — equivalent of ``re.sub(r" +\n", "\\n", body)``,
+    # which likewise leaves a final line without newline untouched).
+    parts = body.split("\n")
+    body = "\n".join([ln.rstrip(" ") for ln in parts[:-1]] + parts[-1:])
     return body.strip()
 
 

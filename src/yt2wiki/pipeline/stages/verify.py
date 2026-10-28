@@ -88,16 +88,83 @@ OBSERVATIONS ({count}):
 
 Return only JSON."""
 
-_STEP_RE = re.compile(r"^(\d+)\.\s+(.*)$", re.MULTILINE)
-_CODE_BLOCK_RE = re.compile(r"```(?:bash|sh|ini|text)?\s*\n(.*?)```", re.DOTALL)
-_WARNING_RE = re.compile(r">\s*\*\*Warning\*\*\s*—\s*(.+)", re.MULTILINE)
-_PLACEHOLDER_RE = re.compile(r"\s*[<\[][^<>\[\]]*[>\]]")
+_FENCE_TAGS = ("bash", "sh", "ini", "text")
+_FENCE_GAP = re.compile(r"\s*\n")  # anchored use only; single pass, linear
+
+
+def _iter_code_blocks(text: str):
+    """Yield fenced-code bodies for the known tags (linear, S8786).
+
+    Equivalent of ``_CODE_BLOCK_RE.finditer``: the tag must abut the
+    opening fence exactly (`` ```\\tbash `` never matched), a whitespace
+    gap plus newline follows, and the body runs to the first closing
+    fence. Unclosed fences yield nothing.
+    """
+    idx = 0
+    while True:
+        start = text.find("```", idx)
+        if start < 0:
+            return
+        after = start + 3
+        for cand in _FENCE_TAGS:
+            if text.startswith(cand, after):
+                after += len(cand)
+                break
+        gap = _FENCE_GAP.match(text, after)
+        if gap is None:
+            idx = start + 1
+            continue
+        end = text.find("```", gap.end())
+        if end < 0:
+            return
+        yield text[gap.end():end]
+        idx = end + 3
 
 
 def _strip_placeholders(value: str) -> str:
     """Placeholders (`<file>`, `[name]`) are not values, so they cannot support
-    or contradict a claim.  Strip them before comparing."""
-    return " ".join(_PLACEHOLDER_RE.sub(" ", str(value)).split())
+    or contradict a claim.  Strip them before comparing.
+
+    Linear single-pass equivalent of the old
+    ``re.sub(r"\\s*[<\\[][^<>\\[\\]]*[>\\]]", " ", ...)``: a ``<``/``[`` run
+    up to the next bracket character is replaced by a space when that
+    character closes (``>`` or ``]`` — mismatched closers counted, as the
+    old character classes did); nested openers and unclosed runs pass
+    through.
+    """
+    text = str(value)
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "<" or ch == "[":
+            j = i + 1
+            while j < len(text) and text[j] not in "<>[]":
+                j += 1
+            if j < len(text) and text[j] in ">]":
+                out.append(" ")
+                i = j + 1
+                continue
+        out.append(ch)
+        i += 1
+    return " ".join("".join(out).split())
+
+
+def _is_link_remnant(s: str) -> bool:
+    """Link-shaped ``[..](..)`` residue (linear, S8786).
+
+    Equivalent of ``re.fullmatch(r"\\[.*\\]\\(.*\\)\\*?", s)``: the string
+    must end in ``)`` (or one ``*`` past it) with a ``](`` split before it.
+    """
+    if not s.startswith("["):
+        return False
+    if s.endswith(")*"):
+        core = s[1:-2]
+    elif s.endswith(")"):
+        core = s[1:-1]
+    else:
+        return False
+    return "](" in core
 
 
 _STOPWORDS = {
@@ -195,15 +262,24 @@ def _supported_values(evidence: Sequence[Evidence]) -> set[str]:
 
 def _article_steps(markdown: str) -> list[tuple[int, str]]:
     out = []
-    for m in _STEP_RE.finditer(markdown):
-        out.append((int(m.group(1)), m.group(2).strip()))
+    for line in markdown.splitlines():
+        # Same single-line reading as verify._numbered_of: a step number
+        # abuts the line start. (The old MULTILINE regex could additionally
+        # join a bare "N." line with the next line; article steps are never
+        # emitted that way — see test_sonar_prB_regex.)
+        if not line[:1].isdecimal():
+            continue
+        head, sep, rest = line.partition(".")
+        if not sep or not head.isdecimal() or not rest[:1].isspace():
+            continue
+        out.append((int(head), rest.strip()))
     return out
 
 
 def _article_commands(markdown: str) -> list[str]:
     out: list[str] = []
-    for block in _CODE_BLOCK_RE.finditer(markdown):
-        for line in block.group(1).splitlines():
+    for block in _iter_code_blocks(markdown):
+        for line in block.splitlines():
             s = line.strip()
             if s:
                 out.append(s)
@@ -411,7 +487,7 @@ def _sentences(text: str) -> list[str]:
         s = re.sub(r"\s+", " ", part).strip(" .;-")
         if len(s) < 12 or "http" in s:
             continue
-        if re.fullmatch(r"\[.*\]\(.*\)\*?", s):
+        if _is_link_remnant(s):
             continue  # link remnant from sentence splitting
         out.append(s)
     return out
@@ -650,8 +726,8 @@ def _article_keyvalues(markdown: str) -> dict[str, str]:
     for m in re.finditer(r"`([^`\n]{2,120})`", markdown):
         asserted.update({k: v for k, v in keyvalues(m.group(1)).items()
                          if k not in asserted})
-    for block in _CODE_BLOCK_RE.finditer(markdown):
-        for line in block.group(1).splitlines():
+    for block in _iter_code_blocks(markdown):
+        for line in block.splitlines():
             for k, v in keyvalues(line.strip()).items():
                 asserted.setdefault(k, v)
     return asserted
