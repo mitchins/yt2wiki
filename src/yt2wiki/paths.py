@@ -34,6 +34,21 @@ def content_hash(data: bytes, *, prefix: int = 16) -> str:
 
 
 def file_hash(path: Path, *, prefix: int = 16, chunk: int = 1 << 20) -> str:
+    """Content digest of a file the caller has already chosen to trust.
+
+    Trust boundary (pythonsecurity:S8707, reviewed false positive): every
+    caller passes an operator- or server-chosen path — a CLI file argument,
+    a staged upload confined to ``uploads_dir`` by ``upload_path()``
+    (``safe_slug`` basenames, no directory components), a ``sources``
+    row written only from such staged paths and re-validated by hash
+    before use, or a pipeline stage artifact. LLM-produced text (article
+    markdown, captions, judge records) never flows into this argument, so
+    model output cannot steer the path. The function itself only reads:
+    it returns a digest, never file content, and refuses non-regular
+    files. Deliberately not confined to the data root — it is a
+    general-purpose hashing utility, and confinement lives with the
+    callers that stage untrusted uploads.
+    """
     # S8707: validate before opening — tainted CLI/web path must be a regular file
     p = Path(path)
     if not p.is_file():
