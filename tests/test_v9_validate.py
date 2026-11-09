@@ -319,3 +319,14 @@ def test_decision_trace_vocab_is_major_not_blocking():
     res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
     assert res["status"] == "ready"
     assert any(f["code"] == "decision_trace_leak" for f in res["findings"])
+
+
+def test_bare_second_citation_is_major_not_value():
+    segs = _segs(["Bake the loaf until done."])
+    article = _article(bodies=["Combine.", "Mix well.",
+                               "Knead to develop strength 223.6-232.1."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 760.0)
+    assert any(f["code"] == "bare_second_citation"
+               and f["severity"] == "major" for f in res["findings"])
+    assert not any(f["code"] == "unsupported_exact_value"
+                   for f in res["findings"] if "223" in f["detail"])

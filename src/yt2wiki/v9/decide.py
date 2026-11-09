@@ -209,7 +209,7 @@ def _assemble_decision(raw: Any, by_id: dict[str, tuple[float, float]],
     return decision, ""
 
 
-PLAN_PROMPT = """Plan the article within its frozen type. You may organise and title supported material freely within the allowed slots: decide section count, headings, order, grouping, lead blocks and image usefulness. Do NOT force transcript chronology or pad every section to the same length. Cover the substantive source; repetition may merge. Preserve MULTIPLE source windows per section (never one giant span). Aim each section at 10 minutes of spanned time at most: split long topics into parts, merge slivers. Every essential fact, position or correction must be represented or explicitly left to the coverage.unassigned list. Decline via flag rather than padding with junk. Never manufacture details to fill a required slot.
+PLAN_PROMPT = """Plan the article within its frozen type. You may organise and title supported material freely within the allowed slots: decide section count, headings, order, grouping, lead blocks and image usefulness. Do NOT force transcript chronology or pad every section to the same length. Cover the substantive source; repetition may merge. Preserve MULTIPLE source windows per section (never one giant span). Aim each section at 10 minutes of spanned time at most: split long topics into parts, merge slivers. Never emit a section spanning more than 15 minutes: the writer cannot cover it and the section will fail. Every essential fact, position or correction must be represented or explicitly left to the coverage.unassigned list. Decline via flag rather than padding with junk. Never manufacture details to fill a required slot.
 
 Frozen type: {template_id} (v{template_version})
 Allowed slots — core (each needs a covering section): {core}
@@ -342,6 +342,9 @@ def _assemble_plan(raw: Any, tid: str,
             return _bad(f"sections[{i}] has no evidence windows")
         t0 = min(p[0] for p in spans)
         t1 = max(p[1] for p in spans)
+        if t1 - t0 > 1200:
+            return _bad(f"sections[{i}] spans {t1 - t0:.0f}s (>20 min); "
+                         f"split it — the writer cannot cover it")
         sections.append({"section_id": sid, "slot": s.get("slot"),
                          "heading": str(s.get("heading") or ""),
                          "source_windows": spans,

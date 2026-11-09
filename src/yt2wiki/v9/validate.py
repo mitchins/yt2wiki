@@ -196,6 +196,10 @@ _LIST_MARKER = re.compile(r"(?m)^(\s*)(?:[*\-+]\s+|\d+[.)]\s+)")
 #: English definition-list prose (ubiquitous in typed articles), never
 #: an exact technical value.
 _STRICT_KV = re.compile(r"\b([A-Za-z_][\w.\-]{2,40})\s*(=|:(?=\S))([^\s,;]{1,64})")
+#: Bare transcript-second ranges ("223.6-232.1"): citation-hygiene
+#: debris, not exact values. Both endpoints inside the duration mark a
+#: probable seconds-citation the writer should have rendered as m:ss.
+_BARE_RANGE = re.compile(r"\b(\d{1,4}\.\d+)\s*-\s*(\d{1,4}\.\d+)\b")
 _PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 _PERCENT_WORD = re.compile(r"(\d+(?:\.\d+)?)\s+percent\b", re.IGNORECASE)
 
@@ -267,7 +271,8 @@ def _prose_values_text(body: str) -> str:
 
 
 def check_exact_values(article: dict[str, Any],
-                       segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                       segs: list[dict[str, Any]],
+                       duration_s: float = 0) -> list[dict[str, Any]]:
     """Invariant 2a: every exact literal in prose is source-supported.
 
     Direction is article -> evidence: dropped values are omissions
@@ -277,6 +282,17 @@ def check_exact_values(article: dict[str, Any],
     out: list[dict[str, Any]] = []
     for sec in article.get("sections") or []:
         body = _prose_values_text(str(sec.get("body") or ""))
+        for m in _BARE_RANGE.finditer(body):
+            try:
+                lo, hi = float(m.group(1)), float(m.group(2))
+            except ValueError:
+                continue
+            if 0 <= lo < hi <= duration_s + 1:
+                out.append(_finding(
+                    "bare_second_citation", MAJOR,
+                    f"{m.group(0)!r} looks like transcript seconds; "
+                    f"use m:ss citations", sec.get("section_id")))
+        body = _BARE_RANGE.sub(" ", body)
         spans = _spans_of(sec)
         evidence = _evidence_text(segs, spans)
         if not evidence.strip():
@@ -649,7 +665,7 @@ def validate_typed(decision: dict[str, Any], plan: dict[str, Any],
     findings.extend(check_executable_blocks(wide))
     findings.extend(check_procedure_order(scoped))
     findings.extend(check_no_injection_echo(wide))
-    findings.extend(check_exact_values(wide, segs))
+    findings.extend(check_exact_values(wide, segs, duration_s))
     findings.extend(check_entities(wide, segs))
     findings.extend(check_temporal(scoped, segs, duration_s))
     findings.extend(check_origin(scoped, decision))

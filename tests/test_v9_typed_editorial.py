@@ -351,3 +351,18 @@ def test_year_and_decade_extraction():
     got = {lit.literal for lit in _V.extract_exact_values(
         "In 1976 dollars; in the 90s; not in 20s fashion.")}
     assert "1976" in got and "90s" in got
+
+
+def test_mega_span_sections_rejected_at_plan_time():
+    by_id = {f"w-{i:03d}": (float(i * 300), float(i * 300 + 200))
+             for i in range(12)}
+    raw = {"template_id": "review",
+           "sections": [{"section_id": "s", "slot": "subject",
+                         "heading": "H",
+                         "window_ids": [f"w-{i:03d}" for i in range(12)]},
+                        {"section_id": "a", "slot": "assessment",
+                         "heading": "A", "window_ids": ["w-001"]}],
+           "coverage": {}}
+    plan, reason = D._assemble_plan(raw, "review", by_id, set())
+    assert plan is None
+    assert "20 min" in reason
