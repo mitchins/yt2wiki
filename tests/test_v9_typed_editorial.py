@@ -550,3 +550,12 @@ def test_chunked_planning_splits_long_indexes():
     assert plan["coverage"]["chunked"] >= 2
     assert all(s["section_id"].startswith("c") for s in plan["sections"])
     assert D.AT.validate_plan(plan, "discussion") == []
+
+
+def test_typed_section_call_requests_compact_json():
+    import inspect
+
+    from yt2wiki.v9 import writer as _W
+
+    src = inspect.getsource(_W._write_typed_sections)
+    assert "compact" in src and "2400" in src

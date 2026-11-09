@@ -1098,9 +1098,11 @@ def _write_typed_sections(chat, plan_sections, segs, video_title,
                               _text=text) -> dict[str, Any]:
                 msg = _user + ("\n\n" + extra if extra else "")
                 # Dense multi-window spans need room: 1600 tokens
-                # truncated longer sections into unusable stubs.
+                # truncated longer sections into unusable stubs. Compact
+                # JSON: the model otherwise burns the budget on
+                # indentation whitespace and never finishes the body.
                 return chat(
-                    [{"role": "system", "content": "Return JSON only."},
+                    [{"role": "system", "content": "Return JSON only, compact (minimal whitespace)."},
                      {"role": "user", "content": msg}],
                     max_new_tokens=2400, temperature=0.15)
 
