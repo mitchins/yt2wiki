@@ -154,6 +154,23 @@ def canonical_window_id(raw_id: Any) -> str | None:
     return m.group(0) if m else None
 
 
+def _normalize_flags(entry: dict[str, Any]) -> dict[str, Any]:
+    """Accept the flags the model actually emits.
+
+    The prompt asks for an object, but models also emit a bare list of
+    set flag names (["housekeeping"]) — which is unambiguous. Coerce to
+    the canonical object form instead of discarding the whole digest.
+    """
+    flags = entry.get("flags", {})
+    if isinstance(flags, dict):
+        norm = {str(k): bool(v) for k, v in flags.items()}
+    elif isinstance(flags, list):
+        norm = {str(k): True for k in flags}
+    else:
+        norm = {}
+    return dict(entry, flags=norm)
+
+
 def _valid_digest(entry: Any, window_ids: set[str]) -> bool:
     if not isinstance(entry, dict):
         return False
@@ -199,6 +216,9 @@ def _digest_call(chat: Callable[..., Any], chunk: Sequence[dict[str, Any]],
         if isinstance(raw, dict) and isinstance(raw.get("digests"), list):
             got = {}
             for entry in raw["digests"]:
+                if not isinstance(entry, dict):
+                    continue
+                entry = _normalize_flags(entry)
                 if not _valid_digest(entry, ids):
                     continue
                 wid = canonical_window_id(entry.get("window_id"))

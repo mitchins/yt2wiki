@@ -324,3 +324,14 @@ def test_plan_accepts_echoed_window_ids():
                                      for w in index["windows"]}, set())
     assert plan is not None, reason
     assert plan["sections"][0]["window_ids"] == ["w-000", "w-001"]
+
+
+def test_digest_accepts_list_flags_and_echoed_ids():
+    from yt2wiki.v9.scout import _normalize_flags, _valid_digest
+
+    entry = {"window_id": "w-003 147-185s", "topics": ["t"],
+             "flags": ["housekeeping"]}
+    norm = _normalize_flags(entry)
+    assert norm["flags"] == {"housekeeping": True}
+    assert _valid_digest(norm, {"w-003"})
+    assert _normalize_flags({"window_id": "w-1"})["flags"] == {}
