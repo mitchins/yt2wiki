@@ -256,7 +256,8 @@ def adjudicate_section_with_judge(vb, sec: dict[str, Any],
         by_id = {f["frame_id"]: f for f in frames}
     if cache is None:
         cache = {}
-    cands = v9select.candidates_for_section(frames, sec["t_start"], sec["t_end"])
+    spans = sec.get("source_windows") or [[sec["t_start"], sec["t_end"]]]
+    cands = v9select.candidates_for_windows(frames, spans)
     cands = [c for c in cands if c["frame_id"] not in used] or cands
     rank = v9select.rank_section(vb, sec, cands)
     initial, alternatives = _ranked_frames(rank, by_id)
@@ -548,15 +549,34 @@ def _build_report(settings, db, source_id: str, inference_snapshot, t0: float,
             }
 
 
+def _typed_chat(manager):
+    """A chat_json callable for the configured V9 text backend."""
+    def _chat(payload_msgs, **kw):
+        with manager.acquire("text") as b:
+            return b.chat_json(payload_msgs, **kw)
+    return _chat
+
+
+def _load_segs(db, source_id: str) -> list[dict[str, Any]]:
+    return [dict(r) for r in db.query(
+        "SELECT idx, start, end, text FROM transcript_segments WHERE source_id=? ORDER BY idx",
+        (source_id,))]
+
+
 def run_source(settings, db, service, source_id: str, *,
                enable_captions: bool = False, enable_enrichment: bool = False,
                profile: str | None = None, job_id: str | None = None,
-               inference_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+               inference_snapshot: dict[str, Any] | None = None,
+               enable_typed: bool = False) -> dict[str, Any]:
     """Run the V9 publisher for one source.
 
     `job_id` adopts an existing queued job (the web worker's); otherwise a
     new job row is created (the CLI). Either way the job row carries live
     stage, final state and the published article id.
+
+    `enable_typed` selects the gated typed editorial path (scout, frozen
+    type decision, locked plan, type-constrained writing). The default
+    False path is byte-for-byte the previous V9 behavior.
     """
     from ..backends.loader import ModelManager
     from . import frames as v9frames
@@ -597,11 +617,77 @@ def run_source(settings, db, service, source_id: str, *,
 
             return _rec
 
+        typed: dict[str, Any] = {}
+        if enable_typed:
+            tplan = time.time()
+            stage("v9_plan")
+            try:
+                from . import decide as v9decide
+                from . import scout as v9scout
+                segs = _load_segs(db, source_id)
+                srow = db.query_one("SELECT * FROM sources WHERE source_id=?",
+                                    (source_id,))
+                manager = ModelManager(settings, recorder=_v9_rec("v9_plan"),
+                                       inference_snapshot=inference_snapshot)
+                index = v9scout.build_index(
+                    segs, float(srow["duration_s"] or 0),
+                    _typed_chat(manager))
+                decision = v9decide.select_type(
+                    _typed_chat(manager), srow["title"] or source_id,
+                    float(srow["duration_s"] or 0), index)
+                # A refusal is honoured whether the model names no_article
+                # or keeps a type id with status refused: either way no
+                # plan is built and nothing is published.
+                if decision.get("template_id") == "no_article" \
+                        or decision.get("status") == "refused":
+                    reason = (decision.get("rationale")
+                              or "no safe article can be composed")
+                    _record(db, v9job, "v9_plan", "refused", {},
+                            error=f"refused: {reason}"[:500])
+                    _finish_job(db, v9job, "failed",
+                                error=f"refused: {reason}"[:500])
+                    result.update({"ok": False,
+                                   "error": f"refused: {reason}"[:500],
+                                   "typed": {"decision": decision,
+                                             "refused": True}})
+                    return result
+                plan = v9decide.plan_article(_typed_chat(manager),
+                                             decision, index)
+                typed = {"index": index, "decision": decision, "plan": plan}
+                _record(db, v9job, "v9_plan", "done",
+                        {"article_type": decision.get("template_id"),
+                         "n_windows": index.get("n_windows"),
+                         "index_hash": index.get("index_hash")},
+                        started=tplan,
+                        artifacts={"decision": decision,
+                                   **({"plan": plan} if plan else {})})
+            except v9decide.EditorialError as exc:
+                _record(db, v9job, "v9_plan", "failed", {}, error=str(exc)[:500],
+                        started=tplan)
+                _finish_job(db, v9job, "failed", error=str(exc)[:500])
+                result.update({"ok": False, "error": str(exc)[:500]})
+                return result
+            result["typed"] = {k: (v if k != "index" else
+                                   {"n_windows": v.get("n_windows"),
+                                    "index_hash": v.get("index_hash")})
+                                for k, v in typed.items()}
+
         stage("v9_write")
         try:
-            article = v9writer.write_article(settings, db, source_id,
-                                             inference_snapshot=inference_snapshot,
-                                             recorder=_v9_rec("v9_write"))
+            if enable_typed and (typed.get("plan") is not None):
+                from . import blocks as v9blocks
+                article = v9writer.write_typed_article(
+                    settings, db, source_id, typed["decision"],
+                    typed["plan"], typed["index"],
+                    inference_snapshot=inference_snapshot,
+                    recorder=_v9_rec("v9_write"))
+                lead_md = (v9blocks.render_markdown(article["lead_block"])
+                           if article.get("lead_block") else "")
+            else:
+                article = v9writer.write_article(settings, db, source_id,
+                                                 inference_snapshot=inference_snapshot,
+                                                 recorder=_v9_rec("v9_write"))
+                lead_md = ""
         except v9writer.SectionWriteError as exc:
             # A required section is unusable after its bounded retries: the
             # stage and the job fail visibly, naming the exact section. No
@@ -614,7 +700,8 @@ def run_source(settings, db, service, source_id: str, *,
                            "failed_section": exc.metrics()})
             return result
         _record(db, v9job, "v9_write", "done",
-                {"sections": len(article["sections"]), "kind": article["kind"],
+                {"sections": len(article["sections"]),
+                 "kind": article.get("kind", article.get("article_type")),
                  "coverage": article["coverage"]}, started=t)
         result["article"] = {k: v for k, v in article.items() if k != "sections"}
         sections = article["sections"]
@@ -670,6 +757,21 @@ def run_source(settings, db, service, source_id: str, *,
         # --- publish ---
         t = time.time()
         stage("v9_publish")
+        if enable_typed and (typed.get("plan") is not None):
+            from . import blocks as v9blocks
+            editorial = {
+                "selection": typed.get("decision"),
+                "plan": typed.get("plan"),
+                "index_hash": (typed.get("index") or {}).get("index_hash"),
+                "lead_blocks": ([{"block": article["lead_block"]}]
+                                if article.get("lead_block") else []),
+            }
+            pub_type = article.get("article_type")
+            pub_tver = article.get("template_version")
+        else:
+            editorial = None
+            pub_type = None
+            pub_tver = None
         srow = db.query_one("SELECT * FROM sources WHERE source_id=?", (source_id,))
         provenance = {"url": srow["origin_url"], "uploader": srow["uploader"],
                       "title": srow["title"], "duration_s": srow["duration_s"],
@@ -677,15 +779,28 @@ def run_source(settings, db, service, source_id: str, *,
                       "fingerprint": settings.fingerprint(),
                       "attribution_line": (f"Compiled from the video **{srow['title']}** by {srow['uploader']}" if srow["uploader"] else f"Compiled from the local video file **{srow['title']}**")}
         md, _assets = v9publish.assemble_markdown(
-            article["title"], article["summary"], sections, picks, provenance)
+            article["title"], article["summary"], sections, picks, provenance,
+            lead_md=lead_md if enable_typed else None)
         report = _build_report(settings, db, source_id, inference_snapshot,
                                t0, article, disc, decisions, enable_captions)
+        if enable_typed and (typed.get("plan") is not None):
+            report["typed"] = {
+                "article_type": article.get("article_type"),
+                "template_version": article.get("template_version"),
+                "index_hash": (typed.get("index") or {}).get("index_hash"),
+                "n_windows": (typed.get("index") or {}).get("n_windows"),
+                "n_sections": len(sections),
+                "lead_block": bool(article.get("lead_block")),
+            }
         article_id = f"art9-{source_id}"
         pub = v9publish.persist(settings, db, article_id=article_id, source_id=source_id,
-                                job_id=v9job, title=article["title"], markdown=md,
-                                sections=sections, picks=picks,
-                                provenance=provenance, report=report,
-                                inference_snapshot=inference_snapshot)
+                                 job_id=v9job, title=article["title"], markdown=md,
+                                 sections=sections, picks=picks,
+                                 provenance=provenance, report=report,
+                                 inference_snapshot=inference_snapshot,
+                                 article_type=pub_type,
+                                 template_version=pub_tver,
+                                 editorial=editorial)
         _record(db, v9job, "v9_publish", "done", pub, started=t)
         result.update({"article_id": article_id, "ok": True,
                        "wall_s": round(time.time() - t0, 3), "report": report,

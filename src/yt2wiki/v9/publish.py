@@ -40,15 +40,29 @@ def _target_seconds(target: str) -> float | None:
         return None
 
 
+def _in_spans(secs: float, spans: list[list[float]] | None,
+              t_start: float, t_end: float, *, tol: float = 60.0) -> bool:
+    """True when a citation target sits inside admitted evidence.
+
+    With explicit admitted spans (typed multi-window sections) the target
+    must sit near one of them — not merely inside the enclosing min-max
+    interval, which can straddle sponsor gaps the section never saw.
+    """
+    if spans:
+        return any(a - tol <= secs <= b + tol for a, b in spans)
+    return t_start - tol <= secs <= t_end + tol
+
+
 def drop_far_links(body: str, url: str | None, t_start: float, t_end: float,
-                   *, tol: float = 60.0) -> str:
+                   *, tol: float = 60.0,
+                   spans: list[list[float]] | None = None) -> str:
     """De-link citations whose explicit target lies far outside the section.
 
     The writer sometimes cites spans it was never shown (e.g. a verdict
     section pointing at install-troubleshooting timestamps). A false link
-    is worse than plain text, so targets more than `tol` seconds outside
-    [t_start, t_end] lose their href. In-window links, asset links and
-    targets without an explicit `t=` are untouched.
+    is worse than plain text, so targets outside the admitted evidence
+    lose their href. In-window links, asset links and targets without an
+    explicit `t=` are untouched.
     """
     import re as _re
 
@@ -56,7 +70,8 @@ def drop_far_links(body: str, url: str | None, t_start: float, t_end: float,
         label, target = m.group(1), m.group(2)
         if url and "youtu" in url and "youtu" in target:
             secs = _target_seconds(target)
-            if secs is not None and (secs < t_start - tol or secs > t_end + tol):
+            if secs is not None and not _in_spans(secs, spans, t_start, t_end,
+                                                  tol=tol):
                 return ""  # drop false provenance entirely (no plain label)
         return m.group(0)
 
@@ -81,24 +96,30 @@ def _strip_bare_float_ranges(text: str, t_start: float | None = None,
 
 
 def _section_source_ref(t_start: float, t_end: float, url: str | None,
-                        duration: float | None) -> tuple[str, dict[str, Any]]:
+                        duration: float | None,
+                        spans: list[list[float]] | None = None
+                        ) -> tuple[str, dict[str, Any]]:
     """One subdued source reference per section, with structured provenance.
 
-    Returns (markdown_line, provenance_dict). The line is a single
-    reference covering the section's time window, formatted as m:ss.
-    For YouTube it deep-links; for local uploads it is plain metadata.
+    Returns (markdown_line, provenance_dict). The line names the admitted
+    evidence windows — comma-joined when a typed section spans disjoint
+    windows — formatted as m:ss. For YouTube it deep-links the first
+    window; for local uploads it is plain metadata. The provenance dict
+    always carries the admitted spans so exports never claim the whole
+    enclosing interval was section evidence.
     """
-    start = format_ts(t_start)
-    end = format_ts(t_end)
+    use = [list(map(float, w)) for w in spans] if spans else [[t_start, t_end]]
+    label = ", ".join(f"{format_ts(a)}–{format_ts(b)}" for a, b in use)
     prov = {"t_start": t_start, "t_end": t_end, "duration": duration,
-            "url": url, "valid": True}
+            "url": url, "valid": True, "source_windows": use}
     if url and "youtu" in url:
-        link = timestamp_url(url, t_start)
+        link = timestamp_url(url, use[0][0])
         if link:
-            return f"*Source {start}–{end} — [{start}]({link})*", prov
+            first = format_ts(use[0][0])
+            return f"*Source {label} — [{first}]({link})*", prov
     # Local upload or no link: subdued non-clickable metadata
     where = "local video" if not url or "youtu" not in url else "source"
-    return f"*Source {start}–{end} · {where}*", prov
+    return f"*Source {label} · {where}*", prov
 
 
 def _strip_inline_timestamp_links(body: str) -> str:
@@ -211,9 +232,10 @@ def _section_body(sec: dict[str, Any], provenance: dict[str, Any],
     hint = (float(sec.get("t_start", 0) or 0) + float(sec.get("t_end", 0) or 0)) / 2
     t0 = float(sec.get("t_start", 0) or 0)
     t1 = float(sec.get("t_end", 0) or 0)
+    spans = sec.get("source_windows") or None
     body = normalize_timestamps(body, provenance.get("url"),
                                 duration_s=duration, hint_s=hint)
-    body = drop_far_links(body, provenance.get("url"), t0, t1)
+    body = drop_far_links(body, provenance.get("url"), t0, t1, spans=spans)
     body = _strip_bare_float_ranges(body, t0, t1)
     # Separate data from prose: pull per-sentence citations into one section ref
     body = _strip_inline_timestamp_links(body)
@@ -261,7 +283,8 @@ def _figure_lines(sec: dict[str, Any], pick: dict[str, Any],
 
 def assemble_markdown(article_title: str, summary: str, sections: list[dict[str, Any]],
                       picks: dict[str, list[dict[str, Any]]],
-                      provenance: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+                      provenance: dict[str, Any],
+                      lead_md: str | None = None) -> tuple[str, list[dict[str, Any]]]:
     """Build markdown with section images placed after their paragraph blocks.
 
     Returns (markdown, asset_rows). Timestamp handling is consolidated:
@@ -269,10 +292,16 @@ def assemble_markdown(article_title: str, summary: str, sections: list[dict[str,
     de-duplicated to one subdued source reference per section (with an
     optional expandable detailed view in the reader), and only YouTube
     references are clickable. Local uploads get non-clickable metadata.
+    A typed lead block (already portable Markdown) is stored right after
+    the summary so every export — Markdown, standalone, ZIP, print —
+    carries the same lead content as the reader's semantic component.
     """
     lines = [f"# {article_title}", "", _attribution_quote(provenance), ""]
     if summary:
         lines.append(summary.strip())
+        lines.append("")
+    if (lead_md or "").strip():
+        lines.append(lead_md.strip())
         lines.append("")
     asset_rows: list[dict[str, Any]] = []
     duration = max([float(s.get("t_end", 0) or 0) for s in sections] or [0]) or None
@@ -287,7 +316,8 @@ def assemble_markdown(article_title: str, summary: str, sections: list[dict[str,
             ref_line, _ = _section_source_ref(
                 float(sec.get("t_start", 0) or 0),
                 float(sec.get("t_end", 0) or 0),
-                provenance.get("url"), duration)
+                provenance.get("url"), duration,
+                spans=sec.get("source_windows") or None)
             lines.append(ref_line)
             lines.append("")
         for pick in picks.get(sec["section_id"], [])[:2]:
@@ -506,16 +536,24 @@ def _commit_publication(conn, *, settings, article_id: str, source_id: str,
             (f"rev-{uuid.uuid4().hex[:12]}", article_id, int(prev["version"]),
              prev["markdown"], prev["html"], "kept before republishing", "generated",
              time.time()))
+    # Typed identity is set only by typed publishes; an untyped republish
+    # leaves a recorded type in place rather than clearing it.
+    type_update = (", article_type=excluded.article_type"
+                   if manifest.get("article_type") else
+                   ", article_type=articles.article_type")
     conn.execute(
         """INSERT INTO articles(article_id, source_id, job_id, title, markdown, html, version,
-                                  status, fingerprint, outline_json, created_at, updated_at)
-            VALUES(?,?,?,?,?,?,?, 'published',?,?,?,?)
+                                   status, fingerprint, outline_json, article_type,
+                                   created_at, updated_at)
+            VALUES(?,?,?,?,?,?,?, 'published',?,?,?,?,?)
             ON CONFLICT(article_id) DO UPDATE SET
               job_id=excluded.job_id, title=excluded.title, markdown=excluded.markdown,
               html=excluded.html, version=articles.version+1, fingerprint=excluded.fingerprint,
-              outline_json=excluded.outline_json, updated_at=excluded.updated_at""",
+              outline_json=excluded.outline_json, updated_at=excluded.updated_at"""
+        + type_update,
         (article_id, source_id, job_id, title, markdown, html, 1,
-         settings.fingerprint(), json_dumps(outline), time.time(), time.time()))
+         settings.fingerprint(), json_dumps(outline),
+         manifest.get("article_type"), time.time(), time.time()))
     conn.execute("DELETE FROM articles_fts WHERE article_id=?", (article_id,))
     conn.execute("INSERT INTO articles_fts(article_id, title, markdown) VALUES(?,?,?)",
                  (article_id, title, markdown))
@@ -535,7 +573,10 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
             title: str, markdown: str, sections: list[dict[str, Any]],
             picks: dict[str, list[dict[str, Any]]],
             provenance: dict[str, Any], report: dict[str, Any],
-            inference_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+            inference_snapshot: dict[str, Any] | None = None,
+            article_type: str | None = None,
+            template_version: int | None = None,
+            editorial: dict[str, Any] | None = None) -> dict[str, Any]:
     article = _build_v9_article(source_id, title, sections, picks, provenance)
 
     adir = settings.paths.article_dir(article_id)
@@ -568,7 +609,9 @@ def persist(settings, db, *, article_id: str, source_id: str, job_id: str,
         settings_fingerprint=provenance.get("fingerprint"),
         profile=provenance.get("profile"),
         snapshot=inference_snapshot, frame_ids=frame_ids,
-        source_dir=stage)
+        source_dir=stage,
+        article_type=article_type, template_version=template_version,
+        editorial=editorial)
     manifest = prep["manifest"]
     # The zip is a derived bundle: build it from the staged files so a zip
     # failure also lands before the commit, then promote it with the rest.
