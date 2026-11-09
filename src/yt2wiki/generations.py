@@ -232,7 +232,10 @@ def _build_manifest(*, generation_id: str, article_id: str, source_id: str,
                     providers: dict[str, dict[str, Any]],
                     source_content_hash: str, stored_frames: list[str],
                     artifacts: dict[str, str], selection: dict[str, Any] | None,
-                    created_at: float) -> dict[str, Any]:
+                    created_at: float,
+                    article_type: str | None = None,
+                    template_version: int | None = None,
+                    editorial: dict[str, Any] | None = None) -> dict[str, Any]:
     build = build_info()
     prompts: dict[str, Any] = {"recipe_version": str(recipe_version)}
     if recipe == "v9":
@@ -240,7 +243,7 @@ def _build_manifest(*, generation_id: str, article_id: str, source_id: str,
             prompts.update(prompt_hashes())
         except Exception:  # noqa: BLE001
             prompts["error"] = "prompt hash unavailable"
-    return {
+    manifest = {
         "generation_id": generation_id,
         "article_id": article_id,
         "source_id": source_id,
@@ -260,6 +263,16 @@ def _build_manifest(*, generation_id: str, article_id: str, source_id: str,
         "artifacts": artifacts,
         "created_at": created_at,
     }
+    # Typed-article identity (PR A): present only when the publisher ran a
+    # typed editorial pass. Old generations carry no such keys; readers
+    # treat that as "type unknown", never as a fabricated badge.
+    if article_type is not None:
+        manifest["article_type"] = article_type
+    if template_version is not None:
+        manifest["template_version"] = template_version
+    if editorial is not None:
+        manifest["editorial"] = editorial
+    return manifest
 
 
 def _read_build_commit(candidates: list[Path]) -> str:
@@ -470,7 +483,10 @@ def prepare_generation(db, paths, *, article_id: str, source_id: str,
                        source_content_hash: str | None = None,
                        frame_ids: list[str] | None = None,
                        selection: dict[str, Any] | None = None,
-                       source_dir: Path | None = None) -> dict[str, Any]:
+                       source_dir: Path | None = None,
+                       article_type: str | None = None,
+                       template_version: int | None = None,
+                       editorial: dict[str, Any] | None = None) -> dict[str, Any]:
     """Plan + snapshot a generation without touching the database.
 
     Snapshots from ``source_dir`` (a publisher staging directory) or the
@@ -494,7 +510,9 @@ def prepare_generation(db, paths, *, article_id: str, source_id: str,
         profile=profile, providers=providers,
         source_content_hash=_resolve_source_hash(db, source_id, source_content_hash),
         stored_frames=sorted(frame_ids or []), artifacts=artifacts,
-        selection=selection, created_at=now)
+        selection=selection, created_at=now,
+        article_type=article_type, template_version=template_version,
+        editorial=editorial)
     try:
         manifest_rel = write_manifest(paths, article_id, manifest)
     except Exception:
@@ -511,8 +529,11 @@ def record_generation(db, paths, *, article_id: str, source_id: str,
                       profile: str | None = None,
                       snapshot: dict[str, Any] | None = None,
                       source_content_hash: str | None = None,
-                      frame_ids: list[str] | None = None,
-                      selection: dict[str, Any] | None = None) -> dict[str, Any]:
+                       frame_ids: list[str] | None = None,
+                       selection: dict[str, Any] | None = None,
+                       article_type: str | None = None,
+                       template_version: int | None = None,
+                       editorial: dict[str, Any] | None = None) -> dict[str, Any]:
     """Snapshot the current article outputs as one immutable generation.
 
     Composed from :func:`prepare_generation` (snapshot + manifest files)
@@ -526,8 +547,11 @@ def record_generation(db, paths, *, article_id: str, source_id: str,
         db, paths, article_id=article_id, source_id=source_id, job_id=job_id,
         recipe=recipe, recipe_version=recipe_version,
         settings_fingerprint=settings_fingerprint, profile=profile,
-        snapshot=snapshot, source_content_hash=source_content_hash,
-        frame_ids=frame_ids, selection=selection)
+                       snapshot=snapshot, source_content_hash=source_content_hash,
+                       frame_ids=frame_ids, selection=selection,
+                       article_type=article_type,
+                       template_version=template_version,
+                       editorial=editorial)
     manifest = prep["manifest"]
     try:
         with db.transaction() as conn:

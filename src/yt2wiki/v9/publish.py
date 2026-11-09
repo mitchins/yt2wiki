@@ -190,11 +190,13 @@ def _attribution_quote(provenance: dict[str, Any]) -> str:
     # The "link" claim holds only when citations actually link: the writer
     # emits [m:ss](url&t=..) for YouTube sources, plain [m:ss] otherwise
     # (uploads, non-YouTube URLs) — normalize_timestamps only links youtu targets.
+    # Type-neutral wording: the same quote heads procedures, recipes,
+    # reports, explainers, reviews, discussions and experiments alike.
     if provenance.get("url") and "youtu" in provenance["url"]:
-        quote.append("This illustrated guide was compiled locally from the video's narration "
+        quote.append("This article was compiled locally from the video's narration "
                      "and original frames. Timestamps link each section to its source span.")
     else:
-        quote.append("This illustrated guide was compiled locally from the video's narration "
+        quote.append("This article was compiled locally from the video's narration "
                      "and original frames. Timestamps mark each claim's source span "
                      "(no source URL to link).")
     return "> " + "\n> ".join(quote)

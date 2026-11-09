@@ -230,6 +230,7 @@ CREATE TABLE IF NOT EXISTS articles (
     fingerprint    TEXT,
     verification_json TEXT,
     outline_json   TEXT,
+    article_type   TEXT,   -- typed article id (v1 catalogue) or NULL when untyped
     created_at     REAL NOT NULL,
     updated_at     REAL NOT NULL
 );
@@ -399,6 +400,22 @@ def _ensure_generation_pointer(conn: sqlite3.Connection) -> None:
             raise
 
 
+def _ensure_article_type(conn: sqlite3.Connection) -> None:
+    """Add articles.article_type if absent (typed articles, PR A).
+
+    NULL means the article predates typed selection: readers fall back to
+    the legacy kind display mapping, then to the neutral "Article" label.
+    Never backfilled — historical generated content is not rewritten.
+    """
+    if "article_type" in _table_columns(conn, "articles"):
+        return
+    try:
+        conn.execute("ALTER TABLE articles ADD COLUMN article_type TEXT")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Bring an existing database up to SCHEMA_VERSION.
 
@@ -423,6 +440,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # during the 3→4 upgrade: a stamp alone never proves the column exists
     # (a library can reach stamp 4 through a path that skipped the ALTER).
     _ensure_generation_pointer(conn)
+    _ensure_article_type(conn)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
