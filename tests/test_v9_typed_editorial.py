@@ -485,3 +485,26 @@ def test_auto_split_fallback_in_plan_article():
     decision = {"template_id": "review", "index_hash": "idx-1"}
     plan = D.plan_article(lambda messages, **kw: raw, decision, index)
     assert plan["coverage"]["auto_split"][0]["from"] == "big"
+
+
+def test_strided_sampling_keeps_head_and_tail():
+    from yt2wiki.v9.writer import _stride_lines, section_transcript_windows
+
+    lines = [f"[{i}.0-{i + 1}.0] segment {i} text padding here" for i in range(100)]
+    short = _stride_lines(lines, 100000)
+    assert short == lines
+    cut = _stride_lines(lines, 500)
+    assert len(" ".join(cut)) <= 900
+    assert cut[0] == lines[0]
+    assert cut[-1] == lines[-1]
+    assert any(str(50) in c for c in cut)
+
+    segs = [{"idx": i, "start": float(i), "end": float(i + 1),
+             "text": f"word{i} " * 30} for i in range(60)]
+    out = section_transcript_windows(segs, [[0.0, 60.0]], cap_chars=900,
+                                     sample=True)
+    assert len(out) <= 1400
+    assert "[0.0-1.0]" in out and "[59.0-60.0]" in out
+
+    out2 = section_transcript_windows(segs, [[0.0, 60.0]])
+    assert len(out2) > len(out)

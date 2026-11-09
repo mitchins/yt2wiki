@@ -1009,9 +1009,33 @@ TYPE_LEAD_SHAPE = {
 }
 
 
+def _stride_lines(lines: list[str], cap_chars: int) -> list[str]:
+    """Evenly spaced subsample: beginning, middle and end survive the cut.
+
+    Cutting to the first N characters would blind the writer to the
+    tail of long spans while still citing them. Striding keeps every
+    part of every admitted span represented.
+    """
+    total = sum(len(x) for x in lines)
+    if total <= cap_chars or len(lines) < 3:
+        return lines
+    keep = max(2, int(len(lines) * cap_chars / total))
+    out: list[str] = []
+    prev = -1
+    for i in range(keep):
+        idx = min(len(lines) - 1, (i * len(lines)) // keep)
+        if idx != prev:
+            out.append(lines[idx])
+            prev = idx
+    if out and out[-1] != lines[-1]:
+        out.append(lines[-1])
+    return out
+
+
 def section_transcript_windows(segs: Sequence[dict[str, Any]],
                                spans: Sequence[Sequence[float]],
-                               *, cap_chars: int = 9000) -> str:
+                               *, cap_chars: int = 9000,
+                               sample: bool = False) -> str:
     """Transcript excerpts for the union of admitted windows (in order).
 
     Frames and claims are selected from these spans, never from the
@@ -1019,6 +1043,10 @@ def section_transcript_windows(segs: Sequence[dict[str, Any]],
     keeps sponsor and aside material between them out of the evidence.
     Spans are sorted and overlapping segments deduped so repeated or
     out-of-order window ids cannot duplicate or scramble the evidence.
+
+    With ``sample=True`` an over-budget excerpt is stride-sampled
+    instead of head-truncated, so the writer still sees the beginning,
+    middle and end of long spans. The default path is unchanged.
     """
     ordered = sorted((float(w[0]), float(w[1])) for w in spans)
     seen: set[tuple[float, float]] = set()
@@ -1031,10 +1059,12 @@ def section_transcript_windows(segs: Sequence[dict[str, Any]],
             seen.add(key)
             lines.append(f"[{key[0]:.1f}-{key[1]:.1f}] "
                          f"{str(r.get('text') or '').strip()}")
-            if sum(len(x) for x in lines) > cap_chars:
+            if not sample and sum(len(x) for x in lines) > cap_chars:
                 break
-        if sum(len(x) for x in lines) > cap_chars:
+        if not sample and sum(len(x) for x in lines) > cap_chars:
             break
+    if sample:
+        lines = _stride_lines(lines, cap_chars)
     return "\n".join(lines)
 
 
@@ -1047,7 +1077,11 @@ def _write_typed_sections(chat, plan_sections, segs, video_title,
     represented: list = []
     for p in plan_sections:
         spans = [list(map(float, w)) for w in p.get("source_windows") or []]
-        text = section_transcript_windows(segs, spans)
+        # Bounded, representative evidence: very long spans exceed what
+        # the writer backend accepts in one prompt, so stride-sample
+        # instead of head-truncating (citations still cover full spans).
+        text = section_transcript_windows(segs, spans, cap_chars=4500,
+                                           sample=True)
         if not text.strip():
             out = {"heading": p["heading"], "body": "_No speech in this span._",
                    "key_points": [], "warnings": [], "attempts": 0}
