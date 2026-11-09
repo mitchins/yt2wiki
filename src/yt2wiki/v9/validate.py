@@ -189,6 +189,18 @@ def check_executable_blocks(article: dict[str, Any]) -> list[dict[str, Any]]:
 
 _MD_LINK_TARGET = re.compile(r"!?\[([^\]]*)\]\(([^)\s]+)\)")
 _BARE_URL = re.compile(r"https?://[^\s)>\]]+")
+#: Title-Case headings are subheadings, not instructions: words are
+#: either capitalised or short lowercase glue (and/the/of), with no
+#: shell syntax ($ - / . = ( ) \ ` ~ :) anywhere.
+_TITLE_CASE_WORD = r"(?:[A-Z][\w']*|[a-z]{1,3})"
+_SHELL_CHARS = re.compile(r"[$\-/.,=()\\`~:]")
+
+
+def _is_title_case_heading(text: str) -> bool:
+    words = text.split()
+    if len(words) < 2 or _SHELL_CHARS.search(text):
+        return False
+    return all(re.fullmatch(_TITLE_CASE_WORD, w) is not None for w in words)
 #: Timestamp citations are provenance, not claims: the label carries no
 #: value the prose does not already state. Strip them before value
 #: extraction (the publisher consolidates them into the section ref).
@@ -454,6 +466,12 @@ def check_exact_values(article: dict[str, Any],
         for lit in _extract_values(body, max_values=200):
             if lit.kind == "measurement" and _BARE_IN.fullmatch(lit.literal):
                 continue
+            if lit.kind == "command" and _is_title_case_heading(lit.literal):
+                # A Title-Case phrase with no shell syntax is a subheading,
+                # not an instruction ("File Staging and Snapshots" vs
+                # "git checkout master"). Real commands are lowercase-led
+                # or carry syntax.
+                continue
             if lit.kind == "version" and "-" in lit.literal:
                 # Hyphenated ranges are not versions; the unit-bearing
                 # measurement (or the bare-citation rule) owns them.
@@ -504,7 +522,8 @@ def check_entities(article: dict[str, Any],
     tokens = {t[:-2] if t.endswith("'s") else t for t in tokens}
 
     def _stem(word: str) -> str:
-        for suffix in ("ing", "ed", "es", "s"):
+        for suffix in ("ation", "ition", "tion", "ion",
+                       "ing", "ed", "es", "s"):
             if word.endswith(suffix) and len(word) > len(suffix) + 2:
                 return word[: -len(suffix)]
         return word

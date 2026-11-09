@@ -454,3 +454,22 @@ def test_adjacent_and_up_to_ranges_compose():
 
     assert "72-75 degrees" in _numeralize("around 72 up to 75 degrees")
     assert "72-75 degrees" in _numeralize("72 75 degrees if possible")
+
+
+def test_title_case_heading_is_not_a_command():
+    segs = _segs(["Learn git basics first."])
+    article = _article(bodies=["Staging.", "File Staging and Snapshots.",
+                               "Then commit `git commit -m msg`."])
+    res = V.validate_typed(_decision("procedure"), _plan_procedure(), _index(),
+                           article, segs, 20.0)
+    assert not any("File Staging" in f["detail"] for f in res["findings"])
+
+
+def _plan_procedure():
+    return {"template_id": "procedure",
+            "sections": [{"section_id": f"sec-{i}", "slot": "steps",
+                          "heading": f"H{i}",
+                          "source_windows": [[0.0, 20.0]],
+                          "t_start": 0.0, "t_end": 20.0, "window_ids": []}
+                         for i in range(3)],
+            "coverage": {}}
