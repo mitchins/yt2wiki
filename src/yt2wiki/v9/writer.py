@@ -1309,6 +1309,17 @@ def write_typed_article(settings, db, source_id: str, decision: dict[str, Any],
             raw = backend.chat(payload_msgs, **kw)
             from ..backends.llm import extract_json
             return extract_json(raw)
+        # Plain chat first: guided-JSON decoding truncates long section
+        # bodies server-side (finish_reason=length well under budget)
+        # while plain chat completes them. Guided JSON remains the
+        # fallback for replies that do not parse. Transport errors
+        # propagate immediately — they are not parse problems.
+        from ..backends.llm import extract_json as _extract_json
+        with manager.acquire("text") as b:
+            try:
+                return _extract_json(b.chat(payload_msgs, **kw))
+            except ValueError:
+                pass
         with manager.acquire("text") as b:
             return b.chat_json(payload_msgs, **kw)
 

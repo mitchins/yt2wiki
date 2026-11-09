@@ -29,8 +29,14 @@ def _section_reply(section_id="sec-x", heading="H"):
 
 class _StubText:
     def __init__(self, plan_sections):
+        import json as _json
+
         self.plan_sections = plan_sections
         self.calls = []
+        self._json = _json
+
+    def chat(self, messages, **kw):
+        return self._json.dumps(self.chat_json(messages, **kw))
 
     def chat_json(self, messages, **kw):
         user = messages[-1]["content"] if messages else ""
