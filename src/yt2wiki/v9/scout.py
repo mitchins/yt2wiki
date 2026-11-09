@@ -21,7 +21,7 @@ import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from .values import extract_exact_values
+from .values import count_actions, extract_exact_values
 
 #: Digest batching: windows per model call and token ceiling. Two
 #: windows per call with room to spare: four windows routinely
@@ -112,6 +112,7 @@ def window_features(window: dict[str, Any]) -> dict[str, Any]:
     return {"window_id": window["window_id"],
             "t_start": window["t_start"], "t_end": window["t_end"],
             "chars": window["chars"],
+            "actions": count_actions(window["text"]),
             "literals": [{"kind": lit.kind, "value": lit.literal}
                            for lit in lits[:20]]}
 

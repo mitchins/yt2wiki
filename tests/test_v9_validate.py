@@ -273,3 +273,49 @@ def test_unbalanced_fence_is_critical():
     res = V.validate_typed(_decision("procedure"), _procedure_plan(),
                             _index(), article, segs, 20.0)
     assert any(f["code"] == "unbalanced_syntax" for f in res["findings"])
+
+
+def test_possessive_of_attested_word_is_silent():
+    segs = _segs(["The deck has an OLED screen."])
+    article = _article(bodies=["Combine.", "The Deck's screen is bright.",
+                               "Done."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert not [f for f in res["findings"]
+                if f["code"] == "unattested_entity"], res["findings"]
+
+
+def test_year_mutation_and_decade_alias():
+    segs = _segs(["The system cost $300,000 in 1976, booming in the 1990s."])
+    decision = _decision("report")
+    plan = _plan("report", ("lede", "verified_facts", "as_of"))
+    good = _article("report", bodies=["It cost $300,000.", "In the 90s.",
+                                      "As of today."],
+                    slots=("lede", "verified_facts", "as_of"))
+    res = V.validate_typed(decision, plan, _index(), good, segs, 30.0)
+    assert res["status"] == "ready", res["findings"]
+    bad = _article("report", bodies=["It cost $300,000.", "In 1986.",
+                                     "As of today."],
+                   slots=("lede", "verified_facts", "as_of"))
+    res = V.validate_typed(decision, plan, _index(), bad, segs, 30.0)
+    assert any(f["code"] == "unsupported_exact_value" for f in res["findings"])
+
+
+def test_frontmatter_title_is_not_a_command():
+    segs = _segs(["Learn git basics."])
+    decision = _decision("explainer")
+    plan = _plan("explainer", ("answer", "explanation"))
+    article = _article("explainer", bodies=["Git basics.", "Explained."],
+                       slots=("answer", "explanation"))
+    article["title"] = "Git Repository Mechanics and Versioning"
+    res = V.validate_typed(decision, plan, _index(), article, segs, 20.0)
+    assert not any(f["code"] == "ungrounded_executable_block"
+                   for f in res["findings"]), res["findings"]
+
+
+def test_decision_trace_vocab_is_major_not_blocking():
+    segs = _segs(["Bake the loaf."])
+    article = _article(bodies=["Combine.", "Mix well.",
+                               "The leading candidate rises first."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert res["status"] == "ready"
+    assert any(f["code"] == "decision_trace_leak" for f in res["findings"])

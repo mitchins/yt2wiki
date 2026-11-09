@@ -19,8 +19,12 @@ from typing import Any
 from ..literals import Literal, dedupe_literals, extract_literals
 
 #: Domestic unit words the shared MEASURE_RE unit list does not cover.
+#: Short abbreviations (in/ft/mm/cm/oz/lb/g/ml/px) are deliberately
+#: absent: after number-word normalisation they fire on ordinary prose
+#: ("factor of 4 in cost" is not 4 inches). Full words and unambiguous
+#: capitals (GB/TB/nits) stay.
 _COOKING_UNITS = (
-    "cups?", "teaspoons?", "tablespoons?", "tsp", "tbsp", "ounces?", "oz",
+    "cups?", "teaspoons?", "tablespoons?", "tsp", "tbsp", "ounces?",
     "pounds?", "lbs?", "grams?", "degrees?", "hertz", "miles?", "feet",
     "foot", "inches?", "nits", "pixels?", "liters?", "litres?",
     "milliliters?", "pints?", "quarts?", "gallons?", "pinch(?:es)?",
@@ -53,12 +57,18 @@ CURRENCY_RE = re.compile(
     rf"{_NOHIT_BEFORE}(?P<value>\$\d(?:[\d,]*\d)?(?:\.\d{{1,2}})?)")
 COMMA_NUMBER_RE = re.compile(
     rf"{_NOHIT_BEFORE}(?P<value>\d{{1,3}}(?:,\d{{3}})+)(?![\w\d,])")
+#: Years 1500-2099 are exact values (event dates, model years): the
+#: handoff requires the gate to catch year mutations (1976 -> 1986).
+#: A trailing "s" is part of the literal ("1990s"); the bare decade
+#: ("90s") is emitted as a supported alias for prose that abbreviates.
+YEAR_RE = re.compile(
+    rf"{_NOHIT_BEFORE}(?P<value>(?:1[5-9]|20)\d{{2}}s?)(?![\w\d])")
 
 
 def _supplement(text: str) -> list[Literal]:
     out: list[Literal] = []
     for rx in (RANGE_MEASURE_RE, FRACTION_MEASURE_RE, UNIT_MEASURE_RE,
-               CURRENCY_RE, COMMA_NUMBER_RE):
+               CURRENCY_RE, COMMA_NUMBER_RE, YEAR_RE):
         for m in rx.finditer(text):
             # The literal is the whole match (number plus unit): "4 1/2
             # cups" and "4 1/2 grams" are different claims and must never
@@ -68,7 +78,45 @@ def _supplement(text: str) -> list[Literal]:
                 continue
             out.append(Literal(kind="measurement", literal=value,
                                context=text[max(0, m.start() - 40):m.end() + 40]))
+            bare = value[:-1] if value.endswith("s") else value
+            if rx is YEAR_RE and len(bare) == 4 and bare[:2] in ("19", "20"):
+                out.append(Literal(kind="measurement",
+                                   literal=bare[2:] + "s",
+                                   context=text[max(0, m.start() - 40):m.end() + 40]))
     return out
+
+
+#: Imperative openers: a sentence starting with one of these verbs is
+#: an executable instruction candidate. Shared with the planner so the
+#: type decision can see tutorial density, not just topics.
+_IMPERATIVE_VERBS = frozenset(
+    ["run", "install", "configure", "set", "create", "open", "click", "type", "paste", "copy", "download", "upload", "enable", "disable", "connect", "select", "choose", "enter", "add", "remove", "delete", "edit", "save", "build", "deploy", "start", "stop", "restart", "execute", "use", "go", "navigate", "launch", "update", "change", "switch", "toggle", "check", "verify", "test", "send", "receive", "write", "read", "import", "export", "peel", "chop", "slice", "stir", "bake", "knead", "mix", "combine", "pour", "preheat", "measure", "weigh", "divide", "shape", "score", "proof", "rise", "scan", "pair", "plug"])
+_IMPERATIVE_RE = re.compile(
+    r"^(?:\d+[.)]\s*|[-*\u2022]\s*)?"
+    r"(?:(?:then|next|now|also|just|simply|please)\s+)?(\w+)\b",
+    re.IGNORECASE)
+_STEP_MARK = re.compile(r"\bstep\s+\d+\b", re.IGNORECASE)
+
+
+def count_actions(text: str) -> int:
+    """Deterministic executability signal for one span of transcript.
+
+    Counts imperative sentences ("Set your allow list"), explicit step
+    markers and fenced command blocks. The planner uses the density to
+    tell executable tutorials (procedure) from conceptual ones
+    (explainer); the writer's own prompts remain the authority on prose.
+    """
+    if not text:
+        return 0
+    hits = 0
+    prose = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    for sent in re.split(r"[.!?]+\s*", prose):
+        m = _IMPERATIVE_RE.match(sent.strip())
+        if m and m.group(1).lower() in _IMPERATIVE_VERBS:
+            hits += 1
+    hits += len(_STEP_MARK.findall(prose))
+    hits += text.count("```") // 2
+    return hits
 
 
 def extract_exact_values(text: str, *, max_values: int = 200,

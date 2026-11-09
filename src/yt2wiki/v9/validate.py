@@ -1,7 +1,7 @@
 """Type-aware publication validation, Pass 5 (PR C).
 
-Deterministic checks that run after image selection and before
-``v9.publish.persist``. Three outcomes:
+Deterministic checks that run after writing and before image
+selection and ``v9.publish.persist``. Three outcomes:
 
 - ``ready``: publish normally;
 - ``needs_review``: a meaningful candidate exists but a critical check
@@ -16,16 +16,19 @@ critical finding):
    required and allowed blocks, no ungrounded executable blocks;
 2. exact-value/entity ledger: every exact literal in the article must
    be supported by the section's own evidence spans (King Arthur
-   quantities, Vox $300k, Dimorphos, Git quoting are regression
-   fixtures); mid-sentence proper names must occur in the transcript;
+   quantities, Vox $300k, Dimorphos are regression fixtures);
+   mid-sentence proper names must occur in the transcript
+   (same-length near-misses are likely corruption; plurals, stems
+   and possessives are not);
 3. temporal: spans inside the source, overlapping real segments;
 4. origin/role: section spans never overlap decision-excluded
    (sponsor/housekeeping) spans;
 5. coverage: every non-excluded window is represented or explicitly
    listed as unassigned (unrepresented substantive windows are
    findings, capped);
-6. reader integrity: no internal ids, raw dicts, model-emitted HTML
-   or decision-trace language in prose.
+6. reader integrity: no internal ids, raw dicts, model-emitted HTML,
+   unbalanced fences or decision-trace language in prose; lead,
+   summary and headings are checked against full-transcript evidence.
 
 Cosmetic warnings never fail publication: only ``critical`` findings
 produce ``needs_review``.
@@ -46,6 +49,13 @@ MAJOR = "major"
 
 _INTERNAL_ID = re.compile(
     r"\bev-[0-9a-f]{4,}\b|\bsec-[0-9a-z-]{4,}\b|\bw-\d{3}\b|\bfact-[\w-]+\b")
+#: Decision-trace vocabulary belongs in diagnostics, never prose. Major
+#: only: ordinary words overlap the pattern class ("candidate" as in
+#: vaccine candidate), so this is leakage hygiene, not fabrication.
+_DECISION_TRACE = re.compile(
+    r"\b(candidate|incumbent|rank_reason|judge_reason|judge advised|"
+    r"z1_fallback|ranked frames|veto Shortlist|adjudicat\w+)\b",
+    re.IGNORECASE)
 _BALANCED_CODE = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
 _RAW_HTML = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(?:\s[^<>]*)?>")
 _FENCE = re.compile(r"```.*?```", re.DOTALL)
@@ -280,6 +290,12 @@ def check_exact_values(article: dict[str, Any],
                 # `Label: description` is definition-list prose, not an
                 # assignment claim: skip, do not flag.
                 continue
+            if lit.kind == "command" and sec.get("section_id") in (
+                    "lead", "frontmatter"):
+                # Titles and summaries trip the command scanner on
+                # ordinary title case ("Git Repository Mechanics..."):
+                # frontmatter carries no executable instructions.
+                continue
             if _literals.article_value_supported(lit.literal, supported) is None:
                 out.append(_finding(
                     "unsupported_exact_value", CRITICAL,
@@ -304,29 +320,44 @@ def check_entities(article: dict[str, Any],
     transcript = "\n".join(str(r.get("text") or "") for r in segs)
     lowered = transcript.lower()
     tokens = set(re.findall(r"[a-z][a-z']+", lowered))
+    # Possessives attest their base word ("deck's" supports "Deck's").
+    tokens = {t[:-2] if t.endswith("'s") else t for t in tokens}
+
+    def _stem(word: str) -> str:
+        for suffix in ("ing", "ed", "es", "s"):
+            if word.endswith(suffix) and len(word) > len(suffix) + 2:
+                return word[: -len(suffix)]
+        return word
+
+    def _base(word: str) -> str:
+        w = word.lower()
+        if w.endswith("'s"):
+            w = w[:-2]
+        return _stem(w.rstrip("'"))
 
     def _check_name(name: str, sec_id: str | None) -> None:
         head = name.split()[0]
         if head in _NAME_ALLOWLIST or head in _KNOWN_UNITS:
             return
-        parts = name.lower().split()
+        parts = [_base(p) for p in name.split()]
         if name.lower() in lowered or all(p in tokens for p in parts):
             return
-        close = difflib.get_close_matches(head.lower(), tokens, n=1,
+        close = difflib.get_close_matches(_base(head), tokens, n=1,
                                           cutoff=0.85)
-
-        def _stem(word: str) -> str:
-            for suffix in ("ing", "ed", "es", "s"):
-                if word.endswith(suffix) and len(word) > len(suffix) + 2:
-                    return word[: -len(suffix)]
-            return word
-
+        if close and _base(head) == close[0]:
+            # Possessive or bare plural of an attested word ("Deck's"
+            # for "deck") is style, not evidence: no finding.
+            return
         if close and _stem(head.lower()) == _stem(close[0]):
-            # Same stem ("Automation" for "automating", bare plurals) is
-            # style or morphology, not corruption: operator adjudicates.
+            # Same stem ("Automation" for "automating") is morphology,
+            # not corruption: operator adjudicates.
             severity, why = MAJOR, f"same stem as {close[0]!r}"
-        elif close:
+        elif close and len(_base(head)) == len(close[0]):
+            # Same-length near-miss ("Dimorphus" for "Dimorphos") is the
+            # substitution/typo class: likely corruption.
             severity, why = CRITICAL, f"near {close[0]!r} — likely corruption"
+        elif close:
+            severity, why = MAJOR, f"near {close[0]!r} — different word"
         else:
             severity, why = MAJOR, "no transcript neighbour — ASR gap or invention"
         out.append(_finding(
@@ -545,6 +576,11 @@ def check_reader_integrity(article: dict[str, Any]) -> list[dict[str, Any]]:
             out.append(_finding("raw_html_in_prose", CRITICAL,
                                 f"model-emitted markup {h.group(0)[:40]!r}",
                                 sec.get("section_id")))
+        dt = _DECISION_TRACE.search(prose)
+        if dt:
+            out.append(_finding("decision_trace_leak", MAJOR,
+                                f"internal judging vocabulary {dt.group(0)!r} "
+                                f"in prose", sec.get("section_id")))
         for fence in re.findall(r"```(.*?)```", body, flags=re.DOTALL):
             if fence.count('"') % 2 or fence.count("`") % 2:
                 out.append(_finding("unbalanced_syntax", CRITICAL,

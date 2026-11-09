@@ -270,7 +270,7 @@ def test_plan_failure_names_the_cause():
 
 def test_many_windows_survive_without_merging():
     segs = [{"idx": i, "start": i * 30.0, "end": (i + 1) * 30.0,
-             "text": ("Segment %d discusses topic alpha. " % i) * 30}
+             "text": (f"Segment {i} discusses topic alpha. ") * 30}
             for i in range(300)]
     wins = S.build_windows(segs, 9000.0, target_windows=24)
     assert len(wins) > 64
@@ -311,7 +311,6 @@ def test_window_id_echo_is_canonicalised():
 
 def test_plan_accepts_echoed_window_ids():
     index = _index()
-    decision = {"template_id": "review", "index_hash": index["index_hash"]}
     raw = {"template_id": "review",
            "sections": [{"section_id": "s", "slot": "subject",
                          "heading": "H",
@@ -335,3 +334,20 @@ def test_digest_accepts_list_flags_and_echoed_ids():
     assert norm["flags"] == {"housekeeping": True}
     assert _valid_digest(norm, {"w-003"})
     assert _normalize_flags({"window_id": "w-1"})["flags"] == {}
+
+
+def test_count_actions_counts_imperatives_and_commands():
+    from yt2wiki.v9.values import count_actions
+
+    assert count_actions("Set your allow list. Then scan the code.") == 2
+    assert count_actions("The system ships with tools.") == 0
+    assert count_actions("Run `git branch demo` now.") >= 1
+    assert count_actions("") == 0
+
+
+def test_year_and_decade_extraction():
+    from yt2wiki.v9 import values as _V
+
+    got = {lit.literal for lit in _V.extract_exact_values(
+        "In 1976 dollars; in the 90s; not in 20s fashion.")}
+    assert "1976" in got and "90s" in got
