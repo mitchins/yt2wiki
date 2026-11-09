@@ -256,12 +256,16 @@ _NUMBER_WORD = re.compile(r"\b(zero|one|two|three|four|five|six|seven|eight|"
 
 
 _DIGIT_COMMA = re.compile(r"(?<=\d),(?=\d)")
-#: "3.3 to 5.0 volts" denotes the same range as "3.3-5.0 V": rewrite
-#: to the dash form so the range extractor compares both endpoints.
+_UNITS_WORDS = (r"volts?|V\b|hertz|Hz|degrees?|inches?|feet|miles?|nits|"
+                r"watts?|percent|%|mm|cm|grams?|cups?|teaspoons?|tablespoons?")
+#: "3.3 to 5.0 volts", "72 up to 75 degrees" and bare "72 75 degrees"
+#: all denote the same range as "3.3-5.0 V": rewrite to the dash form
+#: so the range extractor compares both endpoints.
 _TO_RANGE = re.compile(
-    r"\b(\d+(?:\.\d+)?)\s+to\s+(\d+(?:\.\d+)?)\s+"
-    r"(volts?|V\b|hertz|Hz|degrees?|inches?|feet|miles?|nits|watts?|"
-    r"percent|%|mm|cm|grams?|cups?|teaspoons?|tablespoons?)\b",
+    rf"\b(\d+(?:\.\d+)?)\s+(?:to|up\s+to)\s+(\d+(?:\.\d+)?)\s+({_UNITS_WORDS})\b",
+    re.IGNORECASE)
+_ADJACENT_RANGE = re.compile(
+    rf"\b(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+({_UNITS_WORDS})\b",
     re.IGNORECASE)
 
 #: Decade words. Unqualified forms emit both century readings: getting
@@ -337,6 +341,9 @@ _VOLTS_WORD = re.compile(r"\bvolts?\b", re.IGNORECASE)
 def _numeralize(text: str) -> str:
     text = text.replace("−", "-")
     text = _TO_RANGE.sub(r"\1-\2 \3", text)
+    # Bare adjacent numbers with a unit read as a range ("72 75
+    # degrees"); without a unit they stay separate values.
+    text = _ADJACENT_RANGE.sub(r"\1-\2 \3", text)
     text = _DIGIT_COMMA.sub("", text)
     # Unit abbreviations vs full words denote the same value.
     text = _VOLTS_WORD.sub("V", text)

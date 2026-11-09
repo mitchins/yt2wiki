@@ -447,3 +447,10 @@ def test_nowhere_value_stays_critical():
     res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
     assert any(f["code"] == "unsupported_exact_value"
                and f["severity"] == "critical" for f in res["findings"])
+
+
+def test_adjacent_and_up_to_ranges_compose():
+    from yt2wiki.v9.validate import _numeralize
+
+    assert "72-75 degrees" in _numeralize("around 72 up to 75 degrees")
+    assert "72-75 degrees" in _numeralize("72 75 degrees if possible")
