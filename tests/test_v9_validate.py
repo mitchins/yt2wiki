@@ -391,3 +391,30 @@ def test_decade_words_map_to_years():
 
     assert "1970s" in _numeralize("the nineteen seventies oil crisis")
     assert "1990s" in _numeralize("back in the nineties")
+
+
+def test_mangled_clock_is_major_not_value():
+    segs = _segs(["Bake the loaf."])
+    article = _article(bodies=["Combine.", "Mix.", "Knead 0:00:64.9 then bake."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert any(f["code"] == "bare_second_citation" for f in res["findings"])
+    assert not any(f["code"] == "unsupported_exact_value"
+                   and "64.9" in f["detail"] for f in res["findings"])
+
+
+def test_timestamp_citation_labels_are_not_values():
+    segs = _segs(["Bake the loaf."])
+    article = _article(bodies=["Combine.", "Mix well.",
+                               "Knead [2:34](https://example.com/watch?v=x&t=154)."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert not any(f["code"] == "unsupported_exact_value" for f in res["findings"])
+
+
+def test_bare_in_is_not_a_measurement():
+    from yt2wiki.v9 import values as _V
+
+    assert _V.extract_exact_values("at 5500 in the original")
+    segs = _segs(["Bake the loaf with increased storage."])
+    article = _article(bodies=["Combine.", "Mix.", "Uses 5500 in storage."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert not any("5500 in" in f["detail"] for f in res["findings"])

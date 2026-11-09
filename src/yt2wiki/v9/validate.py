@@ -189,6 +189,15 @@ def check_executable_blocks(article: dict[str, Any]) -> list[dict[str, Any]]:
 
 _MD_LINK_TARGET = re.compile(r"!?\[([^\]]*)\]\(([^)\s]+)\)")
 _BARE_URL = re.compile(r"https?://[^\s)>\]]+")
+#: Timestamp citations are provenance, not claims: the label carries no
+#: value the prose does not already state. Strip them before value
+#: extraction (the publisher consolidates them into the section ref).
+_TS_CITATION = re.compile(r"!?\[([^\]]*)\]\(([^)\s]*[?&]t=\d[^)\s]*)\)")
+#: Mangled clock debris the normaliser could not resolve ("0:00:64.9").
+_MANGLED_CLOCK = re.compile(r"\b\d{1,3}:\d{2}(?::\d{2})?\.\d+\b")
+#: Bare "in" is a preposition far more often than inches: "5500 in the
+#: original" is not a measurement. Full "inches" still extracts.
+_BARE_IN = re.compile(r"^[\d.,]+\s+in$", re.IGNORECASE)
 _BARE_KEYVALUE_VALUE = re.compile(r"[\W_]*$")
 _LIST_MARKER = re.compile(r"(?m)^(\s*)(?:[*\-+]\s+|\d+[.)]\s+)")
 #: Assignment-form keyvalues only: `key=value` or `key:value` with no
@@ -356,7 +365,8 @@ def _prose_values_text(body: str) -> str:
     `Label=**` keyvalue. Number words become digits symmetrically on
     both sides of the comparison.
     """
-    text = _MD_LINK_TARGET.sub(r"\1", body)
+    text = _TS_CITATION.sub(" ", body)
+    text = _MD_LINK_TARGET.sub(r"\1", text)
     text = _BARE_URL.sub(" ", text)
     text = text.replace("**", " ").replace("__", " ")
     return _numeralize(text)
@@ -401,13 +411,21 @@ def check_exact_values(article: dict[str, Any],
                 last = m.end()
         stripped.append(body[last:])
         body = "".join(stripped)
-        if not evidence.strip():
+        for m in _MANGLED_CLOCK.finditer(body):
+            out.append(_finding(
+                "bare_second_citation", MAJOR,
+                f"{m.group(0)!r} looks like a mangled timestamp citation; "
+                f"use m:ss citations", sec.get("section_id")))
+        body = _MANGLED_CLOCK.sub(" ", body)
+        if not body.strip():
             continue
         supported = [lit.literal for lit in
                      _extract_values(evidence, max_values=200)]
         strict_kv = {m.group(1) + "=" + m.group(3)
                      for m in _STRICT_KV.finditer(body)}
         for lit in _extract_values(body, max_values=200):
+            if lit.kind == "measurement" and _BARE_IN.fullmatch(lit.literal):
+                continue
             if lit.kind == "keyvalue" and lit.literal not in strict_kv:
                 # `Label: description` is definition-list prose, not an
                 # assignment claim: skip, do not flag.
