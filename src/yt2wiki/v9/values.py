@@ -38,7 +38,11 @@ _FRACTION = r"(?:\d+\s+)?\d+\s*/\s*\d+"
 _NUM = r"(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
 _NUMBER = _NUM
 _RANGE = rf"{_NUM}\s*-\s*{_NUM}"
-_UNIT_ALT = "|".join(_COOKING_UNITS)
+#: Unambiguous capital/symbol units for the supplement. Single
+#: lowercase letters are excluded on purpose: "in", "a" and "s" are
+#: prepositions/articles/plurals far more often than units.
+_SAFE_CAPS = ("V", "Hz", "%", "°C", "°F")
+_UNIT_ALT = "|".join(_COOKING_UNITS + _SAFE_CAPS)
 #: A bare digit is never a value when it is the denominator of a
 #: fraction, part of a larger number, or the tail of a range: /, . and
 #: - join, they do not separate. A minus that follows a digit is a
@@ -48,7 +52,7 @@ _NOHIT_BEFORE = r"(?<![\w./])"
 _SIGN = r"(?:(?<!\d)[-−])?"
 
 RANGE_MEASURE_RE = re.compile(
-    rf"{_NOHIT_BEFORE}{_SIGN}(?P<value>{_RANGE})\s*(?P<unit>{_UNIT_ALT})(?![\w])",
+    rf"{_NOHIT_BEFORE}{_SIGN}(?P<value>{_RANGE}(?:\s*(?:{_UNIT_ALT}))?)(?![\w])",
     re.IGNORECASE)
 FRACTION_MEASURE_RE = re.compile(
     rf"{_NOHIT_BEFORE}{_SIGN}(?P<value>{_FRACTION})\s*(?P<unit>{_UNIT_ALT})(?![\w])",
@@ -79,8 +83,9 @@ def _supplement(text: str) -> list[Literal]:
         for m in rx.finditer(text):
             # The literal is the whole match (number plus unit): "4 1/2
             # cups" and "4 1/2 grams" are different claims and must never
-            # compare equal.
-            value = m.group(0).strip()
+            # compare equal. Trailing sentence periods are punctuation,
+            # not value text.
+            value = m.group(0).strip().rstrip(".")
             if not value:
                 continue
             out.append(Literal(kind="measurement", literal=value,

@@ -256,6 +256,13 @@ _NUMBER_WORD = re.compile(r"\b(zero|one|two|three|four|five|six|seven|eight|"
 
 
 _DIGIT_COMMA = re.compile(r"(?<=\d),(?=\d)")
+#: "3.3 to 5.0 volts" denotes the same range as "3.3-5.0 V": rewrite
+#: to the dash form so the range extractor compares both endpoints.
+_TO_RANGE = re.compile(
+    r"\b(\d+(?:\.\d+)?)\s+to\s+(\d+(?:\.\d+)?)\s+"
+    r"(volts?|V\b|hertz|Hz|degrees?|inches?|feet|miles?|nits|watts?|"
+    r"percent|%|mm|cm|grams?|cups?|teaspoons?|tablespoons?)\b",
+    re.IGNORECASE)
 
 #: Decade words. Unqualified forms emit both century readings: getting
 #: the century wrong would block a correct article, while the rare
@@ -329,6 +336,7 @@ _VOLTS_WORD = re.compile(r"\bvolts?\b", re.IGNORECASE)
 
 def _numeralize(text: str) -> str:
     text = text.replace("−", "-")
+    text = _TO_RANGE.sub(r"\1-\2 \3", text)
     text = _DIGIT_COMMA.sub("", text)
     # Unit abbreviations vs full words denote the same value.
     text = _VOLTS_WORD.sub("V", text)
@@ -383,9 +391,17 @@ def check_exact_values(article: dict[str, Any],
     """Invariant 2a: every exact literal in prose is source-supported.
 
     Direction is article -> evidence: dropped values are omissions
-    (coverage), invented ones are critical. Comparison normalises
-    cosmetically but preserves the original literal.
+    (coverage); invented values are critical. Comparison normalises
+    cosmetically but preserves the original literal. A value the
+    section spans lack but the transcript states somewhere is NOT
+    invented — it is miscited. That is a major misplaced-span finding
+    (wrong citation scope), never a critical fabrication; only a
+    value with no transcript span anywhere is critical.
     """
+    whole = _numeralize(_evidence_text(
+        segs, [[0.0, float(duration_s or 0) or 0.0]]))
+    whole_supported = [lit.literal for lit in
+                       _extract_values(whole, max_values=2000)]
     out: list[dict[str, Any]] = []
     for sec in article.get("sections") or []:
         body = _prose_values_text(str(sec.get("body") or ""))
@@ -431,6 +447,10 @@ def check_exact_values(article: dict[str, Any],
         for lit in _extract_values(body, max_values=200):
             if lit.kind == "measurement" and _BARE_IN.fullmatch(lit.literal):
                 continue
+            if lit.kind == "version" and "-" in lit.literal:
+                # Hyphenated ranges are not versions; the unit-bearing
+                # measurement (or the bare-citation rule) owns them.
+                continue
             if lit.kind == "keyvalue" and lit.literal not in strict_kv:
                 # `Label: description` is definition-list prose, not an
                 # assignment claim: skip, do not flag.
@@ -442,10 +462,18 @@ def check_exact_values(article: dict[str, Any],
                 # frontmatter carries no executable instructions.
                 continue
             if _literals.article_value_supported(lit.literal, supported) is None:
-                out.append(_finding(
-                    "unsupported_exact_value", CRITICAL,
-                    f"{lit.kind} {lit.literal!r} has no source span in "
-                    f"this section's evidence", sec.get("section_id")))
+                if _literals.article_value_supported(lit.literal, whole_supported) is not None:
+                    out.append(_finding(
+                        "misplaced_span_value", MAJOR,
+                        f"{lit.kind} {lit.literal!r} is stated elsewhere "
+                        f"in the transcript, not in this section's spans; "
+                        f"union the evidencing span or move the claim",
+                        sec.get("section_id")))
+                else:
+                    out.append(_finding(
+                        "unsupported_exact_value", CRITICAL,
+                        f"{lit.kind} {lit.literal!r} has no source span in "
+                        f"this section's evidence", sec.get("section_id")))
     return out
 
 

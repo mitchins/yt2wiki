@@ -371,10 +371,11 @@ def test_compound_numbers_compose():
 
 def test_bare_range_with_unit_is_still_value_gated():
     segs = _segs(["The range is 3.3 to 5.0 volts."])
-    article = _article(bodies=["Combine.", "Mix.", "Range 3.3-5.0 V."])
+    article = _article(bodies=["Combine.", "Mix.", "Range 9.9-5.0 V."])
     res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
     assert not any(f["code"] == "bare_second_citation" for f in res["findings"])
-    assert any(f["code"] == "unsupported_exact_value" for f in res["findings"])
+    assert any(f["code"] == "unsupported_exact_value"
+               and "9.9" in f["detail"] for f in res["findings"])
 
 
 def test_decision_trace_vocab_is_major_only():
@@ -425,3 +426,24 @@ def test_mid_decade_spacing_variants():
 
     assert _numeralize("solar in the mid90s") == "solar in the 90s"
     assert _numeralize("in the early 1970s") == "in the early 1970s"
+
+
+def test_misplaced_value_is_major_not_critical():
+    segs = _segs(["Bake at 350 degrees.", "Mix well.", "Rest a moment.",
+                  "The range is 3.3 to 5.0 volts."])
+    article = _article(bodies=["Range 3.3-5.0 V.", "Mix.", "Bake."])
+    for sec in article["sections"]:
+        sec["t_start"], sec["t_end"] = 0.0, 20.0
+        sec["source_windows"] = [[0.0, 20.0]]
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 40.0)
+    assert res["status"] == "ready"
+    assert any(f["code"] == "misplaced_span_value" for f in res["findings"])
+    assert not any(f["severity"] == "critical" for f in res["findings"])
+
+
+def test_nowhere_value_stays_critical():
+    segs = _segs(["Bake the loaf."])
+    article = _article(bodies=["Combine.", "Mix.", "Bake at 999 degrees."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert any(f["code"] == "unsupported_exact_value"
+               and f["severity"] == "critical" for f in res["findings"])
