@@ -201,7 +201,8 @@ def test_job_view_reports_v9_stage_progress(env):
     v = views.job_view(job, live={"j"})
     keys = [s["key"] for s in v["steps"]]
     assert keys == ["acquisition", "transcribe", "frame_candidates", "v9_plan",
-                    "v9_write", "v9_discover", "v9_select", "v9_publish"]
+                    "v9_write", "v9_validate", "v9_discover", "v9_select",
+                    "v9_publish"]
     assert v["current_label"] == "Choose the images"
     assert v["steps"][4]["detail"] == "7 sections · Experiment"
     assert v["steps"][0]["detail"] == "Reused from an earlier run"

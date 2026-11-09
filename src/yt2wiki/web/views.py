@@ -109,6 +109,7 @@ JOB_STAGES = (
     ("frame_candidates", "Collect source frames"),
     ("v9_plan", "Plan the article"),
     ("v9_write", "Write the guide"),
+    ("v9_validate", "Check the facts"),
     ("v9_discover", "Gather frames per section"),
     ("v9_select", "Choose the images"),
     ("v9_caption", "Captions"),

@@ -1140,9 +1140,21 @@ def _write_lead_block(chat, decision, index) -> dict[str, Any] | None:
     shape = TYPE_LEAD_SHAPE.get(tid or "")
     if not shape:
         return None
+    banned: set[str] = set()
+    for entry in decision.get("excluded_windows") or []:
+        if isinstance(entry, dict) and entry.get("window_id"):
+            banned.add(entry["window_id"])
+    digests = index.get("digests") or {}
+    for w in (index.get("windows") or []):
+        wid = w.get("window_id")
+        flags = (digests.get(wid) or {}).get("flags") or {}
+        if wid in banned or flags.get("ad") or flags.get("housekeeping"):
+            banned.add(wid)
     lines = []
     for w in (index.get("windows") or [])[:24]:
-        d = (index.get("digests") or {}).get(w["window_id"]) or {}
+        if w.get("window_id") in banned:
+            continue
+        d = digests.get(w["window_id"]) or {}
         claims = "; ".join(str(c) for c in (d.get("claims") or [])[:3])
         topics = ", ".join(str(t) for t in (d.get("topics") or [])[:3])
         if claims or topics:

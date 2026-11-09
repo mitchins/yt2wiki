@@ -632,14 +632,17 @@ def run_source(settings, db, service, source_id: str, *,
                 index = v9scout.build_index(
                     segs, float(srow["duration_s"] or 0),
                     _typed_chat(manager))
+                typed["index"] = index
                 decision = v9decide.select_type(
                     _typed_chat(manager), srow["title"] or source_id,
                     float(srow["duration_s"] or 0), index)
-                # A refusal is honoured whether the model names no_article
-                # or keeps a type id with status refused: either way no
+                typed["decision"] = decision
+                # A refusal — or an explicit needs_review on the type
+                # decision — stops the run before planning: either way no
                 # plan is built and nothing is published.
                 if decision.get("template_id") == "no_article" \
-                        or decision.get("status") == "refused":
+                        or decision.get("status") in ("refused",
+                                                      "needs_review"):
                     reason = (decision.get("rationale")
                               or "no safe article can be composed")
                     _record(db, v9job, "v9_plan", "refused", {},
@@ -653,7 +656,7 @@ def run_source(settings, db, service, source_id: str, *,
                     return result
                 plan = v9decide.plan_article(_typed_chat(manager),
                                              decision, index)
-                typed = {"index": index, "decision": decision, "plan": plan}
+                typed["plan"] = plan
                 _record(db, v9job, "v9_plan", "done",
                         {"article_type": decision.get("template_id"),
                          "n_windows": index.get("n_windows"),
@@ -662,8 +665,15 @@ def run_source(settings, db, service, source_id: str, *,
                         artifacts={"decision": decision,
                                    **({"plan": plan} if plan else {})})
             except v9decide.EditorialError as exc:
-                _record(db, v9job, "v9_plan", "failed", {}, error=str(exc)[:500],
-                        started=tplan)
+                index = typed.get("index") or {}
+                digests = index.get("digests") or {}
+                _record(db, v9job, "v9_plan", "failed",
+                        {"n_windows": index.get("n_windows"),
+                         "digested": sum(1 for d in digests.values()
+                                         if not (d.get("flags") or {}).get("undigested"))},
+                        error=str(exc)[:500], started=tplan,
+                        artifacts={"decision": typed.get("decision"),
+                                   "index_hash": index.get("index_hash")})
                 _finish_job(db, v9job, "failed", error=str(exc)[:500])
                 result.update({"ok": False, "error": str(exc)[:500]})
                 return result
@@ -683,6 +693,7 @@ def run_source(settings, db, service, source_id: str, *,
                     recorder=_v9_rec("v9_write"))
                 lead_md = (v9blocks.render_markdown(article["lead_block"])
                            if article.get("lead_block") else "")
+                article["lead_md"] = lead_md
             else:
                 article = v9writer.write_article(settings, db, source_id,
                                                  inference_snapshot=inference_snapshot,
@@ -705,6 +716,79 @@ def run_source(settings, db, service, source_id: str, *,
                  "coverage": article["coverage"]}, started=t)
         result["article"] = {k: v for k, v in article.items() if k != "sections"}
         sections = article["sections"]
+
+        # --- validation (typed path only; legacy V9 has no fact gate) ---
+        # The gate reads the same normalized bodies the reader will see:
+        # citation labels the publisher normalises away must not fail a
+        # shipped article, and shipped defects must not hide behind raw
+        # writer markup. It runs before frame discovery/selection so a
+        # rejected candidate burns no image spend.
+        validation: dict[str, Any] | None = None
+        if enable_typed and (typed.get("plan") is not None):
+            from . import validate as v9validate
+            t = time.time()
+            stage("v9_validate")
+            try:
+                srow_v = db.query_one("SELECT * FROM sources WHERE source_id=?",
+                                      (source_id,))
+                provenance_v = {"url": srow_v["origin_url"],
+                                "uploader": srow_v["uploader"],
+                                "title": srow_v["title"],
+                                "duration_s": srow_v["duration_s"],
+                                "profile": settings.profile,
+                                "fingerprint": settings.fingerprint(),
+                                "attribution_line": (
+                                    f"Compiled from the video **{srow_v['title']}**"
+                                    f" by {srow_v['uploader']}"
+                                    if srow_v["uploader"]
+                                    else "Compiled from the local video file "
+                                    f"**{srow_v['title']}**")}
+                dur_v = float(srow_v["duration_s"] or 0) or None
+                norm_sections = [
+                    dict(s, body=v9publish._section_body(s, provenance_v, dur_v))
+                    for s in sections]
+                norm_article = dict(article, sections=norm_sections)
+                vres = v9validate.validate_typed(
+                    typed["decision"], typed["plan"], typed["index"],
+                    norm_article, _load_segs(db, source_id),
+                    float(srow_v["duration_s"] or 0))
+                validation = vres
+                n_crit = sum(1 for f in vres["findings"]
+                             if f["severity"] == "critical")
+                _record(db, v9job, "v9_validate", "done",
+                        {"validation": vres["status"],
+                         "findings": len(vres["findings"]),
+                         "critical": n_crit},
+                        started=t,
+                        artifacts={"validation": vres})
+            except Exception as exc:  # noqa: BLE001
+                _record(db, v9job, "v9_validate", "failed",
+                        {}, error=str(exc)[:500], started=t)
+                _finish_job(db, v9job, "failed", error=str(exc)[:500])
+                result.update({"ok": False, "error": str(exc)[:500]})
+                return result
+            result["validation"] = {
+                "status": validation["status"],
+                "n_findings": len(validation["findings"]),
+                "findings": validation["findings"][:20]}
+            if validation["status"] in ("needs_review", "refused"):
+                cand_dir = settings.paths.job_stage_dir(v9job, "v9_validate")
+                cand_dir.mkdir(parents=True, exist_ok=True)
+                (cand_dir / "candidate.md").write_text(
+                    v9publish.assemble_markdown(
+                        article["title"], article["summary"], sections,
+                        {}, provenance_v,
+                        lead_md=lead_md if enable_typed else None)[0],
+                    encoding="utf-8")
+                (cand_dir / "findings.json").write_text(
+                    json.dumps(validation, indent=1), encoding="utf-8")
+                reason = ("refused: validation found no usable sections"
+                          if validation["status"] == "refused"
+                          else f"needs_review: {n_crit} critical findings; "
+                               "candidate kept, published article untouched")
+                _finish_job(db, v9job, "failed", error=reason[:500])
+                result.update({"ok": False, "error": reason[:500]})
+                return result
 
         # --- discover ---
         t = time.time()
@@ -765,6 +849,10 @@ def run_source(settings, db, service, source_id: str, *,
                 "index_hash": (typed.get("index") or {}).get("index_hash"),
                 "lead_blocks": ([{"block": article["lead_block"]}]
                                 if article.get("lead_block") else []),
+                "validation": ({
+                    "status": validation["status"],
+                    "n_findings": len(validation["findings"]),
+                    "findings": validation["findings"]} if validation else None),
             }
             pub_type = article.get("article_type")
             pub_tver = article.get("template_version")
@@ -791,6 +879,7 @@ def run_source(settings, db, service, source_id: str, *,
                 "n_windows": (typed.get("index") or {}).get("n_windows"),
                 "n_sections": len(sections),
                 "lead_block": bool(article.get("lead_block")),
+                "validation": (result.get("validation") or {}),
             }
         article_id = f"art9-{source_id}"
         pub = v9publish.persist(settings, db, article_id=article_id, source_id=source_id,

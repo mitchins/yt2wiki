@@ -243,3 +243,84 @@ def test_candidates_single_window_matches_legacy():
     b = v9select.candidates_for_windows(frames, [[0.0, 50.0]], pad=0.0,
                                         limit=10)
     assert [f["frame_id"] for f in a] == [f["frame_id"] for f in b]
+
+
+def test_plan_decline_is_explicit_not_silent():
+    index = _index()
+    decision = {"template_id": "review", "index_hash": index["index_hash"]}
+    with pytest.raises(D.EditorialError, match="planner declined"):
+        D.plan_article(lambda messages, **kw: {"declined": True,
+                                               "reason": "no method shown"},
+                       decision, index)
+
+
+def test_plan_failure_names_the_cause():
+    index = _index()
+    decision = {"template_id": "review", "index_hash": index["index_hash"]}
+    with pytest.raises(D.EditorialError, match="unknown window"):
+        D.plan_article(lambda messages, **kw: {"template_id": "review",
+                                               "sections": [
+                                                   {"section_id": "s",
+                                                    "slot": "subject",
+                                                    "heading": "H",
+                                                    "window_ids": ["w-404"]}],
+                                               "coverage": {}},
+                       decision, index)
+
+
+def test_many_windows_survive_without_merging():
+    segs = [{"idx": i, "start": i * 30.0, "end": (i + 1) * 30.0,
+             "text": ("Segment %d discusses topic alpha. " % i) * 30}
+            for i in range(300)]
+    wins = S.build_windows(segs, 9000.0, target_windows=24)
+    assert len(wins) > 64
+    assert wins[0]["t_start"] == 0.0
+    assert wins[-1]["t_end"] == 9000.0
+    for a, b in zip(wins, wins[1:]):
+        assert a["t_end"] == b["t_start"]
+
+
+def test_window_features_carry_domestic_values():
+    segs = [{"idx": 0, "start": 0.0, "end": 10.0,
+             "text": "Add 4 1/2 cups of flour costing $300,000."}]
+    wins = S.build_windows(segs, 10.0, target_windows=24)
+    feats = S.window_features(wins[0])
+    values = [lit["value"] for lit in feats["literals"]]
+    assert "4 1/2 cups" in values
+    assert "$300,000" in values
+
+
+def test_values_extractor_cases():
+    from yt2wiki.v9 import values as _V
+
+    got = {lit.literal for lit in _V.extract_exact_values(
+        "Bake 2 loaves at 350 degrees for 1 hour; costs $20, not $300.")}
+    assert "350 degrees" in got and "$20" in got
+    assert _V.extract_exact_values("") == []
+
+
+def test_window_id_echo_is_canonicalised():
+    from yt2wiki.v9.scout import canonical_window_id
+
+    assert canonical_window_id("w-004 147-185s") == "w-004"
+    assert canonical_window_id("window w-007") == "w-007"
+    assert canonical_window_id("w-012") == "w-012"
+    assert canonical_window_id("nope") is None
+    assert canonical_window_id(None) is None
+
+
+def test_plan_accepts_echoed_window_ids():
+    index = _index()
+    decision = {"template_id": "review", "index_hash": index["index_hash"]}
+    raw = {"template_id": "review",
+           "sections": [{"section_id": "s", "slot": "subject",
+                         "heading": "H",
+                         "window_ids": ["w-000 0-30s", "window w-001"]},
+                        {"section_id": "a", "slot": "assessment",
+                         "heading": "A", "window_ids": ["w-002"]}],
+           "coverage": {}}
+    plan, reason = D._assemble_plan(raw, "review",
+                                    {w["window_id"]: (w["t_start"], w["t_end"])
+                                     for w in index["windows"]}, set())
+    assert plan is not None, reason
+    assert plan["sections"][0]["window_ids"] == ["w-000", "w-001"]
