@@ -17,8 +17,12 @@ from typing import Any
 from . import article_types as AT
 from .scout import canonical_window_id
 
-#: Bounded model attempts for decision and plan alike.
+#: Bounded model attempts for decision and plan alike. Plans get one
+#: extra attempt: a rejected mega-span or missing slot is usually
+#: fixable with the stated reason, and planning is cheap next to
+#: writing and image selection.
 MAX_ATTEMPTS = 2
+PLAN_MAX_ATTEMPTS = 3
 DECISION_MAX_TOKENS = 800
 #: A full-window plan (ids, headings, coverage) for a long source is a
 #: long JSON document; 1600 tokens truncated it mid-plan and the
@@ -271,7 +275,7 @@ def plan_article(chat: Callable[..., Any], decision: dict[str, Any],
                   + (f" ({shown} shown)" if shown != len(lines) else "")
                   + ". Cover all of them or mark the rest unassigned.")
     last: list[str] = []
-    for attempt in range(MAX_ATTEMPTS):
+    for attempt in range(PLAN_MAX_ATTEMPTS):
         user = base_user
         if attempt > 0 and last:
             user += ("\n\nCorrection: your previous reply was unusable "
@@ -342,8 +346,8 @@ def _assemble_plan(raw: Any, tid: str,
             return _bad(f"sections[{i}] has no evidence windows")
         t0 = min(p[0] for p in spans)
         t1 = max(p[1] for p in spans)
-        if t1 - t0 > 1200:
-            return _bad(f"sections[{i}] spans {t1 - t0:.0f}s (>20 min); "
+        if t1 - t0 > 900:
+            return _bad(f"sections[{i}] spans {t1 - t0:.0f}s (>15 min); "
                          f"split it — the writer cannot cover it")
         sections.append({"section_id": sid, "slot": s.get("slot"),
                          "heading": str(s.get("heading") or ""),

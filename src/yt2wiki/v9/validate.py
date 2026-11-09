@@ -200,6 +200,9 @@ _STRICT_KV = re.compile(r"\b([A-Za-z_][\w.\-]{2,40})\s*(=|:(?=\S))([^\s,;]{1,64}
 #: debris, not exact values. Both endpoints inside the duration mark a
 #: probable seconds-citation the writer should have rendered as m:ss.
 _BARE_RANGE = re.compile(r"\b(\d{1,4}\.\d+)\s*-\s*(\d{1,4}\.\d+)\b")
+#: A bare range followed by a unit word is a measurement ("3.3-5.0 V"),
+#: not a seconds citation: the value gate owns it.
+_RANGE_UNIT_TAIL = re.compile(r"\s*(?:volts?|V\b|%|°[CF]?|Hz|hertz)\b")
 _PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 _PERCENT_WORD = re.compile(r"(\d+(?:\.\d+)?)\s+percent\b", re.IGNORECASE)
 
@@ -287,9 +290,14 @@ _QUARTER_A_UNIT = re.compile(
     re.IGNORECASE)
 
 
+_VOLTS_WORD = re.compile(r"\bvolts?\b", re.IGNORECASE)
+
+
 def _numeralize(text: str) -> str:
     text = text.replace("−", "-")
     text = _DIGIT_COMMA.sub("", text)
+    # Unit abbreviations vs full words denote the same value.
+    text = _VOLTS_WORD.sub("V", text)
     # Longest number phrases first: "three hundred thirty million"
     # is one number (330000000), not "300" followed by "thirty million".
     text = _HUNDREDS_MILLIONS.sub(
@@ -347,17 +355,27 @@ def check_exact_values(article: dict[str, Any],
         evidence = _numeralize(_evidence_text(segs, _spans_of(sec)))
         if meta:
             evidence += "\n" + meta
+        # Strip only ranges classified as citations: unit-bearing
+        # ranges stay in the text so the value gate still checks them.
+        # _BARE_RANGE has no unit guard, so classification happens here.
+        stripped = []
+        last = 0
         for m in _BARE_RANGE.finditer(body):
             try:
                 lo, hi = float(m.group(1)), float(m.group(2))
             except ValueError:
+                continue
+            if _RANGE_UNIT_TAIL.match(body[m.end():]):
                 continue
             if 0 <= lo < hi <= duration_s + 1:
                 out.append(_finding(
                     "bare_second_citation", MAJOR,
                     f"{m.group(0)!r} looks like transcript seconds; "
                     f"use m:ss citations", sec.get("section_id")))
-        body = _BARE_RANGE.sub(" ", body)
+                stripped.append(body[last:m.start()])
+                last = m.end()
+        stripped.append(body[last:])
+        body = "".join(stripped)
         if not evidence.strip():
             continue
         supported = [lit.literal for lit in

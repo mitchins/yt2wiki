@@ -367,3 +367,20 @@ def test_compound_numbers_compose():
     assert _numeralize("a hundred grams") == "100 grams"
     assert _numeralize("two dozen eggs") == "24 eggs"
     assert _numeralize("wait a minute") == "wait a minute"
+
+
+def test_bare_range_with_unit_is_still_value_gated():
+    segs = _segs(["The range is 3.3 to 5.0 volts."])
+    article = _article(bodies=["Combine.", "Mix.", "Range 3.3-5.0 V."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert not any(f["code"] == "bare_second_citation" for f in res["findings"])
+    assert any(f["code"] == "unsupported_exact_value" for f in res["findings"])
+
+
+def test_decision_trace_vocab_is_major_only():
+    segs = _segs(["Bake the loaf."])
+    article = _article(bodies=["Combine.", "Mix.", "A strong vaccine candidate."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert res["status"] == "ready"
+    assert any(f["code"] == "decision_trace_leak"
+               and f["severity"] == "major" for f in res["findings"])

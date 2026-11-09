@@ -351,6 +351,13 @@ def test_year_and_decade_extraction():
     got = {lit.literal for lit in _V.extract_exact_values(
         "In 1976 dollars; in the 90s; not in 20s fashion.")}
     assert "1976" in got and "90s" in got
+    # An explicit decade token also supports the abbreviated form; a
+    # bare year emits no phantom decade alias.
+    decade = {lit.literal for lit in _V.extract_exact_values(
+        "Booming in the 1990s.")}
+    assert "1990s" in decade and "90s" in decade
+    bare = {lit.literal for lit in _V.extract_exact_values("In 1976.")}
+    assert "1976" in bare and "76s" not in bare
 
 
 def test_mega_span_sections_rejected_at_plan_time():
@@ -365,4 +372,87 @@ def test_mega_span_sections_rejected_at_plan_time():
            "coverage": {}}
     plan, reason = D._assemble_plan(raw, "review", by_id, set())
     assert plan is None
-    assert "20 min" in reason
+    assert "15 min" in reason
+
+
+def test_fifteen_minute_boundary_and_retry_after_cap():
+    by_id = {"w-000": (0.0, 450.0), "w-001": (450.0, 900.0),
+             "w-002": (950.0, 1400.0)}
+    raw = {"template_id": "review",
+           "sections": [{"section_id": "s", "slot": "subject",
+                         "heading": "H", "window_ids": ["w-000", "w-001"]},
+                        {"section_id": "a", "slot": "assessment",
+                         "heading": "A", "window_ids": ["w-002"]}],
+           "coverage": {}}
+    plan, reason = D._assemble_plan(raw, "review", by_id, set())
+    assert plan is not None, reason
+    calls = {"n": 0}
+
+    def chat(messages, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"template_id": "review",
+                    "sections": [{"section_id": "s", "slot": "subject",
+                                  "heading": "H",
+                                  "window_ids": ["w-000", "w-001", "w-002"]},
+                                 {"section_id": "a", "slot": "assessment",
+                                  "heading": "A", "window_ids": ["w-002"]}],
+                    "coverage": {}}
+        return {"template_id": "review",
+                "sections": [{"section_id": "s", "slot": "subject",
+                              "heading": "H", "window_ids": ["w-000"]},
+                             {"section_id": "a", "slot": "assessment",
+                              "heading": "A", "window_ids": ["w-002"]}],
+                "coverage": {}}
+
+    index = {"windows": [
+        {"window_id": "w-000", "t_start": 0.0, "t_end": 450.0},
+        {"window_id": "w-001", "t_start": 450.0, "t_end": 900.0},
+        {"window_id": "w-002", "t_start": 950.0, "t_end": 1400.0}],
+        "digests": {}, "index_hash": "idx-1"}
+    decision = {"template_id": "review", "index_hash": "idx-1"}
+    plan = D.plan_article(chat, decision, index)
+    assert calls["n"] == 2
+    assert len(plan["sections"]) == 2
+
+
+def test_decade_alias_only_for_explicit_decades():
+    from yt2wiki.v9 import values as _V
+
+    got = {lit.literal for lit in _V.extract_exact_values("in the 1990s.")}
+    assert "1990s" in got and "90s" in got
+    got2 = {lit.literal for lit in _V.extract_exact_values("in 1976.")}
+    assert "1976" in got2 and "76s" not in got2
+
+
+def test_negative_and_comma_values():
+    from yt2wiki.v9 import values as _V
+
+    got = {lit.literal for lit in _V.extract_exact_values("-4 degrees, 1,500 units.")}
+    assert "-4 degrees" in got
+    got2 = {lit.literal for lit in _V.extract_exact_values("1500 units.")}
+    assert "1500" in got2
+
+
+def test_half_a_cup_and_time_idioms():
+    from yt2wiki.article import markdown_to_html  # noqa: F401 (import order)
+    from yt2wiki.v9.validate import _numeralize
+
+    assert "1/2 cup" in _numeralize("half a cup of flour")
+    assert "1/4 " in _numeralize("a quarter cup of sugar")
+    assert _numeralize("wait a minute") == "wait a minute"
+
+
+def test_flags_string_false_is_not_set():
+    from yt2wiki.v9.scout import _normalize_flags
+
+    assert _normalize_flags({"window_id": "w-1",
+                             "flags": {"ad": "false"}})["flags"] == {"ad": False}
+    assert _normalize_flags({"window_id": "w-1",
+                             "flags": {"ad": "yes"}})["flags"] == {"ad": True}
+
+
+def test_canonical_id_rejects_four_digits():
+    from yt2wiki.v9.scout import canonical_window_id
+
+    assert canonical_window_id("w-1000") is None
