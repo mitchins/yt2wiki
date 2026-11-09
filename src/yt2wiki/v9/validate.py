@@ -314,10 +314,17 @@ def check_entities(article: dict[str, Any],
             return
         close = difflib.get_close_matches(head.lower(), tokens, n=1,
                                           cutoff=0.85)
-        if close and head.lower().rstrip("s") == close[0].rstrip("s"):
-            # A bare plural ("Conditions" for "condition") is style, not
-            # corruption: major, for operator adjudication.
-            severity, why = MAJOR, "plural of a transcript word"
+
+        def _stem(word: str) -> str:
+            for suffix in ("ing", "ed", "es", "s"):
+                if word.endswith(suffix) and len(word) > len(suffix) + 2:
+                    return word[: -len(suffix)]
+            return word
+
+        if close and _stem(head.lower()) == _stem(close[0]):
+            # Same stem ("Automation" for "automating", bare plurals) is
+            # style or morphology, not corruption: operator adjudicates.
+            severity, why = MAJOR, f"same stem as {close[0]!r}"
         elif close:
             severity, why = CRITICAL, f"near {close[0]!r} — likely corruption"
         else:
