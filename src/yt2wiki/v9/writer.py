@@ -1010,6 +1010,41 @@ TYPE_LEAD_SHAPE = {
 }
 
 
+_LEADING_NUM = re.compile(r"^\d+\s+")
+
+
+def _dedupe_key(text: str) -> str:
+    """Caption chunks repeat the same words with new numbers ("96 bowl
+    and now" / "97 bowl and now ..."): strip the numbering so repeats
+    compare equal. Returns "" for empty text."""
+    return _LEADING_NUM.sub("", text.lower().strip())
+
+
+def _dedupe_lines(lines: list[str]) -> list[str]:
+    """Drop transcript rows that merely repeat already-kept wording.
+
+    Overlapping caption/ASR windows restate the same sentence two or
+    three times with fresh numbers. Feeding all of them invites the
+    writer to echo the repetition until it hits the token limit, so
+    keep the first occurrence and drop near-identical restatements.
+    Order is preserved; nothing is reworded.
+    """
+    out: list[str] = []
+    for line in lines:
+        m = re.match(r"^\[([^\]]*)\]\s*(.*)$", line, re.DOTALL)
+        stamp, text = (m.group(1), m.group(2)) if m else ("", line)
+        key = _dedupe_key(text)
+        if not key:
+            continue
+        if any(key == _dedupe_key(re.sub(r"^\[[^\]]*\]\s*", "", o))
+               or key in _dedupe_key(re.sub(r"^\[[^\]]*\]\s*", "", o))
+               or _dedupe_key(re.sub(r"^\[[^\]]*\]\s*", "", o)) in key
+               for o in out[-3:]):
+            continue
+        out.append(line)
+    return out
+
+
 def _stride_lines(lines: list[str], cap_chars: int) -> list[str]:
     """Evenly spaced subsample: beginning, middle and end survive the cut.
 
@@ -1065,7 +1100,7 @@ def section_transcript_windows(segs: Sequence[dict[str, Any]],
         if not sample and sum(len(x) for x in lines) > cap_chars:
             break
     if sample:
-        lines = _stride_lines(lines, cap_chars)
+        lines = _stride_lines(_dedupe_lines(lines), cap_chars)
     return "\n".join(lines)
 
 

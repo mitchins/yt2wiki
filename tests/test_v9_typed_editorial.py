@@ -559,3 +559,15 @@ def test_typed_section_call_requests_compact_json():
 
     src = inspect.getsource(_W._write_typed_sections)
     assert "compact" in src and "2400" in src
+
+
+def test_dedupe_drops_numbered_repeats():
+    from yt2wiki.v9.writer import _dedupe_lines
+
+    lines = ["[1.0-2.0] 96 bowl and now let's get our",
+             "[2.0-3.0] 97 bowl and now let's get our ingredients",
+             "[3.0-4.0] something entirely different here"]
+    out = _dedupe_lines(lines)
+    assert out[0] == lines[0]
+    assert out[-1] == lines[2]
+    assert len(out) == 2

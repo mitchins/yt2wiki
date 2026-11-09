@@ -78,5 +78,29 @@ currency and comma-thousands. The shared extractor is untouched.
 ## Qualification status
 
 DRAFT stack, unmerged: PR A (contracts + reader), PR B (editorial pass),
-PR C (validation + this matrix). See the PR C report for the paired
-baseline/candidate results, per-case ledgers and the enablement decision.
+PR C (validation + matrix). Ten-video qualification corpus
+(`data/qual-shapes-01`, private): five genres, same cached sources and
+pinned model for baseline and candidate. Full per-case ledger in the
+PR C report.
+
+- Published: Hermes `procedure`, Git `explainer` (type dissent, see
+  below), LTT `review`, DART `report` — zero critical findings.
+- `needs_review` with private candidate kept, published article
+  untouched: recipe (unverifiable inferred count), Vox (cross-span
+  decade claim), product-b (chart number with no narration, converted
+  units). Each is a replan-away-from-failure, not a dead end: the
+  gate names the exact span/value to fix.
+- Correct refusal: silent montage (no speech; transcribe fails closed).
+- Long-form limitation: 73-97 min discussions intermittently fail at
+  plan/write (mega-spans, writer truncation); chunked planning,
+  auto-split and strided evidence mitigate, retries close the rest.
+- Open dissent: the Git how-to classifies `explainer` across four
+  independent decisions (commands preserved in order and syntax);
+  the matrix expected `procedure`. Operator decides whether to amend
+  the matrix or steer harder.
+
+Known gate limits (documented, not silent): transcript-scoped
+evidence (visual-only claims need a human); whole-transcript
+attribution is substring-exact per token; decades conflate
+centuries only in explicitly ambiguous forms; no second production
+model; remote writer is pinned gemma4 (Halogen untested here).
