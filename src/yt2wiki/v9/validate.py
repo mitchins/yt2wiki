@@ -221,11 +221,12 @@ _A_HALF = re.compile(r"\ba\s+half\b", re.IGNORECASE)
 
 
 def _a_unit_re() -> re.Pattern:
+    # Time units are excluded: "wait a minute" is idiom, not a measure.
+    # Explicit number words still numeralise ("five minutes" -> "5 minutes").
     units = ("cups?|teaspoons?|tablespoons?|tsp|tbsp|ounces?|oz|pounds?|"
              "lbs?|grams?|degrees?|hertz|miles?|feet|foot|inches?|nits|"
-             "liters?|milliliters?|pints?|quarts?|gallons?|minutes?|"
-             "hours?|days?|weeks?|months?|years?|loaves?|servings?|"
-             "dollars?|cents?")
+             "liters?|milliliters?|pints?|quarts?|gallons?|loaves?|"
+             "servings?|dollars?|cents?")
     return re.compile(rf"\b[an]+\s+(?=(?:{units})\b)", re.IGNORECASE)
 
 
@@ -242,7 +243,65 @@ _NUMBER_WORD = re.compile(r"\b(zero|one|two|three|four|five|six|seven|eight|"
                            r"dozen)\b", re.IGNORECASE)
 
 
+_DIGIT_COMMA = re.compile(r"(?<=\d),(?=\d)")
+
+_ONES = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+         "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+         "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+         "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+         "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+_MULT = {"hundred": 100, "thousand": 1000, "million": 1000000,
+         "billion": 1000000000, "dozen": 12}
+_NUMWORD = (r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+            r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+            r"eighteen|nineteen|twenty|thirty|forty|fifty|sixty|"
+            r"seventy|eighty|ninety")
+# Longest match first: "three hundred thirty million" is one number
+# (330M), not "300" followed by "thirty million".
+_HUNDREDS_MILLIONS = re.compile(
+    rf"\b({_NUMWORD})\s+hundred\s+({_NUMWORD})\s+(thousand|million|billion)\b",
+    re.IGNORECASE)
+_WORD_MULT = re.compile(
+    rf"\b({_NUMWORD}|\d+)\s+(hundred|thousand|million|billion|dozen)\b",
+    re.IGNORECASE)
+_A_MULT = re.compile(r"\ba\s+(hundred|thousand|million|billion|dozen)\b",
+                     re.IGNORECASE)
+
+
+def _word_num(word: str) -> int:
+    word = word.lower()
+    if word.isdigit():
+        return int(word)
+    return _ONES.get(word, _TENS.get(word, 1))
+_HALF_A_UNIT = re.compile(
+    r"\bhalf\s+a\s+(?=cups?|teaspoons?|tablespoons?|tsp|tbsp|ounces?|oz|"
+    r"pounds?|lbs?|grams?|degrees?|liters?|milliliters?|pints?|quarts?|"
+    r"gallons?|minutes?|hours?|servings?|pieces?|dollars?|cents?)",
+    re.IGNORECASE)
+_QUARTER_A_UNIT = re.compile(
+    r"\bquarter\s+(?:of\s+)?a\b|\ba\s+quarter\b(?=\s+(?:of\s+)?"
+    r"(?:cups?|teaspoons?|tablespoons?|tsp|tbsp|"
+    r"ounces?|oz|pounds?|lbs?|grams?|degrees?|liters?|milliliters?|pints?|"
+    r"quarts?|gallons?|minutes?|hours?|servings?|pieces?|dollars?|cents?))",
+    re.IGNORECASE)
+
+
 def _numeralize(text: str) -> str:
+    text = text.replace("−", "-")
+    text = _DIGIT_COMMA.sub("", text)
+    # Longest number phrases first: "three hundred thirty million"
+    # is one number (330000000), not "300" followed by "thirty million".
+    text = _HUNDREDS_MILLIONS.sub(
+        lambda m: str((_word_num(m.group(1)) * 100
+                       + _word_num(m.group(2))) * _MULT[m.group(3).lower()]),
+        text)
+    text = _WORD_MULT.sub(
+        lambda m: str(_word_num(m.group(1)) * _MULT[m.group(2).lower()]),
+        text)
+    text = _A_MULT.sub(lambda m: str(_MULT[m.group(1).lower()]), text)
+    text = _HALF_A_UNIT.sub("1/2 ", text)
+    text = _QUARTER_A_UNIT.sub("1/4 ", text)
     text = _AND_A_HALF.sub(r"\1 1/2", text)
     text = _AND_A_QUARTER.sub(r"\1 1/4", text)
     text = _A_HALF.sub("1/2", text)
@@ -282,6 +341,12 @@ def check_exact_values(article: dict[str, Any],
     out: list[dict[str, Any]] = []
     for sec in article.get("sections") or []:
         body = _prose_values_text(str(sec.get("body") or ""))
+        # Video-level metadata the writer legitimately sees (duration)
+        # is evidence for frontmatter, not a claim to verify.
+        meta = _numeralize(str(sec.get("meta_evidence") or "").strip())
+        evidence = _numeralize(_evidence_text(segs, _spans_of(sec)))
+        if meta:
+            evidence += "\n" + meta
         for m in _BARE_RANGE.finditer(body):
             try:
                 lo, hi = float(m.group(1)), float(m.group(2))
@@ -293,12 +358,10 @@ def check_exact_values(article: dict[str, Any],
                     f"{m.group(0)!r} looks like transcript seconds; "
                     f"use m:ss citations", sec.get("section_id")))
         body = _BARE_RANGE.sub(" ", body)
-        spans = _spans_of(sec)
-        evidence = _evidence_text(segs, spans)
         if not evidence.strip():
             continue
         supported = [lit.literal for lit in
-                     _extract_values(_numeralize(evidence), max_values=200)]
+                     _extract_values(evidence, max_values=200)]
         strict_kv = {m.group(1) + "=" + m.group(3)
                      for m in _STRICT_KV.finditer(body)}
         for lit in _extract_values(body, max_values=200):
@@ -346,19 +409,28 @@ def check_entities(article: dict[str, Any],
         return word
 
     def _base(word: str) -> str:
+        # Possessive/base form for lookup, WITHOUT stemming: stemming
+        # here would shred the query ("Dimorphus" -> "dimorphu") and
+        # the typo ratio below. Stemming applies only to the
+        # same-stem comparison.
         w = word.lower()
         if w.endswith("'s"):
             w = w[:-2]
-        return _stem(w.rstrip("'"))
+        return w.rstrip("'")
 
     def _check_name(name: str, sec_id: str | None) -> None:
         head = name.split()[0]
         if head in _NAME_ALLOWLIST or head in _KNOWN_UNITS:
             return
         parts = [_base(p) for p in name.split()]
-        if name.lower() in lowered or all(p in tokens for p in parts):
+        # Whole-token attestation only: substring matching attests
+        # "Tool" via "Tools" and "Art" via "start".
+        if all(p in tokens for p in parts):
             return
-        close = difflib.get_close_matches(_base(head), tokens, n=1,
+        # Candidate retrieval uses the raw head: stemming here would
+        # shred the query itself ("Dimorphus" -> "dimorphu" misses
+        # "Dimorphos"). Stemming applies only to the comparison below.
+        close = difflib.get_close_matches(head.lower(), tokens, n=1,
                                           cutoff=0.85)
         if close and _base(head) == close[0]:
             # Possessive or bare plural of an attested word ("Deck's"
@@ -368,9 +440,14 @@ def check_entities(article: dict[str, Any],
             # Same stem ("Automation" for "automating") is morphology,
             # not corruption: operator adjudicates.
             severity, why = MAJOR, f"same stem as {close[0]!r}"
-        elif close and len(_base(head)) == len(close[0]):
-            # Same-length near-miss ("Dimorphus" for "Dimorphos") is the
-            # substitution/typo class: likely corruption.
+            out.append(_finding("unattested_entity", severity,
+                                f"{name!r} is capitalised as a name but never "
+                                f"occurs in the transcript ({why})", sec_id))
+            return
+        if close and len(_base(head)) == len(close[0]):
+            # Same-length near-miss ("Dimorphus"/"Dimorphos") is the
+            # substitution/typo class: likely corruption. Insertions and
+            # deletions ("Tool"/"too") need a human.
             severity, why = CRITICAL, f"near {close[0]!r} — likely corruption"
         elif close:
             severity, why = MAJOR, f"near {close[0]!r} — different word"
@@ -387,11 +464,29 @@ def check_entities(article: dict[str, Any],
         # List and subheading markup is structure, not naming: strip the
         # markers so item-leading words read as line starts below.
         body = _LIST_MARKER.sub(r"\1", body)
+        # Title-Case runs are headings ("Simple Bread Making for
+        # Beginners"), not name claims: skip matches fully inside one.
+        # Sentence-case names ("NASA confirms Dimorphus") still check.
+        runs: list[tuple[int, int]] = []
+        for rm in re.finditer(
+                r"\b(?:[A-Z][\w']*(?:[ \t]+(?:[A-Z][\w']*|[a-z]{1,3}))+)\b",
+                body):
+            words = rm.group(0).split()
+            if sum(1 for w in words if w[:1].isupper()) >= 3:
+                runs.append((rm.start(), rm.end()))
         for m in _NAME.finditer(body):
+            if any(a <= m.start() and m.end() <= b for a, b in runs):
+                continue
             name = m.group(1)
             if name in seen:
                 continue
             seen.add(name)
+            # An allowlisted head ("The Tool") must not shield the tail:
+            # check the substantive word on its own.
+            head = name.split()[0]
+            if head in _NAME_ALLOWLIST and len(name.split()) > 1:
+                _check_name(name.split()[1], sec.get("section_id"))
+                continue
             # Sentence-initial capitalisation is prose position, not
             # evidence: skip body starts, sentence ends and quote/dialogue
             # openings.
@@ -630,14 +725,22 @@ def _frontmatter_sections(article: dict[str, Any],
                        "heading": "Lead", "body": lead_md,
                        "t_start": 0.0, "t_end": float(duration_s or 0),
                        "source_windows": span})
-    front = (str(article.get("summary") or "").strip() + "\n"
+    # Title, summary and headings: the reader's first impression carries
+    # exact values too. Evidence is the full transcript plus the
+    # video-level metadata the writer legitimately sees (title context
+    # carries the duration), so "97-minute debate" does not fail here.
+    front = (str(article.get("title") or "").strip() + "\n"
+             + str(article.get("summary") or "").strip() + "\n"
              + "\n".join(str(s.get("heading") or "")
                          for s in article.get("sections") or [])).strip()
     if front:
+        dur = float(duration_s or 0)
+        meta = (f"{dur / 60:.0f} minutes" if dur >= 90 else f"{dur:.0f} seconds")
         extras.append({"section_id": "frontmatter", "slot": "frontmatter",
                        "heading": "Frontmatter", "body": front,
-                       "t_start": 0.0, "t_end": float(duration_s or 0),
-                       "source_windows": span})
+                       "t_start": 0.0, "t_end": dur,
+                       "source_windows": span,
+                       "meta_evidence": meta})
     return extras
 
 

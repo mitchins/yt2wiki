@@ -41,28 +41,31 @@ _RANGE = rf"{_NUM}\s*-\s*{_NUM}"
 _UNIT_ALT = "|".join(_COOKING_UNITS)
 #: A bare digit is never a value when it is the denominator of a
 #: fraction, part of a larger number, or the tail of a range: /, . and
-#: - join, they do not separate.
-_NOHIT_BEFORE = r"(?<![\w./-])"
+#: - join, they do not separate. A minus that follows a digit is a
+#: range dash, not a sign — so the sign is captured explicitly and a
+#: digit never donates one.
+_NOHIT_BEFORE = r"(?<![\w./])"
+_SIGN = r"(?:(?<!\d)[-−])?"
 
 RANGE_MEASURE_RE = re.compile(
-    rf"{_NOHIT_BEFORE}(?P<value>{_RANGE})\s*(?P<unit>{_UNIT_ALT})(?![\w])",
+    rf"{_NOHIT_BEFORE}{_SIGN}(?P<value>{_RANGE})\s*(?P<unit>{_UNIT_ALT})(?![\w])",
     re.IGNORECASE)
 FRACTION_MEASURE_RE = re.compile(
-    rf"{_NOHIT_BEFORE}(?P<value>{_FRACTION})\s*(?P<unit>{_UNIT_ALT})(?![\w])",
+    rf"{_NOHIT_BEFORE}{_SIGN}(?P<value>{_FRACTION})\s*(?P<unit>{_UNIT_ALT})(?![\w])",
     re.IGNORECASE)
 UNIT_MEASURE_RE = re.compile(
-    rf"{_NOHIT_BEFORE}(?P<value>{_NUMBER})\s*(?P<unit>{_UNIT_ALT})(?![\w])",
+    rf"{_NOHIT_BEFORE}{_SIGN}(?P<value>{_NUMBER})\s*(?P<unit>{_UNIT_ALT})(?![\w])",
     re.IGNORECASE)
 CURRENCY_RE = re.compile(
-    rf"{_NOHIT_BEFORE}(?P<value>\$\d(?:[\d,]*\d)?(?:\.\d{{1,2}})?)")
+    rf"{_NOHIT_BEFORE}{_SIGN}(?P<value>\$\d(?:[\d,]*\d)?(?:\.\d{{1,2}})?)")
 COMMA_NUMBER_RE = re.compile(
-    rf"{_NOHIT_BEFORE}(?P<value>\d{{1,3}}(?:,\d{{3}})+)(?![\w\d,])")
+    rf"{_NOHIT_BEFORE}{_SIGN}(?P<value>\d{{1,3}}(?:,\d{{3}})+)(?![\w\d,])")
 #: Years 1500-2099 are exact values (event dates, model years): the
 #: handoff requires the gate to catch year mutations (1976 -> 1986).
 #: A trailing "s" is part of the literal ("1990s"); the bare decade
 #: ("90s") is emitted as a supported alias for prose that abbreviates.
 YEAR_RE = re.compile(
-    rf"{_NOHIT_BEFORE}(?P<value>(?:1[5-9]|20)\d{{2}}s?)(?![\w\d])")
+    rf"{_NOHIT_BEFORE}{_SIGN}(?P<value>(?:1[5-9]|20)\d{{2}}s?)(?![\w\d])")
 
 
 def _supplement(text: str) -> list[Literal]:
@@ -78,10 +81,13 @@ def _supplement(text: str) -> list[Literal]:
                 continue
             out.append(Literal(kind="measurement", literal=value,
                                context=text[max(0, m.start() - 40):m.end() + 40]))
-            bare = value[:-1] if value.endswith("s") else value
-            if rx is YEAR_RE and len(bare) == 4 and bare[:2] in ("19", "20"):
+            # A decade alias only for an explicit decade token: "1990s"
+            # also supports prose written "90s". A bare year ("1976")
+            # emits no alias — "76s" would be a phantom that could
+            # support an invented duration.
+            if rx is YEAR_RE and re.fullmatch(r"(?:19|20)\d{2}s", value):
                 out.append(Literal(kind="measurement",
-                                   literal=bare[2:] + "s",
+                                   literal=value[2:],
                                    context=text[max(0, m.start() - 40):m.end() + 40]))
     return out
 

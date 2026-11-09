@@ -330,3 +330,40 @@ def test_bare_second_citation_is_major_not_value():
                and f["severity"] == "major" for f in res["findings"])
     assert not any(f["code"] == "unsupported_exact_value"
                    for f in res["findings"] if "223" in f["detail"])
+
+
+def test_typo_ratio_rule():
+    segs = _segs(["Dimorphos is the target. Tools are used."])
+    article = _article(bodies=["Combine.", "NASA confirms Dimorphus is hit.",
+                               "The Tool is used."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    codes = {(f["code"], f["severity"]): f["detail"] for f in res["findings"]}
+    assert ("unattested_entity", "critical") in codes
+    assert ("unattested_entity", "major") in codes
+
+
+def test_title_values_are_gated():
+    segs = _segs(["Bake the loaf."])
+    article = _article(bodies=["Combine.", "Mix.", "Bake."])
+    article["title"] = "Bake at 900 degrees"
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert any(f.get("section_id") == "frontmatter"
+               for f in res["findings"])
+
+
+def test_title_case_headings_are_not_entities():
+    segs = _segs(["Bake the loaf."])
+    article = _article(bodies=["Combine.", "Mix well.", "Bake."])
+    article["summary"] = "Simple Bread Making for Beginners. Accurate Measurement."
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert not [f for f in res["findings"]
+                if f["code"] == "unattested_entity"], res["findings"]
+
+
+def test_compound_numbers_compose():
+    from yt2wiki.v9.validate import _numeralize
+
+    assert _numeralize("three hundred thirty million dollars") == "330000000 dollars"
+    assert _numeralize("a hundred grams") == "100 grams"
+    assert _numeralize("two dozen eggs") == "24 eggs"
+    assert _numeralize("wait a minute") == "wait a minute"
