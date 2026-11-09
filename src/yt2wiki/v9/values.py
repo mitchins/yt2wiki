@@ -64,6 +64,10 @@ COMMA_NUMBER_RE = re.compile(
 #: handoff requires the gate to catch year mutations (1976 -> 1986).
 #: A trailing "s" is part of the literal ("1990s"); the bare decade
 #: ("90s") is emitted as a supported alias for prose that abbreviates.
+#: Note the residual ambiguity is deliberate: "90s" also reads as 90
+#: seconds. Both readings extract the same literal symmetrically, so a
+#: seconds-vs-decade mismatch can only false-attest, never false-block;
+#: the finding detail always shows the evidence span for adjudication.
 YEAR_RE = re.compile(
     rf"{_NOHIT_BEFORE}{_SIGN}(?P<value>(?:1[5-9]|20)\d{{2}}s?)(?![\w\d])")
 
