@@ -369,7 +369,7 @@ def _plan_once(chat: Callable[..., Any], decision: dict[str, Any],
     # by time under stable derived ids, with the remap recorded. A
     # topical mis-plan still fails loudly above.
     if isinstance(last_raw, dict) and isinstance(last_raw.get("sections"), list):
-        split, remap, dropped = _auto_split_sections(
+        split, remap, dropped, dropped_secs = _auto_split_sections(
             last_raw["sections"], by_id, excl_ids=excl_ids)
         fixed = dict(last_raw, sections=split)
         plan, reason = _assemble_plan(fixed, tid, by_id, excl_ids)
@@ -381,6 +381,8 @@ def _plan_once(chat: Callable[..., Any], decision: dict[str, Any],
                 cov.setdefault("unassigned_substantive_window_ids", []).extend(
                     w for w in dropped
                     if w not in cov["unassigned_substantive_window_ids"])
+            if dropped_secs:
+                cov["auto_dropped_sections"] = dropped_secs
             return plan
         last.append(reason)
     raise EditorialError(f"article plan failed validation: {'; '.join(last)}")
@@ -390,7 +392,8 @@ def _auto_split_sections(sections: list[dict[str, Any]],
                           by_id: dict[str, tuple[float, float]],
                           cap_s: float = 900.0,
                           excl_ids: set[str] | None = None
-                          ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+                          ) -> tuple[list[dict[str, Any]], list[dict[str, Any]],
+                                     list[str], list[str]]:
     """Deterministically split mega-span sections by time.
 
     A model that cannot split a 30-minute topic itself still leaves a
@@ -404,6 +407,7 @@ def _auto_split_sections(sections: list[dict[str, Any]],
     out: list[dict[str, Any]] = []
     remap: list[dict[str, Any]] = []
     dropped: list[str] = []
+    dropped_sections: list[str] = []
     for s in sections:
         spans = []
         for wid in s.get("window_ids") or []:
@@ -415,7 +419,10 @@ def _auto_split_sections(sections: list[dict[str, Any]],
             if span is not None:
                 spans.append((cid, span[0], span[1]))
         if not spans:
-            out.append(s)
+            # A section with no admissible evidence cannot stand: drop
+            # it and record the removal instead of failing the video
+            # over one unsalvageable section.
+            dropped_sections.append(str(s.get("section_id") or "?"))
             continue
         t0 = min(p[1] for p in spans)
         t1 = max(p[2] for p in spans)
@@ -430,7 +437,7 @@ def _auto_split_sections(sections: list[dict[str, Any]],
         # A single group wider than the cap means indivisible windows;
         # keep it whole rather than failing the video.
         if len(groups) == 1:
-            out.append(dict(s, auto_split_warning=True))
+            out.append(dict(s))
             continue
         derived = []
         for i, g in enumerate(groups):
@@ -443,7 +450,7 @@ def _auto_split_sections(sections: list[dict[str, Any]],
                         "window_ids": [wid for wid, _, _ in g]})
             derived.append(nid)
         remap.append({"from": s.get("section_id"), "to": derived})
-    return out, remap, dropped
+    return out, remap, dropped, dropped_sections
 
 
 def _raw_shape(raw: Any) -> str:
@@ -501,9 +508,13 @@ def _assemble_plan(raw: Any, tid: str,
             return _bad(f"sections[{i}] has no evidence windows")
         t0 = min(p[0] for p in spans)
         t1 = max(p[1] for p in spans)
-        if t1 - t0 > 900:
+        # One window is indivisible by construction: windows are
+        # character-bounded, so a single wide span is sparse by
+        # definition and the writer handles it. Only multi-window
+        # mega-spans are rejected (the auto-splitter can divide those).
+        if t1 - t0 > 900 and len(spans) > 1:
             return _bad(f"sections[{i}] spans {t1 - t0:.0f}s (>15 min); "
-                         f"split it — the writer cannot cover it")
+                        f"split it — the writer cannot cover it")
         sections.append({"section_id": sid, "slot": s.get("slot"),
                          "heading": str(s.get("heading") or ""),
                          "source_windows": spans,

@@ -468,7 +468,7 @@ def test_auto_split_fallback_in_plan_article():
                         {"section_id": "a", "slot": "assessment",
                          "heading": "A", "window_ids": ["w-000"]}],
            "coverage": {}}
-    split, remap, dropped = D._auto_split_sections(raw["sections"], by_windows)
+    split, remap, dropped, _ = D._auto_split_sections(raw["sections"], by_windows)
     assert remap and remap[0]["from"] == "big"
     assert len(split) == 1 + len(remap[0]["to"])
     assert all("-p" in s["section_id"] for s in split if s["section_id"] != "a")
@@ -515,7 +515,7 @@ def test_auto_split_drops_excluded_windows():
              for i in range(6)}
     raw = [{"section_id": "s", "slot": "subject", "heading": "H",
             "window_ids": [f"w-{i:03d}" for i in range(6)]}]
-    split, remap, dropped = D._auto_split_sections(
+    split, remap, dropped, _ = D._auto_split_sections(
         raw, by_id, excl_ids={"w-001"})
     assert dropped == ["w-001"]
     assert all("w-001" not in s.get("window_ids", []) for s in split)
@@ -571,3 +571,16 @@ def test_dedupe_drops_numbered_repeats():
     assert out[0] == lines[0]
     assert out[-1] == lines[2]
     assert len(out) == 2
+
+
+def test_auto_split_drops_fully_excluded_sections():
+    by_id = {f"w-{i:03d}": (float(i * 100), float(i * 100 + 80)) for i in range(6)}
+    raw = [{"section_id": "ok", "slot": "subject", "heading": "H",
+            "window_ids": ["w-000", "w-001"]},
+           {"section_id": "bad", "slot": "assessment", "heading": "A",
+            "window_ids": ["w-002"]}]
+    split, remap, dropped, dropped_secs = D._auto_split_sections(
+        raw, by_id, excl_ids={"w-002"})
+    assert dropped == ["w-002"]
+    assert dropped_secs == ["bad"]
+    assert [s["section_id"] for s in split] == ["ok"]
