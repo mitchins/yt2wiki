@@ -139,7 +139,8 @@ def _digest_messages(chunk: Sequence[dict[str, Any]]) -> list[dict[str, str]]:
                 windows="\n".join(lines))}]
 
 
-_WINDOW_ID = re.compile(r"w-\d{3}")
+#: Exactly three digits and no fourth: "w-1000" is not window "w-100".
+_WINDOW_ID = re.compile(r"w-\d{3}(?!\d)")
 
 
 def canonical_window_id(raw_id: Any) -> str | None:
@@ -155,16 +156,21 @@ def canonical_window_id(raw_id: Any) -> str | None:
     return m.group(0) if m else None
 
 
+_FALSEISH = {"", "false", "no", "0", "none", "null"}
+
 def _normalize_flags(entry: dict[str, Any]) -> dict[str, Any]:
     """Accept the flags the model actually emits.
 
     The prompt asks for an object, but models also emit a bare list of
     set flag names (["housekeeping"]) — which is unambiguous. Coerce to
     the canonical object form instead of discarding the whole digest.
+    String falses ("false", "no") never count as set.
     """
     flags = entry.get("flags", {})
     if isinstance(flags, dict):
-        norm = {str(k): bool(v) for k, v in flags.items()}
+        norm = {str(k): not (isinstance(v, str) and v.strip().lower() in _FALSEISH)
+                          and bool(v)
+                for k, v in flags.items()}
     elif isinstance(flags, list):
         norm = {str(k): True for k in flags}
     else:

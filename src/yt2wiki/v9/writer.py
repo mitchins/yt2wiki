@@ -1062,10 +1062,12 @@ def _write_typed_sections(chat, plan_sections, segs, video_title,
             def _section_call(extra: str, _p=p, _user=user,
                               _text=text) -> dict[str, Any]:
                 msg = _user + ("\n\n" + extra if extra else "")
+                # Dense multi-window spans need room: 1600 tokens
+                # truncated longer sections into unusable stubs.
                 return chat(
                     [{"role": "system", "content": "Return JSON only."},
                      {"role": "user", "content": msg}],
-                    max_new_tokens=1600, temperature=0.15)
+                    max_new_tokens=2400, temperature=0.15)
 
             out = _run_attempt(_section_call, validate=validate_section_response,
                                editorial=True, section_id=p["section_id"],
