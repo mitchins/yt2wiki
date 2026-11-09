@@ -468,7 +468,7 @@ def test_auto_split_fallback_in_plan_article():
                         {"section_id": "a", "slot": "assessment",
                          "heading": "A", "window_ids": ["w-000"]}],
            "coverage": {}}
-    split, remap = D._auto_split_sections(raw["sections"], by_windows)
+    split, remap, dropped = D._auto_split_sections(raw["sections"], by_windows)
     assert remap and remap[0]["from"] == "big"
     assert len(split) == 1 + len(remap[0]["to"])
     assert all("-p" in s["section_id"] for s in split if s["section_id"] != "a")
@@ -508,3 +508,14 @@ def test_strided_sampling_keeps_head_and_tail():
 
     out2 = section_transcript_windows(segs, [[0.0, 60.0]])
     assert len(out2) > len(out)
+
+
+def test_auto_split_drops_excluded_windows():
+    by_id = {f"w-{i:03d}": (float(i * 300), float(i * 300 + 240))
+             for i in range(6)}
+    raw = [{"section_id": "s", "slot": "subject", "heading": "H",
+            "window_ids": [f"w-{i:03d}" for i in range(6)]}]
+    split, remap, dropped = D._auto_split_sections(
+        raw, by_id, excl_ids={"w-001"})
+    assert dropped == ["w-001"]
+    assert all("w-001" not in s.get("window_ids", []) for s in split)

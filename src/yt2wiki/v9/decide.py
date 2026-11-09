@@ -307,36 +307,51 @@ def plan_article(chat: Callable[..., Any], decision: dict[str, Any],
     # by time under stable derived ids, with the remap recorded. A
     # topical mis-plan still fails loudly above.
     if isinstance(last_raw, dict) and isinstance(last_raw.get("sections"), list):
-        split, remap = _auto_split_sections(last_raw["sections"], by_id)
-        if remap:
-            fixed = dict(last_raw, sections=split)
-            plan, reason = _assemble_plan(fixed, tid, by_id, excl_ids)
-            if plan is not None:
-                plan.setdefault("coverage", {})["auto_split"] = remap
-                return plan
-            last.append(reason)
+        split, remap, dropped = _auto_split_sections(
+            last_raw["sections"], by_id, excl_ids=excl_ids)
+        fixed = dict(last_raw, sections=split)
+        plan, reason = _assemble_plan(fixed, tid, by_id, excl_ids)
+        if plan is not None:
+            cov = plan.setdefault("coverage", {})
+            if remap:
+                cov["auto_split"] = remap
+            if dropped:
+                cov.setdefault("unassigned_substantive_window_ids", []).extend(
+                    w for w in dropped
+                    if w not in cov["unassigned_substantive_window_ids"])
+            return plan
+        last.append(reason)
     raise EditorialError(f"article plan failed validation: {'; '.join(last)}")
 
 
 def _auto_split_sections(sections: list[dict[str, Any]],
                           by_id: dict[str, tuple[float, float]],
-                          cap_s: float = 900.0) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                          cap_s: float = 900.0,
+                          excl_ids: set[str] | None = None
+                          ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Deterministically split mega-span sections by time.
 
     A model that cannot split a 30-minute topic itself still leaves a
     usable plan: contiguous windows are grouped into <=cap_s pieces
-    under stable derived ids, with the remap recorded. A single window
-    wider than the cap is indivisible and passes through with a flag —
-    failing the whole video over one sparse window helps nobody.
+    under stable derived ids, with the remap recorded. Model-included
+    excluded windows are dropped (they were never admissible evidence)
+    and recorded. A single window wider than the cap is indivisible
+    and passes through with a flag — failing the whole video over one
+    sparse window helps nobody.
     """
     out: list[dict[str, Any]] = []
     remap: list[dict[str, Any]] = []
+    dropped: list[str] = []
     for s in sections:
         spans = []
         for wid in s.get("window_ids") or []:
-            span = by_id.get(canonical_window_id(wid) or wid)
+            cid = canonical_window_id(wid) or wid
+            if cid in (excl_ids or set()):
+                dropped.append(cid)
+                continue
+            span = by_id.get(cid)
             if span is not None:
-                spans.append((wid, span[0], span[1]))
+                spans.append((cid, span[0], span[1]))
         if not spans:
             out.append(s)
             continue
@@ -366,7 +381,7 @@ def _auto_split_sections(sections: list[dict[str, Any]],
                         "window_ids": [wid for wid, _, _ in g]})
             derived.append(nid)
         remap.append({"from": s.get("section_id"), "to": derived})
-    return out, remap
+    return out, remap, dropped
 
 
 def _assemble_plan(raw: Any, tid: str,
