@@ -83,24 +83,40 @@ PR C (validation + matrix). Ten-video qualification corpus
 pinned model for baseline and candidate. Full per-case ledger in the
 PR C report.
 
-- Published: Hermes `procedure`, Git `explainer` (type dissent, see
-  below), LTT `review`, DART `report` — zero critical findings.
+- Published with zero critical findings: DART `report`, Vox `report`,
+  Hermes `procedure`, Git `explainer` (type dissent, see below),
+  LTT `review`.
 - `needs_review` with private candidate kept, published article
-  untouched: recipe (unverifiable inferred count), Vox (cross-span
-  decade claim), product-b (chart number with no narration, converted
-  units). Each is a replan-away-from-failure, not a dead end: the
-  gate names the exact span/value to fix.
+  untouched: recipe (inferred serving count with no transcript span),
+  product-b (chart number with no narration; spec values stated
+  outside the citing spans). Each names the exact span/value to fix;
+  a replan with unioned spans (or dropping the ungroundable value)
+  is the prescribed path, not a dead end.
 - Correct refusal: silent montage (no speech; transcribe fails closed).
-- Long-form limitation: 73-97 min discussions intermittently fail at
-  plan/write (mega-spans, writer truncation); chunked planning,
-  auto-split and strided evidence mitigate, retries close the rest.
+- Long-form limitation: the two 73–97 min discussions intermittently
+  fail section writes server-side (truncation/empty replies on dense
+  spans despite strided evidence, compact JSON, halved-evidence retry
+  and plain-chat fallback). Jobs fail loudly and are safely
+  retryable; chunked planning and auto-split keep plans feasible.
+  Mitigation beyond retries (writer-side decomposition) is future
+  work, explicitly out of scope here.
 - Open dissent: the Git how-to classifies `explainer` across four
   independent decisions (commands preserved in order and syntax);
   the matrix expected `procedure`. Operator decides whether to amend
   the matrix or steer harder.
 
+Gate contract (enforced, not aspirational): a value with *no*
+transcript span anywhere is critical and blocks publication; a
+value stated elsewhere than the citing span is a major
+misplaced-span finding (fix the citation, not a fabrication); only
+critical findings block. Frontmatter (title/summary/lead) is checked
+against full-transcript evidence minus excluded spans; review
+candidates never overwrite published articles; untyped republishes
+never clear a recorded type.
+
 Known gate limits (documented, not silent): transcript-scoped
-evidence (visual-only claims need a human); whole-transcript
-attribution is substring-exact per token; decades conflate
-centuries only in explicitly ambiguous forms; no second production
-model; remote writer is pinned gemma4 (Halogen untested here).
+section evidence (visual-only claims need a human); decades conflate
+centuries only in explicitly ambiguous forms; bare integers are
+checked as values; no second production model; remote writer is
+pinned gemma4 (Halogen untyped here, reachable but unqualified);
+bare `in` and definition-list colons are not values.
