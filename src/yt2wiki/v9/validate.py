@@ -248,6 +248,29 @@ _NUMBER_WORD = re.compile(r"\b(zero|one|two|three|four|five|six|seven|eight|"
 
 _DIGIT_COMMA = re.compile(r"(?<=\d),(?=\d)")
 
+#: Decade words. Unqualified forms emit both century readings: getting
+#: the century wrong would block a correct article, while the rare
+#: collision (a "70s" duration against a "seventies" decade) stays
+#: visible in the finding detail for operator adjudication.
+_DECADES = {"twenties": "20", "thirties": "30", "forties": "40",
+            "fifties": "50", "sixties": "60", "seventies": "70",
+            "eighties": "80", "nineties": "90"}
+_DECADE_WORD = re.compile(r"\b(twenties|thirties|forties|fifties|sixties|"
+                           r"seventies|eighties|nineties)\b", re.IGNORECASE)
+_CENTURY_DECADE = re.compile(r"\b(nineteen|twenty)\s+"
+                              r"(twenties|thirties|forties|fifties|sixties|"
+                              r"seventies|eighties|nineties)\b", re.IGNORECASE)
+
+
+def _decade_number(match: re.Match[str]) -> str:
+    century = {"nineteen": "19", "twenty": "20"}[match.group(1).lower()]
+    return century + _DECADES[match.group(2).lower()] + "s"
+
+
+def _decade_aliases(match: re.Match[str]) -> str:
+    dd = _DECADES[match.group(0).lower()]
+    return f"19{dd}s 20{dd}s"
+
 _ONES = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
          "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
          "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
@@ -300,6 +323,8 @@ def _numeralize(text: str) -> str:
     text = _VOLTS_WORD.sub("V", text)
     # Longest number phrases first: "three hundred thirty million"
     # is one number (330000000), not "300" followed by "thirty million".
+    text = _CENTURY_DECADE.sub(_decade_number, text)
+    text = _DECADE_WORD.sub(_decade_aliases, text)
     text = _HUNDREDS_MILLIONS.sub(
         lambda m: str((_word_num(m.group(1)) * 100
                        + _word_num(m.group(2))) * _MULT[m.group(3).lower()]),

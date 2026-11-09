@@ -384,3 +384,10 @@ def test_decision_trace_vocab_is_major_only():
     assert res["status"] == "ready"
     assert any(f["code"] == "decision_trace_leak"
                and f["severity"] == "major" for f in res["findings"])
+
+
+def test_decade_words_map_to_years():
+    from yt2wiki.v9.validate import _numeralize
+
+    assert "1970s" in _numeralize("the nineteen seventies oil crisis")
+    assert "1990s" in _numeralize("back in the nineties")
