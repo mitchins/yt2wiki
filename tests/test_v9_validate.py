@@ -418,3 +418,10 @@ def test_bare_in_is_not_a_measurement():
     article = _article(bodies=["Combine.", "Mix.", "Uses 5500 in storage."])
     res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
     assert not any("5500 in" in f["detail"] for f in res["findings"])
+
+
+def test_mid_decade_spacing_variants():
+    from yt2wiki.v9.validate import _numeralize
+
+    assert _numeralize("solar in the mid90s") == "solar in the 90s"
+    assert _numeralize("in the early 1970s") == "in the early 1970s"

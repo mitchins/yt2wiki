@@ -264,6 +264,8 @@ _DIGIT_COMMA = re.compile(r"(?<=\d),(?=\d)")
 _DECADES = {"twenties": "20", "thirties": "30", "forties": "40",
             "fifties": "50", "sixties": "60", "seventies": "70",
             "eighties": "80", "nineties": "90"}
+_MID_DECADE = re.compile(r"\b(?:mid|early|late)(\d0s)\b",
+                           re.IGNORECASE)
 _DECADE_WORD = re.compile(r"\b(twenties|thirties|forties|fifties|sixties|"
                            r"seventies|eighties|nineties)\b", re.IGNORECASE)
 _CENTURY_DECADE = re.compile(r"\b(nineteen|twenty)\s+"
@@ -334,6 +336,9 @@ def _numeralize(text: str) -> str:
     # is one number (330000000), not "300" followed by "thirty million".
     text = _CENTURY_DECADE.sub(_decade_number, text)
     text = _DECADE_WORD.sub(_decade_aliases, text)
+    # Attached caption/ASR spacing variants ("mid90s") denote the
+    # same decade. Spaced forms ("early 1970s") already extract.
+    text = _MID_DECADE.sub(r"\1", text)
     text = _HUNDREDS_MILLIONS.sub(
         lambda m: str((_word_num(m.group(1)) * 100
                        + _word_num(m.group(2))) * _MULT[m.group(3).lower()]),
