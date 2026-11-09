@@ -1081,22 +1081,35 @@ def _write_typed_sections(chat, plan_sections, segs, video_title,
         # Bounded, representative evidence: very long spans exceed what
         # the writer backend accepts in one prompt, so stride-sample
         # instead of head-truncating (citations still cover full spans).
-        text = section_transcript_windows(segs, spans, cap_chars=4500,
-                                           sample=True)
+        texts = [section_transcript_windows(segs, spans, cap_chars=4500,
+                                            sample=True),
+                 section_transcript_windows(segs, spans, cap_chars=2000,
+                                            sample=True)]
+        calls = {"n": 0}
+
+        def _user_for(text: str, heading: str = p["heading"],
+                      slot: str | None = p.get("slot"),
+                      span_txt: str = ", ".join(
+                          f"{a:.0f}-{b:.0f}s" for a, b in spans)) -> str:
+            return TYPED_SECTION_PROMPT.format(
+                common=common, template_id=template_id, override=override,
+                video_title=video_title, heading=heading,
+                slot=slot, spans=span_txt, transcript=text,
+                cite_rule=rule)
+
+        text = texts[0]
         if not text.strip():
             out = {"heading": p["heading"], "body": "_No speech in this span._",
                    "key_points": [], "warnings": [], "attempts": 0}
         else:
-            span_txt = ", ".join(f"{a:.0f}-{b:.0f}s" for a, b in spans)
-            user = TYPED_SECTION_PROMPT.format(
-                common=common, template_id=template_id, override=override,
-                video_title=video_title, heading=p["heading"],
-                slot=p.get("slot"), spans=span_txt, transcript=text,
-                cite_rule=rule)
-
-            def _section_call(extra: str, _p=p, _user=user,
-                              _text=text) -> dict[str, Any]:
-                msg = _user + ("\n\n" + extra if extra else "")
+            def _section_call(extra: str, _texts=texts,
+                              _calls=calls) -> dict[str, Any]:
+                # A truncation means the evidence overran the writer's
+                # output budget: the single bounded retry re-runs on the
+                # shorter sample rather than failing the section.
+                _calls["n"] += 1
+                user = _user_for(_texts[min(_calls["n"] - 1, len(_texts) - 1)])
+                msg = user + ("\n\n" + extra if extra else "")
                 # Dense multi-window spans need room: 1600 tokens
                 # truncated longer sections into unusable stubs. Compact
                 # JSON: the model otherwise burns the budget on
