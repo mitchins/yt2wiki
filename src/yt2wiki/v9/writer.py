@@ -973,6 +973,7 @@ Return JSON only:
   "body": "short paragraphs and bullets; keep exact commands, values, paths verbatim; {cite_rule}",
   "key_points": ["..."],
   "warnings": ["..."]}}
+Keep the body under 1500 characters: select the essential points, do not transcribe the evidence.
 Rules:
 - Use only what the narration states or clearly implies.
 - Omit sponsor pitches, community promotions, audience appeals and introductory filler.

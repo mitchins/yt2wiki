@@ -519,3 +519,34 @@ def test_auto_split_drops_excluded_windows():
         raw, by_id, excl_ids={"w-001"})
     assert dropped == ["w-001"]
     assert all("w-001" not in s.get("window_ids", []) for s in split)
+
+
+def test_chunked_planning_splits_long_indexes():
+    segs = _segs(60, step=100.0)
+    index = S.build_index(segs, 6000.0, target_windows=64)
+    assert index["n_windows"] > 36
+    decision = {"template_id": "discussion", "index_hash": index["index_hash"]}
+    seen_prompts = []
+
+    def chat(messages, **kw):
+        seen_prompts.append(messages[-1]["content"])
+        import re
+        ids = re.findall(r"\[(w-\d{3}) \d+-", messages[-1]["content"])
+        assert len(ids) <= 36
+        return {"template_id": "discussion",
+                "sections": [{"section_id": f"s-{ids[0]}",
+                              "slot": "positions",
+                              "heading": "H",
+                              "window_ids": [ids[0]]},
+                             {"section_id": "q", "slot": "central_question",
+                              "heading": "Q",
+                              "window_ids": [ids[-1]]}],
+                "coverage": {"included_window_ids": ids,
+                             "excluded_window_ids": [],
+                             "unassigned_substantive_window_ids": []}}
+
+    plan = D.plan_article(chat, decision, index)
+    assert len(seen_prompts) >= 2
+    assert plan["coverage"]["chunked"] >= 2
+    assert all(s["section_id"].startswith("c") for s in plan["sections"])
+    assert D.AT.validate_plan(plan, "discussion") == []

@@ -230,14 +230,75 @@ If the source cannot support any section in this type, decline explicitly instea
 Reply ONLY as JSON: {{"template_id": "{template_id}", "sections": [{{"section_id": "stable-id", "slot": "<allowed slot>", "heading": "...", "window_ids": ["w-000", ...]}}], "coverage": {{"included_window_ids": [...], "excluded_window_ids": [...], "unassigned_substantive_window_ids": [...]}}}}."""
 
 
+#: Above this many substantive windows a single plan prompt stops
+#: being reliable: the index is split into contiguous chunks planned
+#: independently and merged. Chunking is deterministic orchestration;
+#: the model still does all topical grouping inside each chunk.
+PLAN_CHUNK_WINDOWS = 36
+
+
 def plan_article(chat: Callable[..., Any], decision: dict[str, Any],
                  index: dict[str, Any]) -> dict[str, Any]:
     """Locked editorial plan for the frozen decision. Raises EditorialError."""
+    wins = [w for w in (index.get("windows") or [])]
+    if len(wins) > PLAN_CHUNK_WINDOWS:
+        return _plan_chunked(chat, decision, index, wins)
+    return _plan_once(chat, decision, index, wins)
+
+
+def _plan_chunked(chat: Callable[..., Any], decision: dict[str, Any],
+                  index: dict[str, Any],
+                  wins: list[dict[str, Any]]) -> dict[str, Any]:
+    """Plan a long index in contiguous chunks, then merge.
+
+    Each chunk is planned independently against the same frozen type;
+    section ids are namespaced per chunk, coverage lists merged, and
+    the chunking recorded. A chunk that declines fails the whole plan
+    loudly — partial articles are not published.
+    """
+    n = max(1, (len(wins) + PLAN_CHUNK_WINDOWS - 1) // PLAN_CHUNK_WINDOWS)
+    size = (len(wins) + n - 1) // n
+    merged: list[dict[str, Any]] = []
+    included: list[str] = []
+    excluded: list[str] = []
+    unassigned: list[str] = []
+    auto_split: list[dict[str, Any]] = []
+    for c in range(n):
+        part = wins[c * size:(c + 1) * size]
+        sub = dict(index, windows=part)
+        chunk_plan = _plan_once(chat, decision, sub, part)
+        for s in chunk_plan.get("sections") or []:
+            s = dict(s)
+            s["section_id"] = f"c{c}-{s['section_id']}"
+            merged.append(s)
+        cov = chunk_plan.get("coverage") or {}
+        included.extend(cov.get("included_window_ids") or [])
+        excluded.extend(cov.get("excluded_window_ids") or [])
+        unassigned.extend(cov.get("unassigned_substantive_window_ids") or [])
+        auto_split.extend(cov.get("auto_split") or [])
+    tid = decision.get("template_id")
+    plan = {"template_id": tid, "sections": merged,
+            "coverage": {"included_window_ids": included,
+                         "excluded_window_ids": excluded,
+                         "unassigned_substantive_window_ids": unassigned,
+                         "chunked": n}}
+    if auto_split:
+        plan["coverage"]["auto_split"] = auto_split
+    problems = AT.validate_plan(plan, tid or "")
+    if problems:
+        raise EditorialError(
+            f"merged chunk plan failed validation: {'; '.join(problems[:3])}")
+    return plan
+
+
+def _plan_once(chat: Callable[..., Any], decision: dict[str, Any],
+               index: dict[str, Any],
+               wins: list[dict[str, Any]]) -> dict[str, Any]:
+    """One bounded plan attempt sequence over the given windows."""
     tid = decision.get("template_id")
     tdef = AT.type_definition(tid or "")
     if tdef is None:
         raise EditorialError(f"cannot plan untyped decision {tid!r}")
-    wins = index.get("windows") or []
     digests = index.get("digests") or {}
     excl_ids = {w["window_id"] for w in wins
                 if (digests.get(w["window_id"]) or {}).get("flags", {}).get("ad")
@@ -301,7 +362,8 @@ def plan_article(chat: Callable[..., Any], decision: dict[str, Any],
         plan, reason = _assemble_plan(raw, tid, by_id, excl_ids)
         if plan is not None:
             return plan
-        last = [reason]
+        shape = _raw_shape(raw)
+        last = [f"{reason} (reply had {shape})"]
     # Deterministic fallback for the one mechanical failure the model
     # keeps repeating: a section wider than the writer budget is split
     # by time under stable derived ids, with the remap recorded. A
@@ -382,6 +444,18 @@ def _auto_split_sections(sections: list[dict[str, Any]],
             derived.append(nid)
         remap.append({"from": s.get("section_id"), "to": derived})
     return out, remap, dropped
+
+
+def _raw_shape(raw: Any) -> str:
+    """One-line shape summary of a rejected plan reply, for diagnostics."""
+    if not isinstance(raw, dict):
+        return f"non-object {type(raw).__name__}"
+    secs = raw.get("sections")
+    if not isinstance(secs, list):
+        return "sections not a list"
+    with_ids = sum(1 for s in secs
+                    if isinstance(s, dict) and s.get("window_ids"))
+    return f"{len(secs)} sections, {with_ids} with window_ids"
 
 
 def _assemble_plan(raw: Any, tid: str,
