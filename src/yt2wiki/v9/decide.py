@@ -275,6 +275,7 @@ def plan_article(chat: Callable[..., Any], decision: dict[str, Any],
                   + (f" ({shown} shown)" if shown != len(lines) else "")
                   + ". Cover all of them or mark the rest unassigned.")
     last: list[str] = []
+    last_raw: Any = None
     for attempt in range(PLAN_MAX_ATTEMPTS):
         user = base_user
         if attempt > 0 and last:
@@ -296,11 +297,76 @@ def plan_article(chat: Callable[..., Any], decision: dict[str, Any],
         if isinstance(raw, dict) and raw.get("declined") is True:
             raise EditorialError(
                 f"planner declined: {str(raw.get('reason') or 'no reason')[:300]}")
+        last_raw = raw
         plan, reason = _assemble_plan(raw, tid, by_id, excl_ids)
         if plan is not None:
             return plan
         last = [reason]
+    # Deterministic fallback for the one mechanical failure the model
+    # keeps repeating: a section wider than the writer budget is split
+    # by time under stable derived ids, with the remap recorded. A
+    # topical mis-plan still fails loudly above.
+    if isinstance(last_raw, dict) and isinstance(last_raw.get("sections"), list):
+        split, remap = _auto_split_sections(last_raw["sections"], by_id)
+        if remap:
+            fixed = dict(last_raw, sections=split)
+            plan, reason = _assemble_plan(fixed, tid, by_id, excl_ids)
+            if plan is not None:
+                plan.setdefault("coverage", {})["auto_split"] = remap
+                return plan
+            last.append(reason)
     raise EditorialError(f"article plan failed validation: {'; '.join(last)}")
+
+
+def _auto_split_sections(sections: list[dict[str, Any]],
+                          by_id: dict[str, tuple[float, float]],
+                          cap_s: float = 900.0) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Deterministically split mega-span sections by time.
+
+    A model that cannot split a 30-minute topic itself still leaves a
+    usable plan: contiguous windows are grouped into <=cap_s pieces
+    under stable derived ids, with the remap recorded. A single window
+    wider than the cap is indivisible and passes through with a flag —
+    failing the whole video over one sparse window helps nobody.
+    """
+    out: list[dict[str, Any]] = []
+    remap: list[dict[str, Any]] = []
+    for s in sections:
+        spans = []
+        for wid in s.get("window_ids") or []:
+            span = by_id.get(canonical_window_id(wid) or wid)
+            if span is not None:
+                spans.append((wid, span[0], span[1]))
+        if not spans:
+            out.append(s)
+            continue
+        t0 = min(p[1] for p in spans)
+        t1 = max(p[2] for p in spans)
+        if t1 - t0 <= cap_s or len(spans) == 1:
+            out.append(s)
+            continue
+        groups: list[list[tuple]] = [[]]
+        for wid, a, b in sorted(spans, key=lambda p: p[1]):
+            if groups[-1] and b - groups[-1][0][1] > cap_s:
+                groups.append([])
+            groups[-1].append((wid, a, b))
+        # A single group wider than the cap means indivisible windows;
+        # keep it whole rather than failing the video.
+        if len(groups) == 1:
+            out.append(dict(s, auto_split_warning=True))
+            continue
+        derived = []
+        for i, g in enumerate(groups):
+            nid = f"{s.get('section_id')}-p{i}"
+            out.append({"section_id": nid, "slot": s.get("slot"),
+                        "heading": f"{s.get('heading')} ({i + 1}/{len(groups)})",
+                        "source_windows": [[a, b] for _, a, b in g],
+                        "t_start": min(a for _, a, _ in g),
+                        "t_end": max(b for _, _, b in g),
+                        "window_ids": [wid for wid, _, _ in g]})
+            derived.append(nid)
+        remap.append({"from": s.get("section_id"), "to": derived})
+    return out, remap
 
 
 def _assemble_plan(raw: Any, tid: str,

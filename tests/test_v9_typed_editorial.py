@@ -456,3 +456,32 @@ def test_canonical_id_rejects_four_digits():
     from yt2wiki.v9.scout import canonical_window_id
 
     assert canonical_window_id("w-1000") is None
+
+
+def test_auto_split_fallback_in_plan_article():
+    by_windows = {f"w-{i:03d}": (float(i * 300), float(i * 300 + 240))
+                  for i in range(8)}
+    raw = {"template_id": "review",
+           "sections": [{"section_id": "big", "slot": "subject",
+                         "heading": "Everything",
+                         "window_ids": [f"w-{i:03d}" for i in range(8)]},
+                        {"section_id": "a", "slot": "assessment",
+                         "heading": "A", "window_ids": ["w-000"]}],
+           "coverage": {}}
+    split, remap = D._auto_split_sections(raw["sections"], by_windows)
+    assert remap and remap[0]["from"] == "big"
+    assert len(split) == 1 + len(remap[0]["to"])
+    assert all("-p" in s["section_id"] for s in split if s["section_id"] != "a")
+    for s in split:
+        spans = s.get("source_windows")
+        if spans is None:
+            continue
+        assert max(b for _, b in spans) - min(a for a, _ in spans) <= 900.0
+
+    index = {"windows": [
+        {"window_id": f"w-{i:03d}", "t_start": float(i * 300),
+         "t_end": float(i * 300 + 240)} for i in range(8)],
+        "digests": {}, "index_hash": "idx-1"}
+    decision = {"template_id": "review", "index_hash": "idx-1"}
+    plan = D.plan_article(lambda messages, **kw: raw, decision, index)
+    assert plan["coverage"]["auto_split"][0]["from"] == "big"
