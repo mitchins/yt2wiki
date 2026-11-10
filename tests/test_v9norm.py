@@ -21,3 +21,27 @@ def test_descending_ranges_are_ordered():
     from yt2wiki.v9.publish import normalize_timestamps as N
     out = N("see [11:39-7:04](u) end", "https://youtube.com/watch?v=A", duration_s=777.0, hint_s=700.0)
     assert "[7:04-11:39]" in out, out
+
+
+def test_mangled_label_rebuilt_from_target():
+    from yt2wiki.v9.publish import normalize_timestamps as N
+    url = "https://youtube.com/watch?v=A"
+    out = N(f"see [0:00:64.9]({url}?t=64.9) end", url, duration_s=620.0)
+    assert "[1:04](" in out and "t=64" in out, out
+    assert "0:00:64.9" not in out, out
+
+
+def test_mangled_label_without_target_stays_bare():
+    from yt2wiki.v9.publish import normalize_timestamps as N
+    out = N("see [0:00:64.9](https://example.com/x) end",
+            "https://youtube.com/watch?v=A", duration_s=620.0)
+    assert "0:00:64.9" in out and "youtube.com" not in out, out
+
+
+def test_non_clock_label_with_target_keeps_old_path():
+    from yt2wiki.v9.publish import normalize_timestamps as N
+    url = "https://youtube.com/watch?v=A"
+    out = N(f"see [Part 2]({url}?t=120) end", url, duration_s=620.0)
+    # No clock punctuation: not a mangled timestamp, so the old
+    # drop-href path applies rather than target rebuilding.
+    assert out.strip() == "see Part 2 end", out

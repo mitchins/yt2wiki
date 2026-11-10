@@ -671,3 +671,9 @@ def test_evidence_strips_caption_sequence_counters():
     out = section_transcript_windows(segs, [[165.0, 180.0]])
     assert out.startswith("[170.0-175.0] and Crisis 3 remastered")
     assert "133" not in out.split("] ", 1)[1].split(" and Crisis")[0]
+
+
+def test_cite_rule_requires_sub60_seconds():
+    from yt2wiki.v9.writer import cite_rule
+    for url in ("https://www.youtube.com/watch?v=A", None):
+        assert "stay below 60" in cite_rule(url)

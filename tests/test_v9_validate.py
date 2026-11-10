@@ -620,3 +620,52 @@ def test_punctuated_title_case_run_is_not_a_name():
     assert not [f for f in res["findings"]
                 if f["code"] == "unattested_entity"
                 and "Economics" in f["detail"]], res["findings"]
+
+
+def test_label_line_is_not_a_name():
+    segs = _segs(["Combine flour and water. Bake the loaf."])
+    article = _article(bodies=["Objectives and Methodology:\n* Mix flour.",
+                               "Bake.", "Cool."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert not [f for f in res["findings"]
+                if f["code"] == "unattested_entity"
+                and "Methodology" in f["detail"]], res["findings"]
+
+
+def test_ordinal_pair_attests_two_loaves():
+    segs = _segs(["We shaped our first loaf done and now the second loaf rises."])
+    article = _article(bodies=["Combine.", "Mix.",
+                               "Bake."],
+                       slots=("dish", "ingredients", "method"))
+    article["summary"] = "Create two loaves of bread."
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 30.0)
+    assert res["status"] == "ready", res["findings"]
+    assert any(f["code"] == "synthesized_count" for f in res["findings"]), res["findings"]
+
+
+def test_ordinal_gap_does_not_attest_three_loaves():
+    segs = _segs(["We shaped our first loaf done and now the second loaf rises."])
+    article = _article(bodies=["Combine.", "Mix.", "Bake."])
+    article["summary"] = "Create three loaves of bread."
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 30.0)
+    assert res["status"] == "needs_review"
+    assert any(f["code"] == "unsupported_exact_value"
+               and "three" in f["detail"].lower() or
+               "3 loaves" in f["detail"] for f in res["findings"]), res["findings"]
+
+
+def test_exact_quantities_still_need_spans():
+    segs = _segs(["We shaped our first loaf done."])
+    article = _article(bodies=["Combine.", "Mix 540 grams flour.", "Bake."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 30.0)
+    assert res["status"] == "needs_review"
+    assert any(f["code"] == "unsupported_exact_value" for f in res["findings"])
+
+
+def test_slot_name_leak_is_major():
+    segs = _segs(["Combine flour and water. Bake the loaf."])
+    article = _article(bodies=["Combine.", "as_of\n\nSome summary text here.",
+                               "Cool."],
+                       slots=("dish", "as_of", "method"))
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert any(f["code"] == "slot_name_leak" for f in res["findings"]), res["findings"]

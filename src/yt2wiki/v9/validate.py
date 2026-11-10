@@ -62,6 +62,12 @@ _FENCE = re.compile(r"```.*?```", re.DOTALL)
 #: A name never spans a line break: headings and list items sit on
 #: their own lines, and a match reaching across one is two fragments,
 #: not a person or product.
+#: Small connectors allowed inside colon-terminated label lines.
+_LABEL_CONNECTORS = frozenset({
+    "and", "or", "of", "the", "a", "an", "for", "vs", "with", "to",
+    "in", "on", "at", "per", "by", "vs.",
+})
+
 _NAME = re.compile(r"\b((?:[A-Z][a-z]{2,}|[A-Z]{2,})[A-Za-z']*"
                     r"(?:[ \t]+(?:[A-Z][a-z]{2,}|[A-Z]{2,})[A-Za-z']*)?)\b")
 _SENTENCE_END = re.compile(r"[.!?]\s*$")
@@ -449,6 +455,9 @@ def check_exact_values(article: dict[str, Any],
         segs, [[0.0, float(duration_s or 0) or 0.0]]))
     whole_supported = [lit.literal for lit in
                        _extract_values(whole, max_values=2000)]
+    # Raw transcript for ordinal synthesis: numeralization must not
+    # rewrite the ordinal words the synthesis matcher looks for.
+    raw_whole = " ".join(str(r.get("text") or "") for r in segs)
     out: list[dict[str, Any]] = []
     for sec in article.get("sections") or []:
         body = _prose_values_text(str(sec.get("body") or ""))
@@ -557,14 +566,83 @@ def check_exact_values(article: dict[str, Any],
                         f"numbers in a new relation; verify the relation",
                         sec.get("section_id")))
                 else:
-                    out.append(_finding(
-                        "unsupported_exact_value", CRITICAL,
-                        f"{lit.kind} {lit.literal!r} has no source span in "
-                        f"this section's evidence", sec.get("section_id")))
+                    synth = (lit.kind == "measurement" and
+                             _ordinal_synthesis_ok(raw_whole, lit.literal))
+                    if synth is not None:
+                        # Explicitly evidenced multi-span synthesis: the
+                        # count is attested by distinct ordinal spans, so
+                        # it is recorded (major) rather than blocking.
+                        out.append(_finding(
+                            "synthesized_count", MAJOR, synth,
+                            sec.get("section_id")))
+                    else:
+                        out.append(_finding(
+                            "unsupported_exact_value", CRITICAL,
+                            f"{lit.kind} {lit.literal!r} has no source span in "
+                            f"this section's evidence", sec.get("section_id")))
     return out
 
 
 _BARE_DIGITS = re.compile(r"\d+")
+
+#: Ordinals for evidenced multi-span synthesis ("first loaf" +
+#: "second loaf" attests a "2 loaves" count). Cardinals and exact
+#: quantities are untouched: only ordinal-distributed counts qualify.
+_ORDINAL_NUMBERS = {
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+    "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
+    "eleventh": 11, "twelfth": 12,
+}
+_ORDINAL_MENTION = re.compile(
+    r"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|"
+    r"tenth|eleventh|twelfth)\s+([a-z][a-z'\-]*)", re.IGNORECASE)
+_IRREGULAR_PLURALS = {
+    "loaves": "loaf", "leaves": "leaf", "halves": "half",
+    "knives": "knife", "wives": "wife", "lives": "life",
+    "thieves": "thief", "shelves": "shelf",
+}
+
+
+def _noun_stem(word: str) -> str:
+    """Crude singular stem for synthesis matching (loaves -> loaf)."""
+    w = word.lower().strip("'")
+    if w in _IRREGULAR_PLURALS:
+        return _IRREGULAR_PLURALS[w]
+    if w.endswith("ies") and len(w) > 4:
+        return w[:-3] + "y"
+    if w.endswith("es") and len(w) > 3 and not w.endswith("ss"):
+        return w[:-2]
+    if w.endswith("s") and len(w) > 3 and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
+def _ordinal_synthesis_ok(raw_transcript: str, literal: str) -> str | None:
+    """Attest a count from distinct ordinal mentions of one noun.
+
+    Returns a ledger detail when the transcript states exactly the
+    ordinals 1..N for the literal's head noun ("first loaf" and
+    "second loaf" attest "2 loaves"); otherwise None. Only integer
+    counts 2..12 qualify, so exact quantities ("540 grams", "1
+    tablespoon", temperatures, ports) still need their own spans.
+    """
+    m = re.fullmatch(r"(\d+)\s+([A-Za-z][A-Za-z'\-]*)", literal.strip())
+    if not m:
+        return None
+    count = int(m.group(1))
+    if count < 2 or count > 12:
+        return None
+    stem = _noun_stem(m.group(2))
+    found: set[int] = set()
+    for om in _ORDINAL_MENTION.finditer(raw_transcript):
+        if _noun_stem(om.group(2)) == stem:
+            found.add(_ORDINAL_NUMBERS[om.group(1).lower()])
+    if found == set(range(1, count + 1)):
+        ordinals = sorted(found)
+        return (f"{literal!r} synthesizes {len(ordinals)} ordinal spans "
+                f"({', '.join(str(o) for o in ordinals)}) for {stem!r}; "
+                f"verified multi-span synthesis")
+    return None
 
 
 def _numbers_grounded(literal: str, supported: list[str]) -> bool:
@@ -718,9 +796,21 @@ def check_entities(article: dict[str, Any],
             line_end = body.find("\n", m.end())
             if line_end < 0:
                 line_end = len(body)
-            stripped = body[line_start:line_end].strip("#*->0123456789. \t:")
+            raw_line = body[line_start:line_end]
+            stripped = raw_line.strip("#*->0123456789. \t:")
             if stripped == m.group(1).strip():
                 continue
+            if raw_line.rstrip().endswith(":"):
+                # A short colon-terminated label line ("Objectives and
+                # Methodology:", "Status and Uncertainty:") is structure,
+                # not a name claim: skip matches when every word is
+                # title-case or a small connector. (The colon is checked
+                # on the raw line: the stripped form has it removed.)
+                label_words = [w.strip(",") for w in stripped.split()]
+                if (label_words and len(label_words) <= 6 and all(
+                        w[:1].isupper() or w.lower() in _LABEL_CONNECTORS
+                        for w in label_words)):
+                    continue
             name = m.group(1)
             if name in seen:
                 continue
@@ -941,6 +1031,14 @@ def check_reader_integrity(article: dict[str, Any]) -> list[dict[str, Any]]:
             out.append(_finding("decision_trace_leak", MAJOR,
                                 f"internal judging vocabulary {dt.group(0)!r} "
                                 f"in prose", sec.get("section_id")))
+        # Slot scaffolding must not leak into prose ("as_of" as a body):
+        # a body that opens with its own slot token was never written.
+        slot = str(sec.get("slot") or "").strip()
+        if slot and re.match(r"(?i)^[\s#*>_`-]*" + re.escape(slot)
+                             + r"(?![A-Za-z0-9_])", body):
+            out.append(_finding("slot_name_leak", MAJOR,
+                                f"body opens with its slot token {slot!r}",
+                                sec.get("section_id")))
         for fence in re.findall(r"```(.*?)```", body, flags=re.DOTALL):
             if fence.count('"') % 2 or fence.count("`") % 2:
                 out.append(_finding("unbalanced_syntax", CRITICAL,

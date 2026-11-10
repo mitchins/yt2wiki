@@ -212,15 +212,19 @@ def cite_rule(url: str | None) -> str:
     never drift from the links `normalize_timestamps` emits — including
     replacing a pre-existing `t` param instead of duplicating it.
     """
+    convert = ("Convert evidence stamps of 60 seconds or more to m:ss "
+               "before citing (evidence [243.8-...] cites as [4:03], never "
+               "[243], [243.8] or [0:03:63.8]); seconds after the colon "
+               "stay below 60.")
     if url and "youtu" in url:
         example = timestamp_url(url, 159)
         assert example is not None
         return (f"cite timestamps ONLY as [m:ss]({timestamp_url_pattern(url)}), e.g. "
                 f"[2:39]({example}). Never write bare seconds like [159] or "
-                "[159:0], never invent any other URL")
+                f"[159:0], never invent any other URL. {convert}")
     return ("cite timestamps ONLY as plain [m:ss] with no link, e.g. "
             "[0:04] (this upload has no source URL). Never write seconds "
-            "like [159] or [159:0], never invent a URL")
+            f"like [159] or [159:0], never invent a URL. {convert}")
 
 
 def _classify_error(exc: BaseException) -> tuple[str, bool]:
