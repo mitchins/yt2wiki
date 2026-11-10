@@ -29,8 +29,14 @@ def _section_reply(section_id="sec-x", heading="H"):
 
 class _StubText:
     def __init__(self, plan_sections):
+        import json as _json
+
         self.plan_sections = plan_sections
         self.calls = []
+        self._json = _json
+
+    def chat(self, messages, **kw):
+        return self._json.dumps(self.chat_json(messages, **kw))
 
     def chat_json(self, messages, **kw):
         user = messages[-1]["content"] if messages else ""
@@ -197,3 +203,55 @@ def test_refused_status_with_type_publishes_nothing(monkeypatch, tmp_path):
     res = v9run.run_source(settings, db, service, "s", enable_typed=True)
     assert not res["ok"] and res["error"].startswith("refused:")
     assert db.query_one("SELECT COUNT(*) c FROM articles")["c"] == 0
+
+
+def test_typed_run_records_ready_validation(monkeypatch, tmp_path):
+    settings, db = _setup_db(tmp_path)
+    text = _StubText(_plan_sections())
+    monkeypatch.setattr("yt2wiki.backends.loader.ModelManager",
+                        lambda *a, **k: _StubManager(text))
+    service = Service(settings, db)
+    res = v9run.run_source(settings, db, service, "s", enable_typed=True)
+    assert res["ok"], res.get("error")
+    assert res["validation"]["status"] == "ready"
+    assert all(f["severity"] == "major"
+               for f in res["validation"]["findings"])
+    row = db.query_one("SELECT job_id, stage, state, metrics_json FROM stages "
+                       "WHERE job_id=? AND stage='v9_validate'",
+                       (res["v9_job_id"],))
+    assert row["state"] == "done"
+    import json as _json2
+    assert _json2.loads(row["metrics_json"])["validation"] == "ready"
+
+
+def test_needs_review_keeps_private_candidate_and_publishes_nothing(
+        monkeypatch, tmp_path):
+    settings, db = _setup_db(tmp_path)
+
+    class _InventingText(_StubText):
+        def chat_json(self, messages, **kw):
+            if any("Plan the article" in (m.get("content") or "") for m in messages):
+                return super().chat_json(messages, **kw)
+            user = messages[-1]["content"] if messages else ""
+            for sec in self.plan_sections:
+                if sec["heading"] in user:
+                    body = ("It costs $300 and uses 2 1/2 cups of sugar. "
+                            "[0:01](https://example.com)")
+                    return _section_reply(sec["section_id"], sec["heading"]) | {
+                        "body": body}
+            return super().chat_json(messages, **kw)
+
+    monkeypatch.setattr("yt2wiki.backends.loader.ModelManager",
+                        lambda *a, **k: _StubManager(_InventingText(_plan_sections())))
+    service = Service(settings, db)
+    res = v9run.run_source(settings, db, service, "s", enable_typed=True)
+    assert not res["ok"]
+    assert res["error"].startswith("needs_review:")
+    assert db.query_one("SELECT COUNT(*) c FROM articles")["c"] == 0
+    cand = tmp_path / "work" / res["v9_job_id"] / "v9_validate" / "candidate.md"
+    assert cand.is_file() and "$300" in cand.read_text()
+    import json as _json
+    findings = _json.loads((cand.parent / "findings.json").read_text())
+    assert findings["status"] == "needs_review"
+    assert any(f["code"] == "unsupported_exact_value"
+               for f in findings["findings"])

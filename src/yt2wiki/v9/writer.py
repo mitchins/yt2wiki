@@ -699,7 +699,7 @@ def _single_attempt(call, validate, calls: int, correction: str, editorial: bool
 
 def _run_attempt(call, *, validate, editorial: bool, section_id: str,
                  heading: str, t_start: float, t_end: float,
-                 excerpt: str = "") -> dict[str, Any]:
+                 excerpt: str = "", verbose_retry: bool = False) -> dict[str, Any]:
     """One section through at most WRITER_MAX_ATTEMPTS writer calls.
 
     Transport failures, invalid JSON, truncation and correctable editorial
@@ -708,6 +708,10 @@ def _run_attempt(call, *, validate, editorial: bool, section_id: str,
     interval, attempt count and sanitised category. The original plan
     input, timestamp interval and stable section ID are preserved on the
     error for stage metrics — never substituted with fallback prose.
+
+    With verbose_retry (typed path only), the retry names the exact
+    failure instead of a generic "try again", which lets the model
+    repeat an empty body or a truncated dump.
     """
     last: tuple[str, str] | None = None
     calls = 0
@@ -721,7 +725,15 @@ def _run_attempt(call, *, validate, editorial: bool, section_id: str,
         last = outcome["last"]
         if not outcome["retry"]:
             break
-        correction = outcome.get("correction", correction)
+        if verbose_retry:
+            category, detail = last
+            specific = (outcome.get("correction") or "").strip()
+            ask = specific if specific else \
+                "Return a complete JSON object with a non-empty body."
+            correction = (f"Correction: the previous reply failed ({category}: "
+                          f"{detail[:200]}). {ask}")
+        else:
+            correction = outcome.get("correction", correction)
     category, detail = last or ("error", "unknown failure")
     raise SectionWriteError(section_id, heading, t_start, t_end,
                             category, calls, detail, excerpt)
@@ -973,11 +985,38 @@ Return JSON only:
   "body": "short paragraphs and bullets; keep exact commands, values, paths verbatim; {cite_rule}",
   "key_points": ["..."],
   "warnings": ["..."]}}
+Keep the body under 1500 characters: select the essential points, do not transcribe the evidence.
+Cite any evidence stamp of 60 seconds or more as m:ss (evidence [243.8-...] cites as [4:03], never [243], [243.8] or [0:03:63.8]); seconds after the colon stay below 60.
 Rules:
 - Use only what the narration states or clearly implies.
 - Omit sponsor pitches, community promotions, audience appeals and introductory filler.
 - Preserve prerequisites, corrections and failed attempts mentioned in the spans.
 - Prefer specific source-supported detail over generic advice. No marketing language."""
+
+TYPED_SECTION_MINIMAL_PROMPT = """{common}
+
+Article type: {template_id}. {override}
+
+Context:
+- article title: {video_title}
+- section heading: {heading}
+- allowed slot for this section: {slot}
+- evidence spans: {spans}
+
+Transcript evidence (quote exact commands, values, paths and timestamps from it; never invent):
+\"\"\"
+{transcript}
+\"\"\"
+
+The previous full-schema reply was unusable. Return ONLY this minimal JSON object:
+{{"heading": {heading!r},
+  "body": "short paragraphs and bullets; keep exact commands, values, paths verbatim; {cite_rule}"}}
+Keep the body under 1200 characters: select the essential points, do not transcribe the evidence.
+Cite any evidence stamp of 60 seconds or more as m:ss (evidence [243.8-...] cites as [4:03], never [243], [243.8] or [0:03:63.8]); seconds after the colon stay below 60.
+Rules:
+- Use only what the narration states or clearly implies.
+- Omit sponsor pitches, community promotions, audience appeals and introductory filler.
+- Preserve prerequisites, corrections and failed attempts mentioned in the spans."""
 
 TYPED_TITLE_PROMPT = """{common}
 
@@ -1009,9 +1048,68 @@ TYPE_LEAD_SHAPE = {
 }
 
 
+_LEADING_NUM = re.compile(r"^\d+\s+")
+
+
+def _dedupe_key(text: str) -> str:
+    """Caption chunks repeat the same words with new numbers ("96 bowl
+    and now" / "97 bowl and now ..."): strip the numbering so repeats
+    compare equal. Returns "" for empty text."""
+    return _LEADING_NUM.sub("", text.lower().strip())
+
+
+def _dedupe_lines(lines: list[str]) -> list[str]:
+    """Drop transcript rows that merely repeat already-kept wording.
+
+    Overlapping caption/ASR windows restate the same sentence two or
+    three times with fresh numbers. Feeding all of them invites the
+    writer to echo the repetition until it hits the token limit, so
+    keep the first occurrence and drop near-identical restatements.
+    Order is preserved; nothing is reworded.
+    """
+    out: list[str] = []
+    for line in lines:
+        m = re.match(r"^\[([^\]]*)\]\s*(.*)$", line, re.DOTALL)
+        stamp, text = (m.group(1), m.group(2)) if m else ("", line)
+        key = _dedupe_key(text)
+        if not key:
+            continue
+        if any(key == _dedupe_key(re.sub(r"^\[[^\]]*\]\s*", "", o))
+               or key in _dedupe_key(re.sub(r"^\[[^\]]*\]\s*", "", o))
+               or _dedupe_key(re.sub(r"^\[[^\]]*\]\s*", "", o)) in key
+               for o in out[-3:]):
+            continue
+        out.append(line)
+    return out
+
+
+def _stride_lines(lines: list[str], cap_chars: int) -> list[str]:
+    """Evenly spaced subsample: beginning, middle and end survive the cut.
+
+    Cutting to the first N characters would blind the writer to the
+    tail of long spans while still citing them. Striding keeps every
+    part of every admitted span represented.
+    """
+    total = sum(len(x) for x in lines)
+    if total <= cap_chars or len(lines) < 3:
+        return lines
+    keep = max(2, int(len(lines) * cap_chars / total))
+    out: list[str] = []
+    prev = -1
+    for i in range(keep):
+        idx = min(len(lines) - 1, (i * len(lines)) // keep)
+        if idx != prev:
+            out.append(lines[idx])
+            prev = idx
+    if out and out[-1] != lines[-1]:
+        out.append(lines[-1])
+    return out
+
+
 def section_transcript_windows(segs: Sequence[dict[str, Any]],
                                spans: Sequence[Sequence[float]],
-                               *, cap_chars: int = 9000) -> str:
+                               *, cap_chars: int = 9000,
+                               sample: bool = False) -> str:
     """Transcript excerpts for the union of admitted windows (in order).
 
     Frames and claims are selected from these spans, never from the
@@ -1019,6 +1117,10 @@ def section_transcript_windows(segs: Sequence[dict[str, Any]],
     keeps sponsor and aside material between them out of the evidence.
     Spans are sorted and overlapping segments deduped so repeated or
     out-of-order window ids cannot duplicate or scramble the evidence.
+
+    With ``sample=True`` an over-budget excerpt is stride-sampled
+    instead of head-truncated, so the writer still sees the beginning,
+    middle and end of long spans. The default path is unchanged.
     """
     ordered = sorted((float(w[0]), float(w[1])) for w in spans)
     seen: set[tuple[float, float]] = set()
@@ -1029,12 +1131,18 @@ def section_transcript_windows(segs: Sequence[dict[str, Any]],
             if key in seen or float(r["end"]) < t_start or float(r["start"]) > t_end:
                 continue
             seen.add(key)
-            lines.append(f"[{key[0]:.1f}-{key[1]:.1f}] "
-                         f"{str(r.get('text') or '').strip()}")
-            if sum(len(x) for x in lines) > cap_chars:
+            # Caption/ASR rows prefix a sequence counter ("133 and Crisis
+            # 3 ..."): strip one leading integer so the model cannot quote
+            # it as source content. Real leading quantities survive
+            # mid-sentence; the gate still matches against raw segments.
+            text = _LEADING_NUM.sub("", str(r.get("text") or "").strip())
+            lines.append(f"[{key[0]:.1f}-{key[1]:.1f}] {text}")
+            if not sample and sum(len(x) for x in lines) > cap_chars:
                 break
-        if sum(len(x) for x in lines) > cap_chars:
+        if not sample and sum(len(x) for x in lines) > cap_chars:
             break
+    if sample:
+        lines = _stride_lines(_dedupe_lines(lines), cap_chars)
     return "\n".join(lines)
 
 
@@ -1047,32 +1155,76 @@ def _write_typed_sections(chat, plan_sections, segs, video_title,
     represented: list = []
     for p in plan_sections:
         spans = [list(map(float, w)) for w in p.get("source_windows") or []]
-        text = section_transcript_windows(segs, spans)
+        # Bounded, representative evidence: very long spans exceed what
+        # the writer backend accepts in one prompt, so stride-sample
+        # instead of head-truncating (citations still cover full spans).
+        # 2500 chars completes reliably; 4500+ truncates server-side.
+        texts = [section_transcript_windows(segs, spans, cap_chars=2500,
+                                            sample=True),
+                 section_transcript_windows(segs, spans, cap_chars=1200,
+                                            sample=True)]
+        calls = {"n": 0}
+
+        def _user_for(text: str, heading: str = p["heading"],
+                      slot: str | None = p.get("slot"),
+                      span_txt: str = ", ".join(
+                          f"{a:.0f}-{b:.0f}s" for a, b in spans)) -> str:
+            return TYPED_SECTION_PROMPT.format(
+                common=common, template_id=template_id, override=override,
+                video_title=video_title, heading=heading,
+                slot=slot, spans=span_txt, transcript=text,
+                cite_rule=rule)
+
+        def _user_minimal_for(text: str, heading: str = p["heading"],
+                              slot: str | None = p.get("slot"),
+                              span_txt: str = ", ".join(
+                                  f"{a:.0f}-{b:.0f}s" for a, b in spans)) -> str:
+            return TYPED_SECTION_MINIMAL_PROMPT.format(
+                common=common, template_id=template_id, override=override,
+                video_title=video_title, heading=heading,
+                slot=slot, spans=span_txt, transcript=text,
+                cite_rule=rule)
+
+        text = texts[0]
         if not text.strip():
             out = {"heading": p["heading"], "body": "_No speech in this span._",
                    "key_points": [], "warnings": [], "attempts": 0}
         else:
-            span_txt = ", ".join(f"{a:.0f}-{b:.0f}s" for a, b in spans)
-            user = TYPED_SECTION_PROMPT.format(
-                common=common, template_id=template_id, override=override,
-                video_title=video_title, heading=p["heading"],
-                slot=p.get("slot"), spans=span_txt, transcript=text,
-                cite_rule=rule)
-
-            def _section_call(extra: str, _p=p, _user=user,
-                              _text=text) -> dict[str, Any]:
-                msg = _user + ("\n\n" + extra if extra else "")
+            def _section_call(extra: str, _texts=texts,
+                              _calls=calls) -> dict[str, Any]:
+                # A truncation means the evidence overran the writer's
+                # output budget: the single bounded retry re-runs on the
+                # shorter sample rather than failing the section. An empty
+                # or otherwise unusable full-schema reply also gets one
+                # minimal-schema retry, keeping the two-attempt contract.
+                # The retry additionally samples at temperature 0.5: at the
+                # near-greedy default the writer can repeat a degenerate
+                # empty-body reply verbatim, while a varied sample escapes
+                # it (Close-01 Dwarkesh probe). The gate still validates.
+                _calls["n"] += 1
+                attempt_text = _texts[min(_calls["n"] - 1, len(_texts) - 1)]
+                if _calls["n"] > 1:
+                    user = _user_minimal_for(attempt_text)
+                    temp = 0.5
+                else:
+                    user = _user_for(attempt_text)
+                    temp = 0.15
+                msg = user + ("\n\n" + extra if extra else "")
+                # Dense multi-window spans need room: 1600 tokens
+                # truncated longer sections into unusable stubs. Compact
+                # JSON: the model otherwise burns the budget on
+                # indentation whitespace and never finishes the body.
                 return chat(
-                    [{"role": "system", "content": "Return JSON only."},
+                    [{"role": "system", "content": "Return JSON only, compact (minimal whitespace)."},
                      {"role": "user", "content": msg}],
-                    max_new_tokens=1600, temperature=0.15)
+                    max_new_tokens=2400, temperature=temp)
 
             out = _run_attempt(_section_call, validate=validate_section_response,
                                editorial=True, section_id=p["section_id"],
                                heading=p["heading"],
                                t_start=float(p.get("t_start", 0) or 0),
                                t_end=float(p.get("t_end", 0) or 0),
-                               excerpt=text)
+                               excerpt=text, verbose_retry=True)
         heading = str(out.get("heading") or p["heading"])
         if heading != p["heading"] and editorial_violations(heading):
             heading = p["heading"]
@@ -1123,7 +1275,8 @@ def _write_typed_title(chat, decision, segs, chapters, srow,
     try:
         return (_run_attempt(_title_call, validate=_typed_title_validate,
                              editorial=False, section_id="title",
-                             heading="title", t_start=0.0, t_end=0.0),
+                             heading="title", t_start=0.0, t_end=0.0,
+                             verbose_retry=True),
                 "")
     except SectionWriteError as exc:
         if exc.category == "editorial":
@@ -1140,9 +1293,21 @@ def _write_lead_block(chat, decision, index) -> dict[str, Any] | None:
     shape = TYPE_LEAD_SHAPE.get(tid or "")
     if not shape:
         return None
+    banned: set[str] = set()
+    for entry in decision.get("excluded_windows") or []:
+        if isinstance(entry, dict) and entry.get("window_id"):
+            banned.add(entry["window_id"])
+    digests = index.get("digests") or {}
+    for w in (index.get("windows") or []):
+        wid = w.get("window_id")
+        flags = (digests.get(wid) or {}).get("flags") or {}
+        if wid in banned or flags.get("ad") or flags.get("housekeeping"):
+            banned.add(wid)
     lines = []
     for w in (index.get("windows") or [])[:24]:
-        d = (index.get("digests") or {}).get(w["window_id"]) or {}
+        if w.get("window_id") in banned:
+            continue
+        d = digests.get(w["window_id"]) or {}
         claims = "; ".join(str(c) for c in (d.get("claims") or [])[:3])
         topics = ", ".join(str(t) for t in (d.get("topics") or [])[:3])
         if claims or topics:
@@ -1210,6 +1375,17 @@ def write_typed_article(settings, db, source_id: str, decision: dict[str, Any],
             raw = backend.chat(payload_msgs, **kw)
             from ..backends.llm import extract_json
             return extract_json(raw)
+        # Plain chat first: guided-JSON decoding truncates long section
+        # bodies server-side (finish_reason=length well under budget)
+        # while plain chat completes them. Guided JSON remains the
+        # fallback for replies that do not parse. Transport errors
+        # propagate immediately — they are not parse problems.
+        from ..backends.llm import extract_json as _extract_json
+        with manager.acquire("text") as b:
+            try:
+                return _extract_json(b.chat(payload_msgs, **kw))
+            except ValueError:
+                pass
         with manager.acquire("text") as b:
             return b.chat_json(payload_msgs, **kw)
 

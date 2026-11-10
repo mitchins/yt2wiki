@@ -28,16 +28,23 @@ _ASSETS_PREFIX = "assets/"
 ARTICLE_MD_NAME = "article.md"
 
 
-def _target_seconds(target: str) -> float | None:
-    """Seconds encoded in an explicit `t=` link target, if any."""
+def _target_seconds(target: str, duration: float | None = None) -> float | None:
+    """Seconds encoded in an explicit `t=`/`start=` link target, if any.
+
+    The optional duration bound rejects past-EOF targets; callers that
+    already enforce their own span policy leave it unset.
+    """
     import re as _re
-    m = _re.search(r"[?&]t=(\d+(?:\.\d+)?)", target or "")
+    m = _re.search(r"[?&](?:t|start)=(\d+(?:\.\d+)?)", target or "")
     if not m:
         return None
     try:
-        return float(m.group(1))
+        secs = float(m.group(1))
     except ValueError:
         return None
+    if duration is not None and secs > duration + 1:
+        return None
+    return secs
 
 
 def _in_spans(secs: float, spans: list[list[float]] | None,
@@ -459,6 +466,17 @@ class _TimestampNormaliser:
         label, target = m.group(1), m.group(2)
         if target.startswith(_ASSETS_PREFIX):
             return m.group(0)
+        if (not _citation_candidates(label) and ":" in label
+                and re.search(r"\d", label)):
+            # Mangled clock label, honest target ("[0:00:64.9](url?t=64.9)"):
+            # rebuild the label from the target seconds instead of
+            # dropping the href and baking the debris into prose. Labels
+            # without clock punctuation ("Part 2") keep the old path.
+            tgt = _target_seconds(target, self.duration_s)
+            if tgt is not None:
+                # Truncate like every other citation path: the label must
+                # describe the linked second, not the rounded one.
+                return self.emit(int(tgt), target)
         return self.fix_label(label, target)
 
     def fix_bare(self, m: "re.Match[str]") -> str:
