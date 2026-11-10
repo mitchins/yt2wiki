@@ -474,7 +474,16 @@ def check_exact_values(article: dict[str, Any],
             # videos ("1976-1986" is history, not a citation).
             if _looks_like_years(lo, hi):
                 continue
-            if 0 <= lo < hi <= duration_s + 1:
+            if hi <= lo:
+                # A descending range is not a value at all; it is
+                # mangled citation debris (nothing counts down like this).
+                out.append(_finding(
+                    "bare_second_citation", MAJOR,
+                    f"{m.group(0)!r} looks like transcript seconds; "
+                    f"use m:ss citations", sec.get("section_id")))
+                stripped.append(body[last:m.start()])
+                last = m.end()
+            elif 0 <= lo < hi <= duration_s + 1:
                 out.append(_finding(
                     "bare_second_citation", MAJOR,
                     f"{m.group(0)!r} looks like transcript seconds; "
@@ -602,6 +611,10 @@ def check_entities(article: dict[str, Any],
     tokens = set(re.findall(r"[a-z][a-z']+", lowered))
     # Possessives attest their base word ("deck's" supports "Deck's").
     tokens = {t[:-2] if t.endswith("'s") else t for t in tokens}
+    # Adjacent-word compounds ("Steam OS" supports "SteamOS"): spoken
+    # spacing varies, the entity does not.
+    words = re.findall(r"[a-z]+", lowered)
+    tokens.update(a + b for a, b in zip(words, words[1:]))
 
     def _stem(word: str) -> str:
         for suffix in ("ation", "ition", "tion", "ion",

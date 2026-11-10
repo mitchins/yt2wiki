@@ -566,3 +566,18 @@ def test_string_false_flags_are_not_set():
 
     assert _normalize_flags({"window_id": "w-1", "flags": {"ad": "false"}})["flags"] == {"ad": False}
     assert _normalize_flags({"window_id": "w-1", "flags": {"ad": "yes"}})["flags"] == {"ad": True}
+
+
+def test_descending_range_is_citation_not_value():
+    segs = _segs(["Bake the loaf."])
+    article = _article(bodies=["Combine.", "Mix.", "Knead 95.7-83.0 well."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 6000.0)
+    assert any(f["code"] == "bare_second_citation" for f in res["findings"])
+    assert not any(f["code"] == "unsupported_exact_value" for f in res["findings"])
+
+
+def test_compound_spelling_is_attested():
+    segs = _segs(["Open Steam OS settings."])
+    article = _article(bodies=["Combine.", "Use SteamOS daily.", "Done."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert not any("SteamOS" in f["detail"] for f in res["findings"]), res["findings"]
