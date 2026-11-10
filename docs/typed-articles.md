@@ -85,21 +85,26 @@ PR C report.
 
 - Published with zero critical findings: DART `report`, Vox `report`,
   Hermes `procedure`, Git `explainer` (type dissent, see below),
-  LTT `review`.
+  LTT `review`, DF `report`, WVFRM `discussion`.
 - `needs_review` with private candidate kept, published article
-  untouched: recipe (inferred serving count with no transcript span),
-  product-b (chart number with no narration; spec values stated
-  outside the citing spans). Each names the exact span/value to fix;
-  a replan with unioned spans (or dropping the ungroundable value)
-  is the prescribed path, not a dead end.
+  untouched: recipe (`2 loaves` is first-loaf + second-loaf synthesis
+  with no single stating span — an operator call, not a fabrication).
+  Each finding names the exact span/value to fix.
 - Correct refusal: silent montage (no speech; transcribe fails closed).
-- Long-form limitation: the two 73–97 min discussions intermittently
-  fail section writes server-side (truncation/empty replies on dense
-  spans despite strided evidence, compact JSON, halved-evidence retry
-  and plain-chat fallback). Jobs fail loudly and are safely
-  retryable; chunked planning and auto-split keep plans feasible.
-  Mitigation beyond retries (writer-side decomposition) is future
-  work, explicitly out of scope here.
+- Long-form limitation: the 97 min Dwarkesh discussion still fails
+  section writes stochastically (server-side empty replies on dense
+  spans despite strided 2500-char evidence, compact JSON,
+  halved-evidence retry, plain-chat fallback and a minimal-schema
+  second attempt). Jobs fail loudly and are safely retryable;
+  chunked planning and auto-split keep plans feasible. Writer-side
+  decomposition beyond the two-attempt contract is future work,
+  explicitly out of scope here.
+- Caption-counter hygiene: ASR/caption rows prefix sequence counters
+  (`133 and Crisis 3 ...`) that a writer can quote as content. The
+  writer now strips one leading counter per evidence line; mid-text
+  counters are a residual risk. The published DF report predates the
+  fix and carries one such artifact (`133`); republication is pending
+  a clean run.
 - Open dissent: the Git how-to classifies `explainer` across four
   independent decisions (commands preserved in order and syntax);
   the matrix expected `procedure`. Operator decides whether to amend
