@@ -38,7 +38,7 @@
           {% if view.lead_html %}<div class="a-lead">{{ view.lead_html|safe }}</div>{% endif %}
           {# S5247: lead-block HTML is built only by v9.blocks.render_html, which
              escapes every interpolated value — no caller markup passes through #}
-          {% if view.lead_blocks %}<div class="a-lead-blocks">{% for b in view.lead_blocks %}<section class="lead-block lead-sec-{{ b.name }}">{{ b.html|safe }}</section>{% endfor %}</div>{% endif %}
+          {% if view.lead_blocks %}<div class="a-lead-blocks">{% for b in view.lead_blocks %}<section class="lead-block lead-sec-{{ b.name }}">{{ b.html|safe }}</section>{% endfor %}</div><!-- NOSONAR S5247 reviewed-safe: b.html is built only by v9.blocks.render_html with every value html-escaped; see tests/test_sonar_prA_security.py and test_hostile_input_is_escaped_not_rendered -->{% endif %}
           <div class="a-source">
             {{ icon("video") }}
             <p>
