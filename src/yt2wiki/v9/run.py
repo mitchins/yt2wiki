@@ -645,7 +645,10 @@ def run_source(settings, db, service, source_id: str, *,
                                                       "needs_review"):
                     reason = (decision.get("rationale")
                               or "no safe article can be composed")
-                    _record(db, v9job, "v9_plan", "refused", {},
+                    # The stage state vocabulary is pending|running|done|
+                    # failed|skipped: the refusal lives in the error text
+                    # and result payload, not in a custom state.
+                    _record(db, v9job, "v9_plan", "failed", {},
                             error=f"refused: {reason}"[:500])
                     _finish_job(db, v9job, "failed",
                                 error=f"refused: {reason}"[:500])

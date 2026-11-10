@@ -64,6 +64,11 @@ CURRENCY_RE = re.compile(
     rf"{_NOHIT_BEFORE}{_SIGN}(?P<value>\$\d(?:[\d,]*\d)?(?:\.\d{{1,2}})?)")
 COMMA_NUMBER_RE = re.compile(
     rf"{_NOHIT_BEFORE}{_SIGN}(?P<value>\d{{1,3}}(?:,\d{{3}})+)(?![\w\d,])")
+#: Bare integers are claims too ("top 10", "300 people"). Years are
+#: covered separately and stay years; single digits are list numbers.
+#: Clock fragments never match: a colon on either side disqualifies.
+BARE_INT_RE = re.compile(
+    rf"(?<![\w./:]){_SIGN}(?P<value>\d{{2,5}})(?![\w\d:])")
 #: Years 1500-2099 are exact values (event dates, model years): the
 #: handoff requires the gate to catch year mutations (1976 -> 1986).
 #: A trailing "s" is part of the literal ("1990s"); the bare decade
@@ -79,7 +84,7 @@ YEAR_RE = re.compile(
 def _supplement(text: str) -> list[Literal]:
     out: list[Literal] = []
     for rx in (RANGE_MEASURE_RE, FRACTION_MEASURE_RE, UNIT_MEASURE_RE,
-               CURRENCY_RE, COMMA_NUMBER_RE, YEAR_RE):
+               CURRENCY_RE, COMMA_NUMBER_RE, YEAR_RE, BARE_INT_RE):
         for m in rx.finditer(text):
             # The literal is the whole match (number plus unit): "4 1/2
             # cups" and "4 1/2 grams" are different claims and must never

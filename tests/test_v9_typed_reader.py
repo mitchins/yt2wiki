@@ -223,3 +223,28 @@ def test_article_context_shows_manifest_lead_blocks(tmp_path):
     assert ctx["kind"] == "Report"
     assert len(ctx["view"]["lead_blocks"]) == 1
     assert "2022-09-26" in ctx["view"]["lead_blocks"][0]["html"]
+
+
+def test_lead_blocks_replace_markdown_lead_in_reader(tmp_path):
+    from yt2wiki.web.views import render_reader
+
+    from yt2wiki.paths import Paths as _P
+
+    paths = _P(root=tmp_path / "data")
+    view = render_reader(paths, "art9-x", "# T\n\nLead text.\n\nBody.\n",
+                         lead_blocks=[{"name": "key_facts",
+                                       "html": "<dl></dl>"}])
+    assert view["lead_blocks"]
+    assert view["lead_html"] == ""
+
+
+def test_legacy_jobs_hide_typed_stages():
+    from yt2wiki.web import views as _V
+
+    job = {"job_id": "j", "state": "done", "config_json": "{}",
+           "stage": "publish", "started_at": None, "finished_at": None,
+           "stages": [{"stage": "transcribe", "state": "done",
+                       "metrics_json": "{}", "duration_s": 1.0,
+                       "error": ""}]}
+    keys = [s["key"] for s in _V.job_view(job, live=set())["steps"]]
+    assert "v9_plan" not in keys and "v9_validate" not in keys

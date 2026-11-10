@@ -200,11 +200,21 @@ def test_job_view_reports_v9_stage_progress(env):
                {"stage": "v9_select", "state": "running", "metrics_json": "{}"}]}
     v = views.job_view(job, live={"j"})
     keys = [s["key"] for s in v["steps"]]
-    assert keys == ["acquisition", "transcribe", "frame_candidates", "v9_plan",
-                    "v9_write", "v9_validate", "v9_discover", "v9_select",
-                    "v9_publish"]
+    # Untyped V9 jobs never record typed-only stages: no plan/check steps.
+    assert keys == ["acquisition", "transcribe", "frame_candidates",
+                    "v9_write", "v9_discover", "v9_select", "v9_publish"]
     assert v["current_label"] == "Choose the images"
-    assert v["steps"][4]["detail"] == "7 sections · Experiment"
+    assert v["steps"][3]["detail"] == "7 sections · Experiment"
+    typed = dict(job)
+    typed["stages"] = list(job["stages"]) + [
+        {"stage": "v9_plan", "state": "done", "duration_s": 1.0,
+         "metrics_json": '{"article_type": "review"}', "error": ""},
+        {"stage": "v9_validate", "state": "done", "duration_s": 1.0,
+         "metrics_json": '{"validation": "ready"}', "error": ""}]
+    typed_keys = [s["key"] for s in views.job_view(typed, live={"j"})["steps"]]
+    assert typed_keys == ["acquisition", "transcribe", "frame_candidates",
+                          "v9_plan", "v9_write", "v9_validate",
+                          "v9_discover", "v9_select", "v9_publish"]
     assert v["steps"][0]["detail"] == "Reused from an earlier run"
     assert 0 < v["progress"] < 100
     stale = views.job_view({**job, "state": "queued"}, live=set())

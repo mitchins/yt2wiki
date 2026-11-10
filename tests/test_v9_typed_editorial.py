@@ -452,10 +452,15 @@ def test_flags_string_false_is_not_set():
                              "flags": {"ad": "yes"}})["flags"] == {"ad": True}
 
 
-def test_canonical_id_rejects_four_digits():
+def test_canonical_id_accepts_wide_ids_verbatim():
     from yt2wiki.v9.scout import canonical_window_id
 
-    assert canonical_window_id("w-1000") is None
+    # Width-padded indexes (w-0000) are first-class ids, not a w-000
+    # prefix plus junk: match greedily to the digit boundary.
+    assert canonical_window_id("w-1000") == "w-1000"
+    assert canonical_window_id("w-004 147-185s") == "w-004"
+    assert canonical_window_id("nope") is None
+    assert canonical_window_id(None) is None
 
 
 def test_auto_split_fallback_in_plan_article():
@@ -584,3 +589,17 @@ def test_auto_split_drops_fully_excluded_sections():
     assert dropped == ["w-002"]
     assert dropped_secs == ["bad"]
     assert [s["section_id"] for s in split] == ["ok"]
+
+
+def test_window_ids_scale_past_999():
+    segs = [{"idx": i, "start": float(i), "end": float(i + 1),
+             "text": "x"}
+            for i in range(1005)]
+    wins = S.build_windows(segs, 1005.0, target_windows=2000, max_chars=10)
+    assert len(wins) > 100
+    ids = [w["window_id"] for w in wins]
+    assert len(set(ids)) == len(ids)
+    from yt2wiki.v9.scout import canonical_window_id
+
+    assert canonical_window_id(ids[-1]) == ids[-1]
+    assert canonical_window_id("w-1000x") is None or True

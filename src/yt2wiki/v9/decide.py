@@ -130,9 +130,7 @@ def select_type(chat: Callable[..., Any], title: str, duration_s: float,
                 "excluded_windows": [], "status": "refused",
                 "index_hash": index.get("index_hash")}
     head, middle, tail = _sample_thirds(index)
-    excluded = [w["window_id"] for w in wins
-                if (digests.get(w["window_id"]) or {}).get("flags", {}).get("ad")
-                or (digests.get(w["window_id"]) or {}).get("flags", {}).get("housekeeping")]
+    excluded = sorted(_excluded_ids(wins, digests))
     by_id = {w["window_id"]: (w["t_start"], w["t_end"]) for w in wins}
     messages = [{"role": "system", "content": SELECT_SYSTEM},
                 {"role": "user", "content": SELECT_PROMPT.format(
@@ -156,6 +154,25 @@ def select_type(chat: Callable[..., Any], title: str, duration_s: float,
             return decision
         last = [reason]
     raise EditorialError(f"type decision failed validation: {'; '.join(last)}")
+
+
+#: Digest flags that quarantine a window from all editorial use:
+#: sponsor reads, housekeeping, inserted clips and music-only spans
+#: can be described, never turned into article substance.
+EXCLUDED_FLAGS = ("ad", "housekeeping", "clip_insert", "music_only")
+
+
+def _excluded_ids(wins: list[dict[str, Any]],
+                  digests: dict[str, Any],
+                  decision: dict[str, Any] | None = None) -> set[str]:
+    out = {w["window_id"] for w in wins
+           if any((digests.get(w["window_id"]) or {}).get("flags", {}).get(f)
+                  for f in EXCLUDED_FLAGS)}
+    if decision:
+        for entry in decision.get("excluded_windows") or []:
+            if isinstance(entry, dict) and entry.get("window_id"):
+                out.add(entry["window_id"])
+    return out
 
 
 def _assemble_decision(raw: Any, by_id: dict[str, tuple[float, float]],
@@ -185,13 +202,12 @@ def _assemble_decision(raw: Any, by_id: dict[str, tuple[float, float]],
             return _bad(f"unknown excluded window {raw_wid!r}")
         excl.append({"start": span[0], "end": span[1],
                      "reason": "model-excluded", "window_id": wid})
-    # Scout-flagged ad/housekeeping spans are excluded deterministically:
-    # the model may echo them, but validation quarantines them regardless.
+    # Scout-flagged spans are excluded deterministically: the model may
+    # echo them, but validation quarantines them regardless.
     seen_excl = {(e["start"], e["end"]) for e in excl}
     for w in (index.get("windows") or []):
-        flags = ((index.get("digests") or {}).get(w["window_id"]) or {}
-                 ).get("flags") or {}
-        if flags.get("ad") or flags.get("housekeeping"):
+        flags = ((index.get("digests") or {}).get(w["window_id"]) or {}).get("flags") or {}
+        if any(flags.get(f) for f in EXCLUDED_FLAGS):
             span = (float(w["t_start"]), float(w["t_end"]))
             if span not in seen_excl:
                 excl.append({"start": span[0], "end": span[1],
@@ -275,7 +291,12 @@ def _plan_chunked(chat: Callable[..., Any], decision: dict[str, Any],
         included.extend(cov.get("included_window_ids") or [])
         excluded.extend(cov.get("excluded_window_ids") or [])
         unassigned.extend(cov.get("unassigned_substantive_window_ids") or [])
-        auto_split.extend(cov.get("auto_split") or [])
+        for remap in cov.get("auto_split") or []:
+            # Re-key remap ids into the merged (chunk-namespaced) space
+            # so the record points at sections that exist.
+            auto_split.append({
+                "from": f"c{c}-{remap.get('from')}",
+                "to": [f"c{c}-{t}" for t in remap.get("to") or []]})
     tid = decision.get("template_id")
     plan = {"template_id": tid, "sections": merged,
             "coverage": {"included_window_ids": included,
@@ -300,12 +321,7 @@ def _plan_once(chat: Callable[..., Any], decision: dict[str, Any],
     if tdef is None:
         raise EditorialError(f"cannot plan untyped decision {tid!r}")
     digests = index.get("digests") or {}
-    excl_ids = {w["window_id"] for w in wins
-                if (digests.get(w["window_id"]) or {}).get("flags", {}).get("ad")
-                or (digests.get(w["window_id"]) or {}).get("flags", {}).get("housekeeping")}
-    for entry in (decision.get("excluded_windows") or []):
-        if isinstance(entry, dict) and entry.get("window_id"):
-            excl_ids.add(entry["window_id"])
+    excl_ids = _excluded_ids(wins, digests, decision)
     lines = []
     feats = index.get("features") or {}
     for w in wins:
@@ -427,7 +443,12 @@ def _auto_split_sections(sections: list[dict[str, Any]],
         t0 = min(p[1] for p in spans)
         t1 = max(p[2] for p in spans)
         if t1 - t0 <= cap_s or len(spans) == 1:
-            out.append(s)
+            # Rebuild without the dropped windows even when no split is
+            # needed: passing the original through would reintroduce
+            # banned windows the caller just removed.
+            out.append(dict(s, source_windows=[[a, b] for _, a, b in spans],
+                            t_start=t0, t_end=t1,
+                            window_ids=[w for w, _, _ in spans]))
             continue
         groups: list[list[tuple]] = [[]]
         for wid, a, b in sorted(spans, key=lambda p: p[1]):

@@ -35,7 +35,8 @@
           </div>
           <h1 class="a-title">{{ article.title }}</h1>
           {# S5247: view.lead_html is pre-sanitised Markup from views.render_reader (html.escape-sanitized in article.markdown_to_html, see article.py:_safe_href) — autoescape stays on, no |safe bypass. #}
-          {% if view.lead_html %}<div class="a-lead">{{ view.lead_html }}</div>{% endif %}
+          {# When semantic lead blocks exist they *replace* the Markdown lead: rendering both would duplicate the lead. Exports (which do not run this template) keep the Markdown fallback. #}
+          {% if view.lead_html and not view.lead_blocks %}<div class="a-lead">{{ view.lead_html }}</div>{% endif %}
           {# S5247: block HTML is pre-sanitised Markup from views.lead_blocks_from_manifest, built only by v9.blocks.render_html which escapes every interpolated value — autoescape stays on, no |safe bypass. #}
           {% if view.lead_blocks %}<div class="a-lead-blocks">{% for b in view.lead_blocks %}<section class="lead-block lead-sec-{{ b.name }}">{{ b.html }}</section>{% endfor %}</div>{% endif %}
           <div class="a-source">

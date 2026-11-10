@@ -425,6 +425,12 @@ def render_reader(paths, article_id: str, markdown: str, *, numbered: bool = Fal
     body_html, toc = reader.enhance(markdown_to_html(parts.body_md), asset_url=url,
                                     asset_size=size, zoom_links=zoom_links,
                                     numbered_sections=numbered)
+    blocks = list(lead_blocks or [])
+    if blocks:
+        # The semantic lead block replaces the Markdown lead in the
+        # interactive reader; exports (which never run this template)
+        # keep the Markdown fallback, so no information is lost.
+        lead_html = ""
     # Pre-sanitised HTML boundary: markdown_to_html html-escapes all text and
     # allow-lists href/src schemes (see article._safe_href), and
     # reader.enhance only adds our own markup. Markup marks that contract so
@@ -432,7 +438,7 @@ def render_reader(paths, article_id: str, markdown: str, *, numbered: bool = Fal
     # payloads are proven inert in test_sonar_prA_security.py.
     return {"title": parts.title, "lead_html": Markup(lead_html), "body_html": Markup(body_html),
             "toc": toc, "attribution": parts.attribution,
-            "lead_blocks": list(lead_blocks or []),
+            "lead_blocks": blocks,
             "n_images": body_html.count('<figure class="frame"')}
 
 
@@ -542,6 +548,8 @@ def _job_steps(pipeline: str, stages: dict, state: str, job: dict) -> list:
             st = stages.get(key)
             if key in ("inspect", "v9_caption") and (st is None or st["state"] != "failed"):
                 continue  # internal sub-steps: shown only when they fail
+            if key in ("v9_plan", "v9_validate") and st is None:
+                continue  # typed-only gated stages: no row, no step
             if st is None and state not in ("queued", "running", "stale"):
                 continue  # finished before this stage was recorded: nothing to show
             steps.append(_step(key, label, st, job))

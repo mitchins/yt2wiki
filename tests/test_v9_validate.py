@@ -549,3 +549,20 @@ def test_strict_assignment_with_spaces_is_checked():
     bad = _article(bodies=["Combine.", "Set port = 9090 first.", "Done."])
     res = V.validate_typed(_decision(), _plan(), _index(), bad, segs, 20.0)
     assert any(f["code"] == "unsupported_exact_value" for f in res["findings"])
+
+
+def test_missing_core_slot_is_critical():
+    segs = _segs(["Bake the loaf."])
+    article = _article(bodies=["Combine.", "Mix.", "Bake."])
+    for s in article["sections"]:
+        s["slot"] = "technique"
+    res = V.validate_typed(_decision("explainer"), _plan("explainer", ("answer", "explanation")), _index(), article, segs, 20.0)
+    assert res["status"] == "needs_review"
+    assert any(f["code"] == "foreign_slot" for f in res["findings"])
+
+
+def test_string_false_flags_are_not_set():
+    from yt2wiki.v9.scout import _normalize_flags
+
+    assert _normalize_flags({"window_id": "w-1", "flags": {"ad": "false"}})["flags"] == {"ad": False}
+    assert _normalize_flags({"window_id": "w-1", "flags": {"ad": "yes"}})["flags"] == {"ad": True}

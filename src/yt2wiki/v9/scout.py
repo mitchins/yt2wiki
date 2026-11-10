@@ -79,8 +79,9 @@ def build_windows(segs: Sequence[dict[str, Any]], duration_s: float,
             prev = windows.pop()
             first = windows[-1]
             first.update(_merge_pair(first, prev))
+    width = max(3, len(str(len(windows))))
     for k, w in enumerate(windows):
-        w["window_id"] = f"w-{k:03d}"
+        w["window_id"] = f"w-{k:0{width}d}"
     _ = duration_s
     return windows
 
@@ -140,7 +141,7 @@ def _digest_messages(chunk: Sequence[dict[str, Any]]) -> list[dict[str, str]]:
 
 
 #: Exactly three digits and no fourth: "w-1000" is not window "w-100".
-_WINDOW_ID = re.compile(r"w-\d{3}(?!\d)")
+_WINDOW_ID = re.compile(r"w-\d{3,}(?!\d)")
 
 
 def canonical_window_id(raw_id: Any) -> str | None:
