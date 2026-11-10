@@ -48,7 +48,7 @@ CRITICAL = "critical"
 MAJOR = "major"
 
 _INTERNAL_ID = re.compile(
-    r"\bev-[0-9a-f]{4,}\b|\bsec-[0-9a-z-]{4,}\b|\bw-\d{3}\b|\bfact-[\w-]+\b")
+    r"\bev-[0-9a-f]{4,}\b|\bsec-[0-9a-z-]{4,}\b|\bw-\d{3,}\b|\bfact-[\w-]+\b")
 #: Decision-trace vocabulary belongs in diagnostics, never prose. Major
 #: only: ordinary words overlap the pattern class ("candidate" as in
 #: vaccine candidate), so this is leakage hygiene, not fabrication.
@@ -77,7 +77,7 @@ _ATTRIBUTION = re.compile(
 
 #: Ordinary capitalized words that are never proper-name evidence.
 _NAME_ALLOWLIST = frozenset(
-    ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December", "The", "This", "That", "These", "Those", "When", "Where", "What", "Which", "While", "Because", "Since", "Before", "After", "During", "There", "Here", "Video", "Audio", "Chapter", "Section", "Figure", "Table", "First", "Second", "Third", "Next", "Then", "Finally", "Also", "Just", "Even", "Still", "Yet", "Already", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten"])
+    ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December", "The", "This", "That", "These", "Those", "When", "Where", "What", "Which", "While", "Because", "Since", "Before", "After", "During", "There", "Here", "Video", "Audio", "Chapter", "Section", "Figure", "Table", "First", "Second", "Third", "Next", "Then", "Finally", "Also", "Just", "Even", "Still", "Yet", "Already", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Someone", "Something", "Somebody", "Nobody", "Everybody", "Anyone"])
 
 _KNOWN_UNITS = frozenset(["V", "volts", "A", "amps", "W", "watts", "Hz", "kHz", "MHz", "GHz", "nits", "dB", "dBm", "FPS", "fps", "RPM", "rpm", "GB", "MB", "KB", "TB", "mph", "kph", "km", "mi", "ft", "feet", "inch", "inches", "mm", "cm", "m", "s", "ms", "min", "hrs", "percent", "USD", "EUR", "cents", "dollars", "OLED", "LCD", "LED", "HDR", "IPS", "WiFi", "Bluetooth", "USB", "HDMI", "NVMe", "SSD", "CPU", "GPU", "APU", "RAM", "AMD", "Intel", "Valve", "LTT", "PBS", "Vox", "TLD", "DIY", "OS", "API", "URL", "PDF", "JSON", "HTML", "CSS", "AM", "PM", "EDT", "PDT", "UTC", "DIY", "AI", "RL", "LLM", "RSI", "GRPO", "RLVR", "SFT", "DART", "NASA", "PBS", "LTT", "WVFRM"])
 
@@ -154,6 +154,17 @@ def check_type_slots(decision: dict[str, Any], plan: dict[str, Any],
                                 f"section {sec.get('section_id')!r} uses "
                                 f"slot {slot!r} outside {tid}",
                                 sec.get("section_id")))
+    # Core slots need non-empty sections, not just plan entries: an
+    # empty method section publishes a recipe with no method.
+    if tdef:
+        covered = {str(s.get("slot")) for s in article.get("sections") or []
+                   if str(s.get("body") or "").strip()
+                   and str(s.get("body") or "").strip() != "_No speech in this span._"}
+        for core in tdef["core_slots"]:
+            if core not in covered:
+                out.append(_finding("missing_core_slot", CRITICAL,
+                                    f"core slot {core!r} has no substantive "
+                                    f"section in the article"))
     return out
 
 
@@ -216,13 +227,19 @@ _LIST_MARKER = re.compile(r"(?m)^(\s*)(?:[*\-+]\s+|\d+[.)]\s+)")
 #: space after the separator. `Label: description` with a space is
 #: English definition-list prose (ubiquitous in typed articles), never
 #: an exact technical value.
-_STRICT_KV = re.compile(r"\b([A-Za-z_][\w.\-]{2,40})\s*(=|:(?=\S))([^\s,;]{1,64})")
-#: Bare transcript-second ranges ("223.6-232.1", "641-645.4"):
-#: citation-hygiene debris, not exact values. A decimal endpoint plus
-#: both endpoints inside the duration marks a probable seconds
-#: citation the writer should have rendered as m:ss. Pure-integer
-#: ranges stay values ("1976-1986" is a year range, not a citation).
+_STRICT_KV = re.compile(
+    r"\b([A-Za-z_][\w.\-]{2,40})\s*=\s*([^\s,;]{1,64})"
+    r"|\b([A-Za-z_][\w.\-]{2,40}):(?=\S)([^\s,;]{1,64})")
+#: Bare transcript-second ranges ("223.6-232.1", "641-645.4",
+#: "5030-5033"): citation-hygiene debris, not exact values. Both
+#: endpoints inside the duration marks a probable seconds citation
+#: the writer should have rendered as m:ss — unless both endpoints
+#: read as years ("1976-1986" stays a value range).
 _BARE_RANGE = re.compile(r"\b(\d{1,4}(?:\.\d+)?)\s*-\s*(\d{1,4}(?:\.\d+)?)\b")
+
+
+def _looks_like_years(lo: float, hi: float) -> bool:
+    return all(1500 <= v <= 2099 and float(v).is_integer() for v in (lo, hi))
 #: A bare range followed by a unit word is a measurement ("3.3-5.0 V"),
 #: not a seconds citation: the value gate owns it.
 _RANGE_UNIT_TAIL = re.compile(r"\s*(?:volts?|V\b|%|°[CF]?|Hz|hertz)\b")
@@ -389,17 +406,26 @@ def _numeralize(text: str) -> str:
     return text
 
 
+_TIMESTAMP_LABEL = re.compile(r"^[\d:.\-\s]+$")
+
+
 def _prose_values_text(body: str) -> str:
-    """Prose with link machinery removed: labels stay, targets go.
+    """Prose with link machinery removed: targets go, labels stay unless
+    they are themselves plain timestamps.
 
     Link targets and bare URLs are navigation, not claims: the shared
     keyvalue scanner would otherwise read `https=...` as an exact
-    value and every cited article would fail its own gate. Markdown
-    emphasis is stripped so `**Label:**` list markup never becomes a
-    `Label=**` keyvalue. Number words become digits symmetrically on
-    both sides of the comparison.
+    value and every cited article would fail its own gate. Citation
+    labels are dropped only when timestamp-shaped; a smuggled value
+    label ("[900 degrees](...?t=1)") stays in the text and is checked.
+    Markdown emphasis is stripped so `**Label:**` list markup never
+    becomes a `Label=**` keyvalue. Number words become digits
+    symmetrically on both sides of the comparison.
     """
-    text = _TS_CITATION.sub(" ", body)
+    def _ts_replace(m: re.Match[str]) -> str:
+        return " " if _TIMESTAMP_LABEL.fullmatch(m.group(1) or "") else m.group(1)
+
+    text = _TS_CITATION.sub(_ts_replace, body)
     text = _MD_LINK_TARGET.sub(r"\1", text)
     text = _BARE_URL.sub(" ", text)
     text = text.replace("**", " ").replace("__", " ")
@@ -444,9 +470,9 @@ def check_exact_values(article: dict[str, Any],
                 continue
             if _RANGE_UNIT_TAIL.match(body[m.end():]):
                 continue
-            # Only decimal ranges read as seconds citations; pure
-            # integers ("1976-1986") stay for the value gate.
-            if "." not in m.group(0):
+            # Year ranges stay for the value gate even inside long
+            # videos ("1976-1986" is history, not a citation).
+            if _looks_like_years(lo, hi):
                 continue
             if 0 <= lo < hi <= duration_s + 1:
                 out.append(_finding(
@@ -467,8 +493,9 @@ def check_exact_values(article: dict[str, Any],
             continue
         supported = [lit.literal for lit in
                      _extract_values(evidence, max_values=200)]
-        strict_kv = {m.group(1) + "=" + m.group(3)
-                     for m in _STRICT_KV.finditer(body)}
+        strict_kv = {(m.group(1) or m.group(3)) + "="
+                       + (m.group(2) or m.group(4))
+                       for m in _STRICT_KV.finditer(body)}
         for lit in _extract_values(body, max_values=200):
             if lit.kind == "measurement" and _BARE_IN.fullmatch(lit.literal):
                 continue
@@ -486,11 +513,12 @@ def check_exact_values(article: dict[str, Any],
                 # `Label: description` is definition-list prose, not an
                 # assignment claim: skip, do not flag.
                 continue
-            if lit.kind == "command" and sec.get("section_id") in (
-                    "lead", "frontmatter"):
+            if lit.kind == "command" and str(sec.get("section_id") or "").startswith("__"):
                 # Titles and summaries trip the command scanner on
                 # ordinary title case ("Git Repository Mechanics..."):
-                # frontmatter carries no executable instructions.
+                # frontmatter carries no executable instructions. The
+                # reserved __ prefix cannot collide with model-chosen
+                # section ids.
                 continue
             if _literals.article_value_supported(lit.literal, supported) is None:
                 if _literals.article_value_supported(lit.literal, whole_supported) is not None:
@@ -500,12 +528,60 @@ def check_exact_values(article: dict[str, Any],
                         f"in the transcript, not in this section's spans; "
                         f"union the evidencing span or move the claim",
                         sec.get("section_id")))
+                elif lit.kind == "keyvalue" and "=" in lit.literal and _value_part_supported(
+                        lit.literal, supported, whole_supported):
+                    # The assignment form is new ("port = 8080" for prose
+                    # "port to 8080") but the value itself is grounded:
+                    # a form change, not an invention.
+                    out.append(_finding(
+                        "unverified_assignment", MAJOR,
+                        f"{lit.kind} {lit.literal!r} restates a supported "
+                        f"value as an assignment; verify the relation",
+                        sec.get("section_id")))
+                elif lit.kind in ("keyvalue", "port") and _numbers_grounded(
+                        lit.literal, supported):
+                    # "port = 8080" for prose "port to 8080": every number
+                    # in the claim is evidenced, only the relation is new.
+                    out.append(_finding(
+                        "unverified_relation", MAJOR,
+                        f"{lit.kind} {lit.literal!r} combines evidenced "
+                        f"numbers in a new relation; verify the relation",
+                        sec.get("section_id")))
                 else:
                     out.append(_finding(
                         "unsupported_exact_value", CRITICAL,
                         f"{lit.kind} {lit.literal!r} has no source span in "
                         f"this section's evidence", sec.get("section_id")))
     return out
+
+
+_BARE_DIGITS = re.compile(r"\d+")
+
+
+def _numbers_grounded(literal: str, supported: list[str]) -> bool:
+    """Every digit-run in the claim appears as a bare number in evidence.
+
+    Distinguishes recombined evidenced numbers ("port = 8080" for prose
+    "port to 8080") from invented ones (no digit overlap at all).
+    """
+    runs = _BARE_DIGITS.findall(literal)
+    if not runs:
+        return False
+    supported_nums = set()
+    for s in supported:
+        supported_nums.update(_BARE_DIGITS.findall(s))
+    return all(r in supported_nums for r in runs)
+
+
+def _value_part_supported(literal: str, supported: list[str],
+                          whole_supported: list[str]) -> bool:
+    """Whether an assignment's value alone is grounded (key or separator
+    may differ from the source phrasing)."""
+    value = (literal.split("=", 1)[-1] if "=" in literal else literal).strip()
+    if not value:
+        return False
+    return (_literals.article_value_supported(value, supported) is not None
+            or _literals.article_value_supported(value, whole_supported) is not None)
 
 
 def check_entities(article: dict[str, Any],
@@ -544,6 +620,15 @@ def check_entities(article: dict[str, Any],
             w = w[:-2]
         return w.rstrip("'")
 
+    def _occurrences(article: dict[str, Any], name: str) -> int:
+        head = name.split()[0].lower()
+        text = " ".join(
+            [str(article.get("title") or ""), str(article.get("summary") or "")]
+            + [str(s.get("body") or "") + " " + str(s.get("heading") or "")
+               for s in article.get("sections") or []])
+        return len(re.findall(r"\b" + re.escape(head) + r"s?\b", text,
+                              flags=re.IGNORECASE))
+
     def _check_name(name: str, sec_id: str | None) -> None:
         head = name.split()[0]
         if head in _NAME_ALLOWLIST or head in _KNOWN_UNITS:
@@ -570,13 +655,23 @@ def check_entities(article: dict[str, Any],
                                 f"{name!r} is capitalised as a name but never "
                                 f"occurs in the transcript ({why})", sec_id))
             return
-        if close and len(_base(head)) == len(close[0]):
-            # Same-length near-miss ("Dimorphus"/"Dimorphos") is the
-            # substitution/typo class: likely corruption. Insertions and
-            # deletions ("Tool"/"too") need a human.
-            severity, why = CRITICAL, f"near {close[0]!r} — likely corruption"
-        elif close:
-            severity, why = MAJOR, f"near {close[0]!r} — different word"
+        if close:
+            # Same-length near-miss with high similarity
+            # ("Dimorphus"/"Dimorphos" at 0.89) is the substitution/typo
+            # class: likely corruption. Weaker echoes ("Tool"/"too" at
+            # 0.86 but different lengths, "Automation"/"automating" at
+            # 0.70) need a human.
+            ratio = difflib.SequenceMatcher(None, _base(head),
+                                            close[0]).ratio()
+            if len(_base(head)) == len(close[0]) and ratio >= 0.85:
+                severity, why = CRITICAL, f"near {close[0]!r} — likely corruption"
+            else:
+                severity, why = MAJOR, f"near {close[0]!r} — different word"
+        elif _occurrences(article, name) >= 2:
+            # No transcript neighbour, but repeated across the article:
+            # repetition is endorsement. A single unattested mention may
+            # be an ASR gap; saying it twice is a claim of existence.
+            severity, why = CRITICAL, "repeated with no transcript neighbour"
         else:
             severity, why = MAJOR, "no transcript neighbour — ASR gap or invention"
         out.append(_finding(
@@ -606,16 +701,20 @@ def check_entities(article: dict[str, Any],
             name = m.group(1)
             if name in seen:
                 continue
-            seen.add(name)
             # An allowlisted head ("The Tool") must not shield the tail:
             # check the substantive word on its own.
             head = name.split()[0]
             if head in _NAME_ALLOWLIST and len(name.split()) > 1:
-                _check_name(name.split()[1], sec.get("section_id"))
+                tail = name.split()[1]
+                seen.add(name)
+                seen.add(tail)
+                _check_name(tail, sec.get("section_id"))
                 continue
             # Sentence-initial capitalisation is prose position, not
             # evidence: skip body starts, sentence ends and quote/dialogue
-            # openings.
+            # openings. Seen-marking happens only for checked names, so
+            # a first occurrence at a skipped position cannot launder a
+            # later mid-sentence occurrence.
             if m.start() == 0:
                 continue
             prev = body[:m.start()]
@@ -630,6 +729,7 @@ def check_entities(article: dict[str, Any],
                 "#", "").replace("_", "").strip(" \t\"'(‘“[")
             if not prefix or prefix[-1:] in ".:!?":
                 continue
+            seen.add(name)
             _check_name(name, sec.get("section_id"))
     if article.get("article_type") in ("discussion", "report"):
         for sec in article.get("sections") or []:
@@ -834,20 +934,47 @@ def check_reader_integrity(article: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _subtract_spans(spans: list[list[float]],
+                    banned: list[list[float]]) -> list[list[float]]:
+    """Evidence windows minus excluded (sponsor/housekeeping) spans."""
+    out: list[list[float]] = []
+    for a, b in spans:
+        cur = [[a, b]]
+        for c, d in banned:
+            nxt: list[list[float]] = []
+            for x, y in cur:
+                if d <= x or c >= y:
+                    nxt.append([x, y])
+                    continue
+                if c > x:
+                    nxt.append([x, c])
+                if d < y:
+                    nxt.append([d, y])
+            cur = nxt
+        out.extend([w for w in cur if w[1] - w[0] > 0.5])
+    return out
+
+
 def _frontmatter_sections(article: dict[str, Any],
-                          duration_s: float) -> list[dict[str, Any]]:
+                          duration_s: float,
+                          banned: list[list[float]] | None = None
+                          ) -> list[dict[str, Any]]:
     """Lead, summary and headings as validatable pseudo-sections.
 
     Frontmatter synthesises the whole video, so its evidence is the full
-    span — checked with the same value/entity/integrity rules as body
-    prose, but outside the slot, temporal, origin and coverage contracts
-    that govern topical sections.
+    span minus excluded (sponsor/housekeeping) spans — checked with the
+    same value/entity/integrity rules as body prose, but outside the
+    slot, temporal and coverage contracts that govern topical sections.
+    Origin still applies: a sponsor-sourced value has no business in
+    the title, summary or lead.
     """
     extras: list[dict[str, Any]] = []
-    span = [[0.0, float(duration_s or 0) or 0.0]]
+    span = _subtract_spans([[0.0, float(duration_s or 0) or 0.0]], banned or [])
+    if not span:
+        span = [[0.0, float(duration_s or 0) or 0.0]]
     lead_md = str(article.get("lead_md") or "").strip()
     if lead_md:
-        extras.append({"section_id": "lead", "slot": "lead",
+        extras.append({"section_id": "__lead__", "slot": "lead",
                        "heading": "Lead", "body": lead_md,
                        "t_start": 0.0, "t_end": float(duration_s or 0),
                        "source_windows": span})
@@ -862,7 +989,7 @@ def _frontmatter_sections(article: dict[str, Any],
     if front:
         dur = float(duration_s or 0)
         meta = (f"{dur / 60:.0f} minutes" if dur >= 90 else f"{dur:.0f} seconds")
-        extras.append({"section_id": "frontmatter", "slot": "frontmatter",
+        extras.append({"section_id": "__frontmatter__", "slot": "frontmatter",
                        "heading": "Frontmatter", "body": front,
                        "t_start": 0.0, "t_end": dur,
                        "source_windows": span,
@@ -886,7 +1013,14 @@ def validate_typed(decision: dict[str, Any], plan: dict[str, Any],
         return {"status": "refused",
                 "findings": [_finding("empty_article", CRITICAL,
                                       "no usable sections in article")]}
-    extras = _frontmatter_sections(article, duration_s)
+    banned: list[list[float]] = []
+    for entry in decision.get("excluded_windows") or []:
+        if isinstance(entry, dict):
+            try:
+                banned.append([float(entry["start"]), float(entry["end"])])
+            except (TypeError, ValueError, KeyError):
+                continue
+    extras = _frontmatter_sections(article, duration_s, banned)
     scoped = dict(article, sections=sections)
     wide = dict(article, sections=sections + extras)
     findings: list[dict[str, Any]] = []

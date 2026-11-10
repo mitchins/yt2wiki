@@ -245,7 +245,7 @@ def test_lead_and_summary_values_are_gated():
     article["summary"] = "Bake at 350 degrees."
     res = V.validate_typed(decision, plan, _index(), article, segs, 20.0)
     assert res["status"] == "needs_review"
-    assert any(f.get("section_id") == "lead" for f in res["findings"])
+    assert any(f.get("section_id") == "__lead__" for f in res["findings"])
 
 
 def test_definition_list_prose_is_not_a_value_claim():
@@ -347,7 +347,7 @@ def test_title_values_are_gated():
     article = _article(bodies=["Combine.", "Mix.", "Bake."])
     article["title"] = "Bake at 900 degrees"
     res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
-    assert any(f.get("section_id") == "frontmatter"
+    assert any(f.get("section_id") == "__frontmatter__"
                for f in res["findings"])
 
 
@@ -473,3 +473,79 @@ def _plan_procedure():
                           "t_start": 0.0, "t_end": 20.0, "window_ids": []}
                          for i in range(3)],
             "coverage": {}}
+
+
+def test_pure_integer_ranges_stay_values():
+    segs = _segs(["The war lasted from 1976 to 1986."])
+    article = _article(bodies=["Combine.", "Mix.", "War 1976-1986."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 6000.0)
+    assert not any(f["code"] == "bare_second_citation" for f in res["findings"])
+
+
+def test_integer_range_citation_is_major():
+    segs = _segs(["Bake the loaf."])
+    article = _article(bodies=["Combine.", "Mix.", "Knead 5030-5033 well."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 5821.0)
+    assert any(f["code"] == "bare_second_citation" for f in res["findings"])
+    assert not any(f["code"] == "unsupported_exact_value" for f in res["findings"])
+
+
+def test_repeated_name_escalates_to_critical():
+    segs = _segs(["The panel discussed scores."])
+    article = _article(bodies=["Grockbot says scores are unfair.",
+                               "Grockbot adds context."])
+    article["article_type"] = "discussion"
+    decision = _decision("discussion")
+    plan = _plan("discussion", ("central_question", "positions"))
+    res = V.validate_typed(decision, plan, _index(), article, segs, 20.0)
+    assert any(f["code"] == "unattested_entity" for f in res["findings"])
+
+
+def test_single_use_unknown_name_stays_major():
+    segs = _segs(["The panel discussed scores."])
+    article = _article(
+        tid="discussion",
+        bodies=["The central question.", "He praised Xylophone loudly."],
+        slots=("central_question", "positions"))
+    decision = _decision("discussion")
+    plan = _plan("discussion", ("central_question", "positions"))
+    res = V.validate_typed(decision, plan, _index(), article, segs, 30.0)
+    assert res["status"] == "ready"
+    assert any(f["code"] == "unattested_entity"
+               and f["severity"] == "major" for f in res["findings"])
+
+
+def test_repeated_unattested_name_is_critical():
+    segs = _segs(["The panel discussed scores."])
+    article = _article(
+        tid="discussion",
+        bodies=["Grockbot says scores are unfair.",
+                "Grockbot adds context here."],
+        slots=("central_question", "positions"))
+    decision = _decision("discussion")
+    plan = _plan("discussion", ("central_question", "positions"))
+    res = V.validate_typed(decision, plan, _index(), article, segs, 20.0)
+    assert res["status"] == "needs_review"
+    assert any(f["code"] == "unattested_entity"
+               and f["severity"] == "critical" for f in res["findings"]), res["findings"]
+
+
+def test_bare_integer_values_are_checked():
+    segs = _segs(["About fifty people came to the event."])
+    article = _article(bodies=["Combine.", "Fifty people came.", "Done."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert res["status"] == "ready", res["findings"]
+    bad = _article(bodies=["Combine.", "Three hundred people came.", "Done."])
+    res = V.validate_typed(_decision(), _plan(), _index(), bad, segs, 20.0)
+    assert any(f["code"] == "unsupported_exact_value" for f in res["findings"])
+
+
+def test_strict_assignment_with_spaces_is_checked():
+    segs = _segs(["Set the port to 8080 before starting."])
+    article = _article(bodies=["Combine.", "Set port = 8080 first.", "Done."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert res["status"] == "ready", res["findings"]
+    assert any(f["code"] == "unverified_relation" for f in res["findings"])
+    bad = _article(bodies=["Combine.", "Set port = 9090 first.", "Done."])
+    res = V.validate_typed(_decision(), _plan(), _index(), bad, segs, 20.0)
+    assert any(f["code"] == "unsupported_exact_value" for f in res["findings"])
