@@ -34,11 +34,10 @@
             </div>
           </div>
           <h1 class="a-title">{{ article.title }}</h1>
-          {# S5247: view.lead_html is html.escape-sanitized in article.markdown_to_html (see article.py:_safe_href) — safe to disable autoescape #}
-          {% if view.lead_html %}<div class="a-lead">{{ view.lead_html|safe }}</div>{% endif %}
-          {# S5247: lead-block HTML is built only by v9.blocks.render_html, which
-             escapes every interpolated value — no caller markup passes through #}
-          {% if view.lead_blocks %}<div class="a-lead-blocks">{% for b in view.lead_blocks %}<section class="lead-block lead-sec-{{ b.name }}">{{ b.html|safe }}</section>{% endfor %}</div><!-- NOSONAR S5247 reviewed-safe: b.html is built only by v9.blocks.render_html with every value html-escaped; see tests/test_sonar_prA_security.py and test_hostile_input_is_escaped_not_rendered -->{% endif %}
+          {# S5247: view.lead_html is pre-sanitised Markup from views.render_reader (html.escape-sanitized in article.markdown_to_html, see article.py:_safe_href) — autoescape stays on, no |safe bypass. #}
+          {% if view.lead_html %}<div class="a-lead">{{ view.lead_html }}</div>{% endif %}
+          {# S5247: block HTML is pre-sanitised Markup from views.lead_blocks_from_manifest, built only by v9.blocks.render_html which escapes every interpolated value — autoescape stays on, no |safe bypass. #}
+          {% if view.lead_blocks %}<div class="a-lead-blocks">{% for b in view.lead_blocks %}<section class="lead-block lead-sec-{{ b.name }}">{{ b.html }}</section>{% endfor %}</div>{% endif %}
           <div class="a-source">
             {{ icon("video") }}
             <p>
@@ -58,8 +57,8 @@
         </details>
         {% endif %}
 
-        {# S5247: view.body_html is html.escape-sanitized in article.markdown_to_html — safe to disable autoescape #}
-        <div class="a-body">{{ view.body_html|safe }}</div>
+        {# S5247: view.body_html is pre-sanitised Markup from views.render_reader (html.escape-sanitized in article.markdown_to_html) — autoescape stays on, no |safe bypass. #}
+        <div class="a-body">{{ view.body_html }}</div>
 
         <section class="about no-print" aria-labelledby="about-h">
           <h2 id="about-h">About this article</h2>

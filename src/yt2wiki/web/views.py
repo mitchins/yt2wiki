@@ -147,6 +147,8 @@ def lead_blocks_from_manifest(editorial: dict[str, Any] | None) -> list[dict[str
     standalone export, ZIP and print views stay equivalent without
     depending on this slot.
     """
+    from markupsafe import Markup
+
     from ..v9 import blocks as _blocks
 
     if not isinstance(editorial, dict):
@@ -162,7 +164,11 @@ def lead_blocks_from_manifest(editorial: dict[str, Any] | None) -> list[dict[str
         if _blocks.validate_block(block):
             continue
         name = str(block.get("block"))
-        out.append({"name": name, "html": _blocks.render_html(block)})
+        # Pre-sanitised HTML boundary: render_html html-escapes every
+        # interpolated value (see test_hostile_input_is_escaped_not_rendered),
+        # so Markup carries that contract to the template with autoescape
+        # intact instead of a |safe bypass.
+        out.append({"name": name, "html": Markup(_blocks.render_html(block))})
     return out
 
 
@@ -384,6 +390,8 @@ def _asset_resolver(paths, article_id: str):
 def render_reader(paths, article_id: str, markdown: str, *, numbered: bool = False,
                   zoom_links: bool = True,
                   lead_blocks: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    from markupsafe import Markup
+
     from ..article import markdown_to_html
 
     parts = reader.split_markdown(markdown or "")
@@ -393,7 +401,12 @@ def render_reader(paths, article_id: str, markdown: str, *, numbered: bool = Fal
     body_html, toc = reader.enhance(markdown_to_html(parts.body_md), asset_url=url,
                                     asset_size=size, zoom_links=zoom_links,
                                     numbered_sections=numbered)
-    return {"title": parts.title, "lead_html": lead_html, "body_html": body_html,
+    # Pre-sanitised HTML boundary: markdown_to_html html-escapes all text and
+    # allow-lists href/src schemes (see article._safe_href), and
+    # reader.enhance only adds our own markup. Markup marks that contract so
+    # templates render with autoescape intact (no |safe bypass); injection
+    # payloads are proven inert in test_sonar_prA_security.py.
+    return {"title": parts.title, "lead_html": Markup(lead_html), "body_html": Markup(body_html),
             "toc": toc, "attribution": parts.attribution,
             "lead_blocks": list(lead_blocks or []),
             "n_images": body_html.count('<figure class="frame"')}
