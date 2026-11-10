@@ -600,3 +600,23 @@ def test_majors_are_recorded_not_silent():
     res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
     assert res["status"] == "ready"
     assert any(f["severity"] == "major" for f in res["findings"])
+
+
+def test_lone_subheading_is_not_a_name():
+    segs = _segs(["The deck has an OLED screen."])
+    article = _article(bodies=["Memory\n\nThe 16 GB memory is fast.",
+                               "Done.", "Done."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert not [f for f in res["findings"]
+                if f["code"] == "unattested_entity"
+                and "'Memory'" in f["detail"]], res["findings"]
+
+
+def test_punctuated_title_case_run_is_not_a_name():
+    segs = _segs(["Bake the loaf."])
+    article = _article(bodies=["Economics, Manufacturing, and Policy.",
+                               "Done.", "Done."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert not [f for f in res["findings"]
+                if f["code"] == "unattested_entity"
+                and "Economics" in f["detail"]], res["findings"]

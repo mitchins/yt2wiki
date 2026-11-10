@@ -1128,9 +1128,10 @@ def _write_typed_sections(chat, plan_sections, segs, video_title,
         # Bounded, representative evidence: very long spans exceed what
         # the writer backend accepts in one prompt, so stride-sample
         # instead of head-truncating (citations still cover full spans).
-        texts = [section_transcript_windows(segs, spans, cap_chars=4500,
+        # 2500 chars completes reliably; 4500+ truncates server-side.
+        texts = [section_transcript_windows(segs, spans, cap_chars=2500,
                                             sample=True),
-                 section_transcript_windows(segs, spans, cap_chars=2000,
+                 section_transcript_windows(segs, spans, cap_chars=1200,
                                             sample=True)]
         calls = {"n": 0}
 

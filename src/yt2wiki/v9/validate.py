@@ -701,15 +701,25 @@ def check_entities(article: dict[str, Any],
         # Title-Case runs are headings ("Simple Bread Making for
         # Beginners"), not name claims: skip matches fully inside one.
         # Sentence-case names ("NASA confirms Dimorphus") still check.
+        # A line that IS nothing but the match (a lone subheading like
+        # "### Memory") is likewise structural, not a name claim.
         runs: list[tuple[int, int]] = []
         for rm in re.finditer(
-                r"\b(?:[A-Z][\w']*(?:[ \t]+(?:[A-Z][\w']*|[a-z]{1,3}))+)\b",
-                body):
-            words = rm.group(0).split()
+            r"\b(?:[A-Z][\w',.:;-]*(?:[ \t]+(?:[A-Z][\w',.:;-]*|[a-z]{1,3}))+)\b",
+            body):
+            words = [w.strip(",.:;!-") for w in rm.group(0).split()]
+            words = [w for w in words if w]
             if sum(1 for w in words if w[:1].isupper()) >= 3:
                 runs.append((rm.start(), rm.end()))
         for m in _NAME.finditer(body):
             if any(a <= m.start() and m.end() <= b for a, b in runs):
+                continue
+            line_start = body.rfind("\n", 0, m.start()) + 1
+            line_end = body.find("\n", m.end())
+            if line_end < 0:
+                line_end = len(body)
+            stripped = body[line_start:line_end].strip("#*->0123456789. \t:")
+            if stripped == m.group(1).strip():
                 continue
             name = m.group(1)
             if name in seen:
