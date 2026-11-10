@@ -35,6 +35,45 @@ def test_run_stage_subset_is_parsed():
     assert args.target == "yt-abc"
     assert args.stages == "evidence,verify"
     assert args.force is False
+    assert args.typed is False
+
+
+def test_run_typed_flag_defaults_off_and_rejects_stage_combo():
+    parser = build_parser()
+    assert parser.parse_args(["run", "yt-abc"]).typed is False
+    assert parser.parse_args(["run", "yt-abc", "--typed"]).typed is True
+
+
+def test_run_typed_routes_to_v9_with_typed_enabled(tmp_path, capsys, monkeypatch):
+    """--typed must reach run_source with enable_typed=True (and only then)."""
+    from yt2wiki.cli import main
+    from yt2wiki.config import Settings
+    from yt2wiki.db.schema import Database
+    from yt2wiki.services import Service
+
+    settings = Settings.load(data_dir=tmp_path, profile="compact")
+    db = Database(settings.paths.db_path)
+    db.migrate()
+    service = Service(settings, db)
+    sid = service.create_youtube_source("https://youtu.be/abc")
+
+    seen: dict = {}
+
+    def fake_run_source(settings_, db_, service_, source_id, **kw):
+        seen.update(kw)
+        seen["source_id"] = source_id
+        return {"ok": True, "job_id": "job-x"}
+
+    monkeypatch.setattr("yt2wiki.v9.run.run_source", fake_run_source)
+    rc = main(["--data-dir", str(tmp_path), "run", sid, "--typed"])
+    assert rc == 0
+    assert seen.get("enable_typed") is True, seen
+    assert seen.get("source_id") == sid, seen
+
+    rc = main(["--data-dir", str(tmp_path), "run", sid, "--typed",
+               "--stages", "verify"])
+    assert rc == 2
+    assert "cannot be combined" in capsys.readouterr().err
 
 
 def test_serve_disables_proxy_headers(tmp_path, monkeypatch):
