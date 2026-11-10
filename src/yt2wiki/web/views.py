@@ -137,6 +137,64 @@ def kind_label(kind: str | None) -> str:
     return KIND_LABELS.get((kind or "").lower(), "")
 
 
+def lead_blocks_from_manifest(editorial: dict[str, Any] | None) -> list[dict[str, str]]:
+    """Reader lead blocks for a typed generation's manifest editorial.
+
+    Only blocks that pass ``v9.blocks`` validation render; anything else
+    is skipped here (PR C validation reports it at publish time). The
+    interactive reader renders these as semantic HTML while the stored
+    article Markdown carries the author's own Markdown fallback, so the
+    standalone export, ZIP and print views stay equivalent without
+    depending on this slot.
+    """
+    from markupsafe import Markup
+
+    from ..v9 import blocks as _blocks
+
+    if not isinstance(editorial, dict):
+        return []
+    lead = editorial.get("lead_blocks")
+    if not isinstance(lead, list):
+        return []
+    out = []
+    for entry in lead:
+        if not isinstance(entry, dict):
+            continue
+        block = entry.get("block")
+        if _blocks.validate_block(block):
+            continue
+        name = str(block.get("block"))
+        # Pre-sanitised HTML boundary: render_html html-escapes every
+        # interpolated value (see test_hostile_input_is_escaped_not_rendered),
+        # so Markup carries that contract to the template with autoescape
+        # intact instead of a |safe bypass.
+        out.append({"name": name, "html": Markup(_blocks.render_html(block))})
+    return out
+
+
+def article_type_display(article_type: str | None, kind: str | None) -> tuple[str | None, str]:
+    """Resolve the reader badge for one article: (type_id, label).
+
+    A recorded typed id wins; otherwise the legacy V9 kind maps onto the
+    v1 catalogue where its meaning is stable (`experimental` is the old
+    alias of `experiment`); surviving legacy labels (`comparison`,
+    `teardown`, How-to/Explainer/Review...) display exactly as before.
+    Anything else renders the neutral "Article" label — never a
+    fabricated type. Display only; stored content is untouched.
+    """
+    from ..v9 import article_types as _at
+
+    typed = (article_type or "").strip().lower() or None
+    if typed not in _at.ARTICLE_TYPES:
+        typed = _at.resolve_legacy_kind(kind)
+    if typed in _at.READER_LABELS:
+        return typed, _at.READER_LABELS[typed]
+    legacy = KIND_LABELS.get((kind or "").lower())
+    if legacy:
+        return None, legacy
+    return None, "Article"
+
+
 def status_view(status: str | None) -> dict[str, str]:
     label, tone = STATUS_LABELS.get(status or "", ((status or "").title(), "muted"))
     return {"label": label, "tone": tone, "value": status or ""}
@@ -242,7 +300,7 @@ def library_cards(db, paths, *, q: str = "", fts_query: str = "") -> list[dict[s
     highlighted snippet; superseded legacy articles are still excluded.
     """
     base = """SELECT a.article_id, a.source_id, a.job_id, a.title, a.markdown, a.status,
-                     a.version, a.outline_json, a.created_at, a.updated_at,
+                     a.version, a.outline_json, a.article_type, a.created_at, a.updated_at,
                      s.kind AS source_kind, s.title AS source_title, s.uploader,
                      s.origin_url, s.duration_s"""
     if q:
@@ -270,13 +328,16 @@ def library_cards(db, paths, *, q: str = "", fts_query: str = "") -> list[dict[s
     kinds = _article_kinds(db, [r["job_id"] for r in picked])
     cards = []
     for r in picked:
+        _ctype, _clabel = article_type_display(
+            r.get("article_type"), kinds.get(r["job_id"] or ""))
         cards.append({
             "article_id": r["article_id"],
+            "article_type": _ctype,
             "title": r["title"],
             "summary": reader.lead_summary(r["markdown"] or "", 200),
             "snippet": _snippet_html(r.get("snip") or ""),
             "thumb": thumbnail_for(paths, r["article_id"], r["outline_json"], r["markdown"]),
-            "kind": kind_label(kinds.get(r["job_id"] or "")),
+            "kind": _clabel,
             "status": status_view(r["status"]),
             "source": source_label({"kind": r["source_kind"], "title": r["source_title"],
                                     "uploader": r["uploader"], "origin_url": r["origin_url"]}),
@@ -327,7 +388,10 @@ def _asset_resolver(paths, article_id: str):
 
 
 def render_reader(paths, article_id: str, markdown: str, *, numbered: bool = False,
-                  zoom_links: bool = True) -> dict[str, Any]:
+                  zoom_links: bool = True,
+                  lead_blocks: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    from markupsafe import Markup
+
     from ..article import markdown_to_html
 
     parts = reader.split_markdown(markdown or "")
@@ -337,8 +401,14 @@ def render_reader(paths, article_id: str, markdown: str, *, numbered: bool = Fal
     body_html, toc = reader.enhance(markdown_to_html(parts.body_md), asset_url=url,
                                     asset_size=size, zoom_links=zoom_links,
                                     numbered_sections=numbered)
-    return {"title": parts.title, "lead_html": lead_html, "body_html": body_html,
+    # Pre-sanitised HTML boundary: markdown_to_html html-escapes all text and
+    # allow-lists href/src schemes (see article._safe_href), and
+    # reader.enhance only adds our own markup. Markup marks that contract so
+    # templates render with autoescape intact (no |safe bypass); injection
+    # payloads are proven inert in test_sonar_prA_security.py.
+    return {"title": parts.title, "lead_html": Markup(lead_html), "body_html": Markup(body_html),
             "toc": toc, "attribution": parts.attribution,
+            "lead_blocks": list(lead_blocks or []),
             "n_images": body_html.count('<figure class="frame"')}
 
 
@@ -350,7 +420,9 @@ def article_context(db, paths, article_id: str) -> dict[str, Any] | None:
     src_row = db.query_one("SELECT * FROM sources WHERE source_id=?", (article["source_id"],))
     source = dict(src_row) if src_row else {}
     kind = _article_kinds(db, [article.get("job_id") or ""]).get(article.get("job_id") or "", "")
-    view = render_reader(paths, article_id, article["markdown"], numbered=(kind == "procedure"))
+    article_type, type_label = article_type_display(article.get("article_type"), kind)
+    view = render_reader(paths, article_id, article["markdown"],
+                         numbered=(article_type == "procedure"))
     report = _loads(_read(paths.article_dir(article_id) / "v9_report.json"), {}) or {}
     # Effective (actually-used) models: publish-time identities, else the
     # current generation manifest; Unknown where nothing trustworthy exists.
@@ -371,8 +443,9 @@ def article_context(db, paths, article_id: str) -> dict[str, Any] | None:
     return {
         "article": article,
         "view": view,
-        "kind": kind_label(kind),
+        "kind": type_label,
         "kind_raw": kind,
+        "article_type": article_type,
         "status": status_view(article["status"]),
         "source": source,
         "source_label": source_label(source),

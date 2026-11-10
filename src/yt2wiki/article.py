@@ -341,8 +341,18 @@ def _break_byline_note(text: str) -> str:
     """Break before the compilation note (linear, S8786).
 
     Equivalent of ``re.sub(r"\\s+(This illustrated guide was compiled)", ...)``.
+    Matches both the historical "illustrated guide" wording (stored in old
+    articles) and the type-neutral "article" wording new publishes emit.
     """
-    marker = "This illustrated guide was compiled"
+    # Both wordings occur in the wild: old stored articles use the
+    # "illustrated guide" phrasing, new publishes the type-neutral one.
+    # Break before whichever occurs first.
+    candidates = ["This article was compiled",
+                  "This illustrated guide was compiled"]
+    hits = [(text.find(c), c) for c in candidates if c in text]
+    if not hits:
+        return text
+    marker = min(hits)[1]
     out: list[str] = []
     i = 0
     while True:
