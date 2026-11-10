@@ -1129,8 +1129,12 @@ def section_transcript_windows(segs: Sequence[dict[str, Any]],
             if key in seen or float(r["end"]) < t_start or float(r["start"]) > t_end:
                 continue
             seen.add(key)
-            lines.append(f"[{key[0]:.1f}-{key[1]:.1f}] "
-                         f"{str(r.get('text') or '').strip()}")
+            # Caption/ASR rows prefix a sequence counter ("133 and Crisis
+            # 3 ..."): strip one leading integer so the model cannot quote
+            # it as source content. Real leading quantities survive
+            # mid-sentence; the gate still matches against raw segments.
+            text = _LEADING_NUM.sub("", str(r.get("text") or "").strip())
+            lines.append(f"[{key[0]:.1f}-{key[1]:.1f}] {text}")
             if not sample and sum(len(x) for x in lines) > cap_chars:
                 break
         if not sample and sum(len(x) for x in lines) > cap_chars:

@@ -661,3 +661,13 @@ def test_typed_section_retry_uses_minimal_schema_after_empty_body():
     assert sections[0]["section_id"] == "s"
     assert len(sections[0]["body"]) >= 40
     assert represented == [[[0.0, 60.0]]]
+
+
+def test_evidence_strips_caption_sequence_counters():
+    from yt2wiki.v9.writer import section_transcript_windows
+
+    segs = [{"idx": 0, "start": 170.0, "end": 175.0,
+             "text": "133 and Crisis 3 remastered and I chose two titles"}]
+    out = section_transcript_windows(segs, [[165.0, 180.0]])
+    assert out.startswith("[170.0-175.0] and Crisis 3 remastered")
+    assert "133" not in out.split("] ", 1)[1].split(" and Crisis")[0]
