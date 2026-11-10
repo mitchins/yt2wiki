@@ -85,6 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("target", help="YouTube URL, local video path, or an existing source id")
     p.add_argument("--stages", default="", help="comma separated subset of stages")
     p.add_argument("--force", action="store_true", help="ignore cached stage outputs")
+    p.add_argument("--typed", action="store_true",
+                   help="use the V9 publisher with the gated typed editorial path "
+                        "(default off; --stages/--force do not apply)")
 
     p = sub.add_parser("serve", help="start the web application and worker", parents=[common])
     p.add_argument("--host", default="127.0.0.1")
@@ -204,6 +207,23 @@ def _cmd_run(args) -> int:
         else:
             sid = target
     job = service.create_job(sid, profile=settings.profile)
+    if args.typed:
+        # Controlled typed entry point: the same V9 publisher the web
+        # worker runs, with the gated typed editorial path enabled.
+        # Legacy-pipeline options do not apply here; combining them is a
+        # usage error rather than a silent ignore.
+        if args.stages or args.force:
+            print("--typed cannot be combined with --stages/--force", file=sys.stderr)
+            return 2
+        from .v9 import run as v9run
+        print(f"job {job} source {sid} profile {settings.profile} typed", flush=True)
+        started = time.time()
+        result = v9run.run_source(settings, db, service, sid,
+                                  profile=settings.profile, job_id=job,
+                                  enable_typed=True)
+        print(json.dumps(result, indent=1, default=str))
+        print(f"wall clock: {time.time() - started:.1f}s")
+        return 0 if result.get("ok") else 1
     only = {s.strip() for s in args.stages.split(",") if s.strip()} if args.stages else None
     if only:
         unknown = only - set(STAGES)
