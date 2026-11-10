@@ -631,3 +631,33 @@ def test_chunked_plan_covers_every_window_exactly_once():
     for remap in plan["coverage"].get("auto_split", []):
         assert remap["from"].startswith("c")
         assert all(t.startswith("c") for t in remap["to"])
+
+
+def test_typed_section_retry_uses_minimal_schema_after_empty_body():
+    from yt2wiki.v9 import writer as _W
+
+    segs = [{"idx": 0, "start": 0.0, "end": 60.0,
+             "text": "Segment zero discusses topic alpha and 100 units."}]
+    plan_sections = [{"section_id": "s", "slot": "positions",
+                      "heading": "Positions", "source_windows": [[0.0, 60.0]],
+                      "t_start": 0.0, "t_end": 60.0, "window_ids": ["w-000"]}]
+    seen = []
+
+    def chat(messages, **kw):
+        seen.append(messages[-1]["content"])
+        if len(seen) == 1:
+            return {"heading": "Positions", "body": "", "key_points": [],
+                    "warnings": []}
+        body = ("The participants compare short-form reach and subscription effects, "
+                "citing audience behavior [0:01].")
+        return {"heading": "Positions", "body": body}
+
+    sections, represented = _W._write_typed_sections(
+        chat, plan_sections, segs, "Video", "discussion", "cite rule")
+    assert len(seen) == 2
+    assert '"key_points"' in seen[0]
+    assert '"key_points"' not in seen[1]
+    assert '"body"' in seen[1]
+    assert sections[0]["section_id"] == "s"
+    assert len(sections[0]["body"]) >= 40
+    assert represented == [[[0.0, 60.0]]]

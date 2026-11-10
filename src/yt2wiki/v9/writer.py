@@ -992,6 +992,30 @@ Rules:
 - Preserve prerequisites, corrections and failed attempts mentioned in the spans.
 - Prefer specific source-supported detail over generic advice. No marketing language."""
 
+TYPED_SECTION_MINIMAL_PROMPT = """{common}
+
+Article type: {template_id}. {override}
+
+Context:
+- article title: {video_title}
+- section heading: {heading}
+- allowed slot for this section: {slot}
+- evidence spans: {spans}
+
+Transcript evidence (quote exact commands, values, paths and timestamps from it; never invent):
+\"\"\"
+{transcript}
+\"\"\"
+
+The previous full-schema reply was unusable. Return ONLY this minimal JSON object:
+{{"heading": {heading!r},
+  "body": "short paragraphs and bullets; keep exact commands, values, paths verbatim; {cite_rule}"}}
+Keep the body under 1200 characters: select the essential points, do not transcribe the evidence.
+Rules:
+- Use only what the narration states or clearly implies.
+- Omit sponsor pitches, community promotions, audience appeals and introductory filler.
+- Preserve prerequisites, corrections and failed attempts mentioned in the spans."""
+
 TYPED_TITLE_PROMPT = """{common}
 
 You are titling a {template_id} article about the video below. Write a concise title (under 90 characters, no clickbait) and a 2-3 sentence summary stating what the reader will be able to do or understand. Never describe the video, the creator or their community; describe the subject.
@@ -1145,6 +1169,16 @@ def _write_typed_sections(chat, plan_sections, segs, video_title,
                 slot=slot, spans=span_txt, transcript=text,
                 cite_rule=rule)
 
+        def _user_minimal_for(text: str, heading: str = p["heading"],
+                              slot: str | None = p.get("slot"),
+                              span_txt: str = ", ".join(
+                                  f"{a:.0f}-{b:.0f}s" for a, b in spans)) -> str:
+            return TYPED_SECTION_MINIMAL_PROMPT.format(
+                common=common, template_id=template_id, override=override,
+                video_title=video_title, heading=heading,
+                slot=slot, spans=span_txt, transcript=text,
+                cite_rule=rule)
+
         text = texts[0]
         if not text.strip():
             out = {"heading": p["heading"], "body": "_No speech in this span._",
@@ -1154,9 +1188,15 @@ def _write_typed_sections(chat, plan_sections, segs, video_title,
                               _calls=calls) -> dict[str, Any]:
                 # A truncation means the evidence overran the writer's
                 # output budget: the single bounded retry re-runs on the
-                # shorter sample rather than failing the section.
+                # shorter sample rather than failing the section. An empty
+                # or otherwise unusable full-schema reply also gets one
+                # minimal-schema retry, keeping the two-attempt contract.
                 _calls["n"] += 1
-                user = _user_for(_texts[min(_calls["n"] - 1, len(_texts) - 1)])
+                attempt_text = _texts[min(_calls["n"] - 1, len(_texts) - 1)]
+                if _calls["n"] > 1:
+                    user = _user_minimal_for(attempt_text)
+                else:
+                    user = _user_for(attempt_text)
                 msg = user + ("\n\n" + extra if extra else "")
                 # Dense multi-window spans need room: 1600 tokens
                 # truncated longer sections into unusable stubs. Compact
