@@ -212,19 +212,15 @@ def cite_rule(url: str | None) -> str:
     never drift from the links `normalize_timestamps` emits — including
     replacing a pre-existing `t` param instead of duplicating it.
     """
-    convert = ("Convert evidence stamps of 60 seconds or more to m:ss "
-               "before citing (evidence [243.8-...] cites as [4:03], never "
-               "[243], [243.8] or [0:03:63.8]); seconds after the colon "
-               "stay below 60.")
     if url and "youtu" in url:
         example = timestamp_url(url, 159)
         assert example is not None
         return (f"cite timestamps ONLY as [m:ss]({timestamp_url_pattern(url)}), e.g. "
                 f"[2:39]({example}). Never write bare seconds like [159] or "
-                f"[159:0], never invent any other URL. {convert}")
+                "[159:0], never invent any other URL")
     return ("cite timestamps ONLY as plain [m:ss] with no link, e.g. "
             "[0:04] (this upload has no source URL). Never write seconds "
-            f"like [159] or [159:0], never invent a URL. {convert}")
+            "like [159] or [159:0], never invent a URL")
 
 
 def _classify_error(exc: BaseException) -> tuple[str, bool]:
@@ -990,6 +986,7 @@ Return JSON only:
   "key_points": ["..."],
   "warnings": ["..."]}}
 Keep the body under 1500 characters: select the essential points, do not transcribe the evidence.
+Cite any evidence stamp of 60 seconds or more as m:ss (evidence [243.8-...] cites as [4:03], never [243], [243.8] or [0:03:63.8]); seconds after the colon stay below 60.
 Rules:
 - Use only what the narration states or clearly implies.
 - Omit sponsor pitches, community promotions, audience appeals and introductory filler.
@@ -1015,6 +1012,7 @@ The previous full-schema reply was unusable. Return ONLY this minimal JSON objec
 {{"heading": {heading!r},
   "body": "short paragraphs and bullets; keep exact commands, values, paths verbatim; {cite_rule}"}}
 Keep the body under 1200 characters: select the essential points, do not transcribe the evidence.
+Cite any evidence stamp of 60 seconds or more as m:ss (evidence [243.8-...] cites as [4:03], never [243], [243.8] or [0:03:63.8]); seconds after the colon stay below 60.
 Rules:
 - Use only what the narration states or clearly implies.
 - Omit sponsor pitches, community promotions, audience appeals and introductory filler.

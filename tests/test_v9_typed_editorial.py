@@ -678,7 +678,11 @@ def test_evidence_strips_caption_sequence_counters():
     assert "133" not in out.split("] ", 1)[1].split(" and Crisis")[0]
 
 
-def test_cite_rule_requires_sub60_seconds():
-    from yt2wiki.v9.writer import cite_rule
-    for url in ("https://www.youtube.com/watch?v=A", None):
-        assert "stay below 60" in cite_rule(url)
+def test_typed_prompts_require_sub60_seconds():
+    from yt2wiki.v9 import writer as _W
+    # Typed-only instruction: the shared cite_rule (legacy path) is
+    # unchanged, so untyped V9 behavior is untouched.
+    assert "stay below 60" in _W.TYPED_SECTION_PROMPT
+    assert "stay below 60" in _W.TYPED_SECTION_MINIMAL_PROMPT
+    assert "stay below 60" not in _W.cite_rule("https://youtube.com/watch?v=A")
+    assert "stay below 60" not in _W.cite_rule(None)

@@ -83,28 +83,31 @@ PR C (validation + matrix). Ten-video qualification corpus
 pinned model for baseline and candidate. Full per-case ledger in the
 PR C report.
 
-- Published with zero critical findings: DART `report`, Vox `report`,
-  Hermes `procedure`, Git `explainer` (type dissent, see below),
-  LTT `review`, DF `report`, WVFRM `discussion`.
-- `needs_review` with private candidate kept, published article
-  untouched: recipe (`2 loaves` is first-loaf + second-loaf synthesis
-  with no single stating span — an operator call, not a fabrication).
-  Each finding names the exact span/value to fix.
+- Published with zero critical findings: DART `report` (v10,
+  verification-fix revision — see below), Vox `report`, Hermes
+  `procedure`, Git `explainer` (type dissent, see below),
+  LTT `review`, DF `report` (v2, verification-fix revision), WVFRM
+  `discussion`, recipe `recipe` (via evidenced multi-span synthesis,
+  see below).
 - Correct refusal: silent montage (no speech; transcribe fails closed).
+- Close-01 verification fixes (recorded as `verification-fix`
+  revisions, pre-fix content restorable): DART lost a caption-mislabeled
+  speaker attribution (Fauci), a wrong orbit body (Didymos for
+  Dimorphos), an invented surname (O'Shea for O'Brien), an unverified
+  descriptor and twelve mangled timestamp citations (rebuilt from
+  their correct `t=` targets); DF lost one caption-counter artifact
+  (`133` quoted as content). Post-fix offline revalidation with the
+  real plans: DART ready/zero findings, DF ready/one major.
 - Long-form limitation: the 97 min Dwarkesh discussion still fails
   section writes stochastically (server-side empty replies on dense
-  spans despite strided 2500-char evidence, compact JSON,
-  halved-evidence retry, plain-chat fallback and a minimal-schema
-  second attempt). Jobs fail loudly and are safely retryable;
-  chunked planning and auto-split keep plans feasible. Writer-side
-  decomposition beyond the two-attempt contract is future work,
-  explicitly out of scope here.
-- Caption-counter hygiene: ASR/caption rows prefix sequence counters
-  (`133 and Crisis 3 ...`) that a writer can quote as content. The
-  writer now strips one leading counter per evidence line; mid-text
-  counters are a residual risk. The published DF report predates the
-  fix and carries one such artifact (`133`); republication is pending
-  a clean run.
+  multi-window spans despite strided evidence, compact JSON,
+  halved-evidence + minimal-schema retry at varied temperature and a
+  plain-chat/guided fallback ladder — each probed in isolation).
+  Isolated, demonstrated blocker; writer-side decomposition beyond
+  the two-attempt contract is future work, explicitly out of scope.
+- Caption-counter hygiene: the writer strips one leading counter per
+  evidence line; the normaliser rebuilds mangled labels from honest
+  `t=` targets; mid-text counters are a documented residual risk.
 - Open dissent: the Git how-to classifies `explainer` across four
   independent decisions (commands preserved in order and syntax);
   the matrix expected `procedure`. Operator decides whether to amend
