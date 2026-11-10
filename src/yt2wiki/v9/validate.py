@@ -217,10 +217,12 @@ _LIST_MARKER = re.compile(r"(?m)^(\s*)(?:[*\-+]\s+|\d+[.)]\s+)")
 #: English definition-list prose (ubiquitous in typed articles), never
 #: an exact technical value.
 _STRICT_KV = re.compile(r"\b([A-Za-z_][\w.\-]{2,40})\s*(=|:(?=\S))([^\s,;]{1,64})")
-#: Bare transcript-second ranges ("223.6-232.1"): citation-hygiene
-#: debris, not exact values. Both endpoints inside the duration mark a
-#: probable seconds-citation the writer should have rendered as m:ss.
-_BARE_RANGE = re.compile(r"\b(\d{1,4}\.\d+)\s*-\s*(\d{1,4}\.\d+)\b")
+#: Bare transcript-second ranges ("223.6-232.1", "641-645.4"):
+#: citation-hygiene debris, not exact values. A decimal endpoint plus
+#: both endpoints inside the duration marks a probable seconds
+#: citation the writer should have rendered as m:ss. Pure-integer
+#: ranges stay values ("1976-1986" is a year range, not a citation).
+_BARE_RANGE = re.compile(r"\b(\d{1,4}(?:\.\d+)?)\s*-\s*(\d{1,4}(?:\.\d+)?)\b")
 #: A bare range followed by a unit word is a measurement ("3.3-5.0 V"),
 #: not a seconds citation: the value gate owns it.
 _RANGE_UNIT_TAIL = re.compile(r"\s*(?:volts?|V\b|%|°[CF]?|Hz|hertz)\b")
@@ -441,6 +443,10 @@ def check_exact_values(article: dict[str, Any],
             except ValueError:
                 continue
             if _RANGE_UNIT_TAIL.match(body[m.end():]):
+                continue
+            # Only decimal ranges read as seconds citations; pure
+            # integers ("1976-1986") stay for the value gate.
+            if "." not in m.group(0):
                 continue
             if 0 <= lo < hi <= duration_s + 1:
                 out.append(_finding(
