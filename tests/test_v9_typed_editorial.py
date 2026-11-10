@@ -1,0 +1,245 @@
+"""Typed editorial unit tests: scout windows, decision, plan, selection.
+
+Deterministic only: scripted stub chats, no models, no network.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from yt2wiki.v9 import decide as D
+from yt2wiki.v9 import scout as S
+from yt2wiki.v9 import select as v9select
+
+
+def _segs(n=30, step=30.0):
+    return [{"idx": i, "start": i * step, "end": (i + 1) * step,
+             "text": f"Segment {i} discusses topic alpha and 100 units."}
+            for i in range(n)]
+
+
+def test_build_windows_covers_everything_exactly_once():
+    segs = _segs(30)
+    wins = S.build_windows(segs, 900.0, target_windows=8)
+    assert len(wins) <= 8
+    assert wins[0]["t_start"] == 0.0
+    assert wins[-1]["t_end"] == 900.0
+    for a, b in zip(wins, wins[1:]):
+        assert a["t_end"] == b["t_start"]
+    assert sum(w["chars"] for w in wins) >= sum(len(s["text"]) for s in segs) - 30
+
+
+def test_build_windows_empty_transcript():
+    assert S.build_windows([], 0.0) == []
+
+
+def test_window_ids_stable_after_tail_merge():
+    segs = _segs(9)
+    wins = S.build_windows(segs, 900.0, target_windows=4)
+    assert [w["window_id"] for w in wins] == [f"w-{k:03d}" for k in range(len(wins))]
+
+
+def test_build_windows_enforces_max_chars():
+    segs = _segs(30)
+    wins = S.build_windows(segs, 900.0, target_windows=4, max_chars=300)
+    assert all(w["chars"] <= 300 + 60 for w in wins)
+
+
+def test_digest_marks_failures_undigested_not_dropped():
+    wins = S.build_windows(_segs(6), 180.0, target_windows=3)
+
+    def boom(messages, **kw):
+        raise RuntimeError("no backend")
+
+    out = S.digest_windows(boom, wins)
+    assert set(out) == {w["window_id"] for w in wins}
+    assert all(d["flags"].get("undigested") for d in out.values())
+
+
+def test_digest_validates_shape_and_retries():
+    wins = S.build_windows(_segs(4), 120.0, target_windows=2)
+    calls = {"n": 0}
+
+    def chat(messages, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"digests": [{"window_id": "nope", "topics": []}]}
+        return {"digests": [
+            {"window_id": w["window_id"], "topics": ["alpha"],
+             "claims": ["c"], "names": [], "measures": ["100 units"],
+             "flags": {}} for w in wins]}
+
+    out = S.digest_windows(chat, wins)
+    assert calls["n"] == 2
+    assert out[wins[0]["window_id"]]["topics"] == ["alpha"]
+
+
+def test_empty_index_refuses_without_model():
+    index = S.build_index([], 0.0)
+    decision = D.select_type(lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("must not call model")), "T", 0.0, index)
+    assert decision["template_id"] == "no_article"
+    assert decision["status"] == "refused"
+
+
+def test_music_only_refuses():
+    segs = _segs(4)
+    index = S.build_index(segs, 120.0)
+    index["digests"] = {w["window_id"]: {"flags": {"music_only": True}}
+                        for w in index["windows"]}
+    decision = D.select_type(lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("must not call model")), "T", 120.0, index)
+    assert decision["status"] == "refused"
+
+
+def _index():
+    segs = _segs(12)
+    return S.build_index(segs, 360.0)
+
+
+def _decision_reply(**over):
+    d = {"template_id": "discussion",
+         "rationale": "multi-party debate across the full span",
+         "supporting_window_ids": ["w-000", "w-005", "w-010"],
+         "alternatives_rejected": [{"type": "procedure",
+                                    "reason": "no executable task"}],
+         "excluded_window_ids": [],
+         "status": "selected"}
+    d.update(over)
+    return d
+
+
+def test_select_type_freezes_valid_decision():
+    index = _index()
+
+    def chat(messages, **kw):
+        assert "discussion" in messages[1]["content"]
+        return _decision_reply()
+
+    decision = D.select_type(chat, "Debate video", 360.0, index)
+    assert decision["template_id"] == "discussion"
+    assert decision["index_hash"] == index["index_hash"]
+    assert len(decision["supporting_windows"]) == 3
+
+
+def test_select_type_rejects_bad_windows_then_retries():
+    index = _index()
+    calls = {"n": 0}
+
+    def chat(messages, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _decision_reply(supporting_window_ids=["w-999"])
+        return _decision_reply()
+
+    decision = D.select_type(chat, "T", 360.0, index)
+    assert decision["template_id"] == "discussion"
+    assert calls["n"] == 2
+
+
+def test_select_type_raises_when_invalid():
+    index = _index()
+    with pytest.raises(D.EditorialError):
+        D.select_type(lambda messages, **kw: {"template_id": "tutorial"},
+                      "T", 360.0, index)
+
+
+def test_plan_locks_windows_and_validates():
+    index = _index()
+    decision = {"template_id": "review", "index_hash": index["index_hash"]}
+
+    def chat(messages, **kw):
+        assert "review" in messages[1]["content"]
+        return {"template_id": "review",
+                "sections": [
+                    {"section_id": "sec-subject", "slot": "subject",
+                     "heading": "What it is",
+                     "window_ids": ["w-000", "w-001"]},
+                    {"section_id": "sec-eval", "slot": "assessment",
+                     "heading": "How it performs",
+                     "window_ids": ["w-005", "w-010"]}],
+                "coverage": {"included_window_ids": ["w-000"],
+                             "excluded_window_ids": [],
+                             "unassigned_substantive_window_ids": ["w-003"]}}
+
+    plan = D.plan_article(chat, decision, index)
+    assert [s["section_id"] for s in plan["sections"]] == ["sec-subject", "sec-eval"]
+    sec = plan["sections"][0]
+    assert sec["t_start"] == 0.0 and len(sec["source_windows"]) == 2
+    assert sec["t_end"] == max(p[1] for p in sec["source_windows"])
+
+
+def test_plan_retries_then_accepts():
+    index = _index()
+    decision = {"template_id": "review", "index_hash": index["index_hash"]}
+    calls = {"n": 0}
+
+    def chat(messages, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"template_id": "review", "sections": []}
+        return {"template_id": "review",
+                "sections": [{"section_id": "sec-s", "slot": "subject",
+                              "heading": "H", "window_ids": ["w-000"]},
+                             {"section_id": "sec-a", "slot": "assessment",
+                              "heading": "A", "window_ids": ["w-001"]}],
+                "coverage": {}}
+
+    plan = D.plan_article(chat, decision, index)
+    assert calls["n"] == 2
+    assert len(plan["sections"]) == 2
+
+
+def test_plan_rejects_silent_retype():
+    index = _index()
+    decision = {"template_id": "review", "index_hash": index["index_hash"]}
+    with pytest.raises(D.EditorialError):
+        D.plan_article(lambda messages, **kw: {"template_id": "report",
+                                               "sections": [
+                                                   {"section_id": "s",
+                                                    "slot": "lede",
+                                                    "heading": "H",
+                                                    "window_ids": ["w-000"]}],
+                                               "coverage": {}},
+                       decision, index)
+
+
+def test_plan_excludes_decision_excluded_windows():
+    index = _index()
+    decision = {"template_id": "review", "index_hash": index["index_hash"],
+                "excluded_window_ids": [],
+                "excluded_windows": [{"start": 0.0, "end": 60.0,
+                                      "reason": "sponsor", "window_id": "w-000"},
+                                     {"start": 60.0, "end": 120.0,
+                                      "reason": "sponsor", "window_id": "w-001"}]}
+
+    def chat(messages, **kw):
+        return {"template_id": "review",
+                "sections": [{"section_id": "sec-s", "slot": "subject",
+                              "heading": "H", "window_ids": ["w-000"]},
+                             {"section_id": "sec-a", "slot": "assessment",
+                              "heading": "A", "window_ids": ["w-002"]}],
+                "coverage": {}}
+
+    with pytest.raises(D.EditorialError):
+        D.plan_article(chat, decision, index)
+
+
+def test_candidates_come_from_window_union_not_interval():
+    frames = [{"frame_id": f"f-{i}", "t": float(i * 10), "kind": "scene"}
+              for i in range(12)]
+    # Disjoint topical windows with a sponsor gap between them.
+    cands = v9select.candidates_for_windows(frames, [[0.0, 20.0], [100.0, 110.0]],
+                                            pad=0.0, limit=10)
+    ts = sorted(f["t"] for f in cands)
+    assert ts == [0.0, 10.0, 20.0, 100.0, 110.0]
+    assert 50.0 not in ts
+
+
+def test_candidates_single_window_matches_legacy():
+    frames = [{"frame_id": f"f-{i}", "t": float(i * 10), "kind": "periodic"}
+              for i in range(12)]
+    a = v9select.candidates_for_section(frames, 0.0, 50.0, pad=0.0, limit=10)
+    b = v9select.candidates_for_windows(frames, [[0.0, 50.0]], pad=0.0,
+                                        limit=10)
+    assert [f["frame_id"] for f in a] == [f["frame_id"] for f in b]

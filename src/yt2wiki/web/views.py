@@ -107,6 +107,7 @@ JOB_STAGES = (
     ("inspect", "Inspect media"),
     ("transcribe", "Transcribe the narration"),
     ("frame_candidates", "Collect source frames"),
+    ("v9_plan", "Plan the article"),
     ("v9_write", "Write the guide"),
     ("v9_discover", "Gather frames per section"),
     ("v9_select", "Choose the images"),
@@ -365,6 +366,28 @@ def _snippet_html(snip: str) -> str:
 
 # ----------------------------------------------------------------------
 # reader
+def manifest_editorial(paths, article: dict[str, Any]) -> dict[str, Any]:
+    """The typed editorial record for the article's current generation.
+
+    Returns {} for untyped or historical articles: no manifest, no
+    pointer, or no editorial section means the reader shows no lead
+    blocks rather than invented ones.
+    """
+    import json
+
+    gid = (article or {}).get("current_generation_id")
+    if not gid:
+        return {}
+    try:
+        raw = (paths.article_dir(article["article_id"]) / "generations" / gid
+               / "manifest.json").read_text(encoding="utf-8")
+        man = json.loads(raw)
+    except (OSError, ValueError):
+        return {}
+    ed = man.get("editorial") if isinstance(man, dict) else None
+    return ed if isinstance(ed, dict) else {}
+
+
 def _asset_resolver(paths, article_id: str):
     assets = paths.article_assets(article_id)
     sizes: dict[str, tuple[int, int] | None] = {}
@@ -421,8 +444,10 @@ def article_context(db, paths, article_id: str) -> dict[str, Any] | None:
     source = dict(src_row) if src_row else {}
     kind = _article_kinds(db, [article.get("job_id") or ""]).get(article.get("job_id") or "", "")
     article_type, type_label = article_type_display(article.get("article_type"), kind)
+    lead_blocks = lead_blocks_from_manifest(manifest_editorial(paths, article))
     view = render_reader(paths, article_id, article["markdown"],
-                         numbered=(article_type == "procedure"))
+                         numbered=(article_type == "procedure"),
+                         lead_blocks=lead_blocks)
     report = _loads(_read(paths.article_dir(article_id) / "v9_report.json"), {}) or {}
     # Effective (actually-used) models: publish-time identities, else the
     # current generation manifest; Unknown where nothing trustworthy exists.

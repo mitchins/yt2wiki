@@ -55,22 +55,43 @@ If nothing instructional is visible, reply exactly: NO_USEFUL_CONTENT.
 Reply with the sentence only."""
 
 
-def candidates_for_section(frames: Sequence[dict[str, Any]], t_start: float, t_end: float,
-                           *, pad: float = 20.0, limit: int = 10) -> list[dict[str, Any]]:
-    """Frames near the section window, spread across it, plus edge neighbours."""
-    lo, hi = t_start - pad, t_end + pad
-    inside = [f for f in frames if lo <= float(f["t"]) <= hi]
-    inside.sort(key=lambda f: float(f["t"]))
-    if len(inside) <= limit:
-        return inside
+def candidates_for_windows(frames: Sequence[dict[str, Any]],
+                           windows: Sequence[Sequence[float]],
+                           *, pad: float = 20.0,
+                           limit: int = 10) -> list[dict[str, Any]]:
+    """Frames from the union of admitted source windows, spread across them.
+
+    Concatenating per-window candidates keeps sponsor and aside material
+    *between* the windows out of the pool: the enclosing min-to-max
+    interval must never be used for topical sections.
+    """
+    pool: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for span in windows:
+        t_start, t_end = float(span[0]), float(span[1])
+        lo, hi = t_start - pad, t_end + pad
+        for f in frames:
+            fid = str(f.get("frame_id"))
+            if fid not in seen and lo <= float(f["t"]) <= hi:
+                seen.add(fid)
+                pool.append(f)
+    pool.sort(key=lambda f: float(f["t"]))
+    if len(pool) <= limit:
+        return pool
     # Spread: prefer scene/keyframe kinds, then even stride.
-    scored = sorted(inside, key=lambda f: (0 if str(f.get("kind")) in ("scene", "keyframe") else 1,
-                                           float(f["t"])))
+    scored = sorted(pool, key=lambda f: (0 if str(f.get("kind")) in ("scene", "keyframe") else 1,
+                                         float(f["t"])))
     picked = scored[: max(2, limit // 2)]
-    rest = [f for f in inside if f not in picked]
+    rest = [f for f in pool if f not in picked]
     stride = max(1, len(rest) // max(1, (limit - len(picked))))
     picked += rest[::stride][: limit - len(picked)]
     return sorted(picked, key=lambda f: float(f["t"]))
+
+
+def candidates_for_section(frames: Sequence[dict[str, Any]], t_start: float, t_end: float,
+                           *, pad: float = 20.0, limit: int = 10) -> list[dict[str, Any]]:
+    """Frames near the section window, spread across it, plus edge neighbours."""
+    return candidates_for_windows(frames, [(t_start, t_end)], pad=pad, limit=limit)
 
 
 

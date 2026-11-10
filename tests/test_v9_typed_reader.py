@@ -158,3 +158,68 @@ def test_article_context_resolves_typed_badge_and_numbering(tmp_path):
     legacy = article_context(db, paths, "art9-b")
     assert legacy["article_type"] is None
     assert legacy["kind"] == "Article"
+
+
+def test_untyped_republish_preserves_recorded_type(tmp_path):
+    """Publication integrity: an untyped republish never clears the type."""
+    from types import SimpleNamespace
+
+    from yt2wiki.paths import Paths as _Paths
+    from yt2wiki.v9 import publish as v9publish
+
+    paths = _Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    t = 1700000000.0
+    db.execute("INSERT INTO sources(source_id, kind, title, content_hash, created_at)"
+               " VALUES('yt-abc', 'youtube', 'T', 'ch-9', ?)", (t,))
+    db.execute("INSERT INTO jobs(job_id, source_id, profile, fingerprint, state,"
+               " config_json, created_at, updated_at)"
+               " VALUES('job-1', 'yt-abc', 'compact', 'fp', 'done', '{}', ?, ?)", (t, t))
+    frame_src = tmp_path / "frame.jpg"
+    frame_src.write_bytes(b"\xff\xd8fakejpg")
+    picks = {"s1": [{"frame_id": "f-1", "path": str(frame_src), "t": 4.0,
+                     "caption": "c", "alt_text": "a"}]}
+    sections = [{"section_id": "s1", "heading": "H", "t_start": 0.0,
+                 "t_end": 10.0, "body": "Do it [0:04](http://x)."}]
+    settings = SimpleNamespace(paths=paths, fingerprint=lambda: "fp")
+    prov = {"url": "http://x", "fingerprint": "fp", "profile": "compact"}
+    v9publish.persist(
+        settings, db, article_id="art9-yt-abc", source_id="yt-abc",
+        job_id="job-1", title="T", markdown="# T", sections=sections,
+        picks=picks, provenance=prov, report={}, article_type="review",
+        template_version=1, editorial={"selection": {"template_id": "review"}})
+    assert db.query_one("SELECT article_type FROM articles"
+                        )["article_type"] == "review"
+    v9publish.persist(
+        settings, db, article_id="art9-yt-abc", source_id="yt-abc",
+        job_id="job-1", title="T", markdown="# T2", sections=sections,
+        picks=picks, provenance=prov, report={})
+    assert db.query_one("SELECT article_type FROM articles"
+                        )["article_type"] == "review"
+
+
+def test_article_context_shows_manifest_lead_blocks(tmp_path):
+    import json
+
+    from yt2wiki.web.views import article_context
+
+    paths = Paths(root=tmp_path / "data")
+    db = Database(paths.db_path)
+    db.execute("INSERT INTO sources(source_id, kind, title, created_at)"
+               " VALUES('s','youtube','S',1.0)")
+    db.execute("INSERT INTO articles(article_id, source_id, job_id, title,"
+               " markdown, version, status, article_type, current_generation_id,"
+               " created_at, updated_at)"
+               " VALUES('art9-a','s','job-a','T','# T\n\nBody.\n',1,'published',"
+               " 'report','gen-1',1.0,2.0)")
+    mandir = paths.article_dir("art9-a") / "generations" / "gen-1"
+    mandir.mkdir(parents=True)
+    (mandir / "manifest.json").write_text(json.dumps({
+        "editorial": {"lead_blocks": [
+            {"block": {"block": "key_facts",
+                       "facts": [{"label": "Date", "value": "2022-09-26"}]}}]}}))
+    ctx = article_context(db, paths, "art9-a")
+    assert ctx["article_type"] == "report"
+    assert ctx["kind"] == "Report"
+    assert len(ctx["view"]["lead_blocks"]) == 1
+    assert "2022-09-26" in ctx["view"]["lead_blocks"][0]["html"]
