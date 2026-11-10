@@ -699,7 +699,7 @@ def _single_attempt(call, validate, calls: int, correction: str, editorial: bool
 
 def _run_attempt(call, *, validate, editorial: bool, section_id: str,
                  heading: str, t_start: float, t_end: float,
-                 excerpt: str = "") -> dict[str, Any]:
+                 excerpt: str = "", verbose_retry: bool = False) -> dict[str, Any]:
     """One section through at most WRITER_MAX_ATTEMPTS writer calls.
 
     Transport failures, invalid JSON, truncation and correctable editorial
@@ -708,6 +708,10 @@ def _run_attempt(call, *, validate, editorial: bool, section_id: str,
     interval, attempt count and sanitised category. The original plan
     input, timestamp interval and stable section ID are preserved on the
     error for stage metrics — never substituted with fallback prose.
+
+    With verbose_retry (typed path only), the retry names the exact
+    failure instead of a generic "try again", which lets the model
+    repeat an empty body or a truncated dump.
     """
     last: tuple[str, str] | None = None
     calls = 0
@@ -721,7 +725,15 @@ def _run_attempt(call, *, validate, editorial: bool, section_id: str,
         last = outcome["last"]
         if not outcome["retry"]:
             break
-        correction = outcome.get("correction", correction)
+        if verbose_retry:
+            category, detail = last
+            specific = (outcome.get("correction") or "").strip()
+            ask = specific if specific else \
+                "Return a complete JSON object with a non-empty body."
+            correction = (f"Correction: the previous reply failed ({category}: "
+                          f"{detail[:200]}). {ask}")
+        else:
+            correction = outcome.get("correction", correction)
     category, detail = last or ("error", "unknown failure")
     raise SectionWriteError(section_id, heading, t_start, t_end,
                             category, calls, detail, excerpt)
@@ -1159,7 +1171,7 @@ def _write_typed_sections(chat, plan_sections, segs, video_title,
                                heading=p["heading"],
                                t_start=float(p.get("t_start", 0) or 0),
                                t_end=float(p.get("t_end", 0) or 0),
-                               excerpt=text)
+                               excerpt=text, verbose_retry=True)
         heading = str(out.get("heading") or p["heading"])
         if heading != p["heading"] and editorial_violations(heading):
             heading = p["heading"]
@@ -1210,7 +1222,8 @@ def _write_typed_title(chat, decision, segs, chapters, srow,
     try:
         return (_run_attempt(_title_call, validate=_typed_title_validate,
                              editorial=False, section_id="title",
-                             heading="title", t_start=0.0, t_end=0.0),
+                             heading="title", t_start=0.0, t_end=0.0,
+                             verbose_retry=True),
                 "")
     except SectionWriteError as exc:
         if exc.category == "editorial":
