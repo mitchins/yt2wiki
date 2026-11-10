@@ -30,8 +30,8 @@ critical finding):
    unbalanced fences or decision-trace language in prose; lead,
    summary and headings are checked against full-transcript evidence.
 
-Cosmetic warnings never fail publication: only ``critical`` findings
-produce ``needs_review``.
+Cosmetic warnings never fail publication: ``critical`` findings and
+genuinely uncertain semantic verifications produce ``needs_review``.
 """
 
 from __future__ import annotations
@@ -46,6 +46,13 @@ from .values import extract_exact_values as _extract_values
 #: Finding dicts carry code/severity/detail and optional section_id.
 CRITICAL = "critical"
 MAJOR = "major"
+
+#: Gate version trail: 1 = lexical-only gate; 2 = indefinite-article
+#: time normalisation ("after a year" is one year) plus
+#: evidence-grounded semantic verification of entity triage (lexical
+#: absence alone never blocks). Recorded on every validation record so
+#: pre/post-fix outcomes stay distinguishable.
+VALIDATOR_VERSION = 2
 
 _INTERNAL_ID = re.compile(
     r"\bev-[0-9a-f]{4,}\b|\bsec-[0-9a-z-]{4,}\b|\bw-\d{3,}\b|\bfact-[\w-]+\b")
@@ -270,12 +277,16 @@ _A_HALF = re.compile(r"\ba\s+half\b", re.IGNORECASE)
 
 
 def _a_unit_re() -> re.Pattern:
-    # Time units are excluded: "wait a minute" is idiom, not a measure.
-    # Explicit number words still numeralise ("five minutes" -> "5 minutes").
+    # Sub-hour time units are excluded: "wait a minute" is idiom, not a
+    # measure. Hour-and-longer durations are measures ("after a year" is
+    # one year): number words already numeralise them symmetrically
+    # ("one day" -> "1 day"), so excluding only the indefinite article
+    # would be an asymmetry, not a safeguard. Explicit number words
+    # still numeralise everywhere ("five minutes" -> "5 minutes").
     units = ("cups?|teaspoons?|tablespoons?|tsp|tbsp|ounces?|oz|pounds?|"
              "lbs?|grams?|degrees?|hertz|miles?|feet|foot|inches?|nits|"
              "liters?|milliliters?|pints?|quarts?|gallons?|loaves?|"
-             "servings?|dollars?|cents?")
+             "servings?|dollars?|cents?|hours?|days?|weeks?|months?|years?")
     return re.compile(rf"\b[an]+\s+(?=(?:{units})\b)", re.IGNORECASE)
 
 
@@ -742,9 +753,11 @@ def check_entities(article: dict[str, Any],
             # Same stem ("Automation" for "automating") is morphology,
             # not corruption: operator adjudicates.
             severity, why = MAJOR, f"same stem as {close[0]!r}"
-            out.append(_finding("unattested_entity", severity,
-                                f"{name!r} is capitalised as a name but never "
-                                f"occurs in the transcript ({why})", sec_id))
+            f = _finding("unattested_entity", severity,
+                         f"{name!r} is capitalised as a name but never "
+                         f"occurs in the transcript ({why})", sec.get("section_id"))
+            f["name"] = name
+            out.append(f)
             return
         if close:
             # Same-length near-miss with high similarity
@@ -760,15 +773,22 @@ def check_entities(article: dict[str, Any],
                 severity, why = MAJOR, f"near {close[0]!r} — different word"
         elif _occurrences(article, name) >= 2:
             # No transcript neighbour, but repeated across the article:
-            # repetition is endorsement. A single unattested mention may
-            # be an ASR gap; saying it twice is a claim of existence.
+            # repetition is a triage signal only, not proof of an
+            # existence claim (stylistic cohesion repeats thematic
+            # vocabulary too). The semantic verifier below decides.
+            # A single unattested mention may be an ASR gap; saying it
+            # twice is a claim of existence until verified.
             severity, why = CRITICAL, "repeated with no transcript neighbour"
         else:
             severity, why = MAJOR, "no transcript neighbour — ASR gap or invention"
-        out.append(_finding(
+        f = _finding(
             "unattested_entity", severity,
             f"{name!r} is capitalised as a name but never "
-            f"occurs in the transcript ({why})", sec_id))
+            f"occurs in the transcript ({why})", sec_id)
+        # The semantic verifier needs the candidate independent of the
+        # human-readable detail string: record it structurally.
+        f["name"] = name
+        out.append(f)
     seen: set[str] = set()
     for sec in article.get("sections") or []:
         body = re.sub(r"```.*?```", " ", str(sec.get("body") or ""),
@@ -855,6 +875,204 @@ def check_entities(article: dict[str, Any],
                     seen_attr.add(name)
                     _check_name(name, sec.get("section_id"))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Semantic verification of entity triage (gate v2).
+#
+# The lexical triage above is deliberately strict, but lexical absence is
+# not evidence of fabrication: faithful paraphrase shares no words with
+# its source ("the empire's transition"), and repetition is stylistic
+# cohesion as often as endorsement. Every unattested_entity candidate
+# therefore goes through bounded evidence-grounded entailment before it
+# can fail the gate:
+#
+# - entailed (with a verifiable verbatim quote): discharged and recorded
+#   with rationale for audit — never silently dropped;
+# - uncertain: the finding stands, annotated with the examined evidence;
+# - contradicted: a major finding escalates to critical and blocks;
+# - probe failure or an unverifiable quote: the lexical finding stands
+#   unchanged (fail safe — the probe can only discharge, never invent).
+#
+# Exact invariants (quantities, dates, measurements, identities,
+# commands) never reach the probe: check_exact_values stays strict.
+_ENTAILMENT_PROMPT = """You review one flagged word in a generated article passage.
+Flagged word: {word}
+Passage (section heading plus surrounding lines; the word may appear once):
+{claim}
+Evidence (verbatim transcript spans from the cited section):
+{evidence}
+Return JSON only: {{"verdict": "entailed"|"uncertain"|"contradicted", "support": "<exact quote from the evidence, or empty string>"}}
+- entailed: the evidence supports what the passage says involving the flagged word (a person/place/thing it names is evidenced, or the word aptly describes evidenced content). Quote the exact supporting words, copied character-for-character from the evidence: never reword, compress or merge sentences. You may elide whole duplicated sentences.
+- uncertain: the evidence is silent on the flagged word or too vague to decide. Default here when in doubt.
+- contradicted: the evidence directly conflicts with the passage's use of the flagged word (wrong person, wrong quantity, opposite fact).
+Do not use outside knowledge. The mere absence of the flagged word in the evidence never proves contradiction."""
+
+#: Bounds keep the probe call small and auditable. The evidence bound
+#: covers short videos whole; long-form transcripts still truncate
+#: (documented residual — the excerpt and its span are recorded).
+_ENTAILMENT_MAX_EVIDENCE = 6000
+_ENTAILMENT_MAX_CLAIM = 400
+#: Minimum verbatim support for a discharge: about four words. A
+#: discharge must rest on substance, not a two-word fragment.
+_ENTAILMENT_MIN_SUPPORT = 20
+
+
+def chat_probe(chat):
+    """Adapt a chat_json callable to the entailment-probe contract.
+
+    Returns a ``(prompt) -> dict`` callable that sends the fully
+    formatted verification prompt and returns the raw reply dict (or
+    raises). Shape validation and quote verification live in
+    ``probe_claim_support``; transport errors propagate so the caller
+    can fail safe.
+    """
+    def probe(prompt: str) -> dict[str, Any]:
+        raw = chat([{"role": "system", "content": "Return JSON only."},
+                    {"role": "user", "content": prompt}],
+                   max_new_tokens=300, temperature=0.0)
+        if not isinstance(raw, dict):
+            raise ValueError("non-dict probe reply")
+        return raw
+    return probe
+
+
+def probe_claim_support(probe, word: str, claim: str,
+                        evidence: str) -> dict[str, Any]:
+    """Bounded semantic verification of one flagged word in context.
+
+    ``probe`` is a ``(prompt) -> dict`` callable (``chat_probe`` in
+    production, a stub in tests). Returns ``{"verdict", "support"}``
+    with verdict entailed|uncertain|contradicted, or ``{"verdict":
+    "error", ...}`` on any failure — callers must retain the lexical
+    finding on error (fail safe).
+    """
+    ev = (evidence or "")[:_ENTAILMENT_MAX_EVIDENCE]
+    cl = (claim or "")[:_ENTAILMENT_MAX_CLAIM]
+    wd = (word or "").split()[0] if word else ""
+    if not wd or not cl.strip() or not ev.strip():
+        return {"verdict": "error", "support": "",
+                "error": "empty word, claim or evidence"}
+    prompt = _ENTAILMENT_PROMPT.format(word=wd, claim=cl, evidence=ev)
+    try:
+        raw = probe(prompt)
+    except Exception as exc:  # noqa: BLE001
+        return {"verdict": "error", "support": "",
+                "error": f"{type(exc).__name__}: {exc}"[:200]}
+    if not isinstance(raw, dict):
+        return {"verdict": "error", "support": "",
+                "error": "non-dict probe reply"}
+    verdict = str(raw.get("verdict") or "").strip().lower()
+    support = str(raw.get("support") or "")
+    if verdict not in ("entailed", "uncertain", "contradicted"):
+        return {"verdict": "error", "support": "",
+                "error": f"bad verdict {verdict!r}"[:200]}
+    if verdict == "entailed":
+        # An entailed verdict without verifiable verbatim support is
+        # model assertion, not evidence — never discharge on it.
+        # Sentence-level check: every quoted sentence must occur
+        # verbatim in the evidence. Eliding whole duplicated sentences
+        # is allowed (captions repeat); rewording or merging is not.
+        norm_ev = " ".join(ev.split())
+        pieces = [p.strip() for p in re.split(r"(?<=[.!?])\s+",
+                                              " ".join(support.split()))
+                  if p.strip() and len(p.strip()) >= 4]
+        matched = sum(len(p) for p in pieces if p in norm_ev)
+        if not pieces or any(p not in norm_ev for p in pieces) \
+                or matched < _ENTAILMENT_MIN_SUPPORT:
+            return {"verdict": "uncertain", "support": support,
+                    "note": "unverifiable quote; treated as uncertain"}
+    return {"verdict": verdict, "support": support}
+
+
+def _claim_context(body: str, heading: str, name: str) -> str:
+    """The passage under review: heading plus the sentence containing the
+    candidate name with one neighbouring substantive line each side.
+
+    A bare label ("### Assessment and Repair") asserts no proposition on
+    its own; the verifiable claim is the topic in context. Neighbours
+    stay inside the same section so support cannot leak in from
+    unrelated spans. Genuinely unsupported topics still fail: unrelated
+    neighbours verify nothing.
+    """
+    text = re.sub(r"```.*?```", " ", body or "", flags=re.DOTALL)
+    lines = [ln.strip() for ln in text.split("\n")]
+    lines = [ln for ln in lines if ln.strip("#*->0123456789. \t:")]
+    head = (name or "").split()[0].lower() if name else ""
+    at = next((i for i, ln in enumerate(lines)
+               if head and head in ln.lower()), 0)
+    lo, hi = max(0, at - 1), min(len(lines), at + 2)
+    passage = "\n".join(lines[lo:hi]).strip()
+    claim = (f"Flagged word: {(name or '').split()[0]}\n"
+             f"Section heading: {(heading or '').strip()}\n"
+             f"Passage: {passage}").strip()
+    return claim[:_ENTAILMENT_MAX_CLAIM]
+
+
+def adjudicate_entities(findings: list[dict[str, Any]],
+                        article: dict[str, Any],
+                        segs: list[dict[str, Any]],
+                        probe) -> tuple[list[dict[str, Any]],
+                                       list[dict[str, Any]]]:
+    """Verify lexical unattested_entity findings against source evidence.
+
+    Returns ``(kept, discharged)``. Non-entity findings pass through
+    kept untouched; with ``probe`` None everything passes through (the
+    lexical gate behaves exactly as before — used by unit fixtures that
+    pin triage output). Discharged findings carry their rationale for
+    audit; contradictions escalate majors to critical.
+    """
+    kept: list[dict[str, Any]] = []
+    discharged: list[dict[str, Any]] = []
+    by_section = {str(s.get("section_id")): s
+                  for s in (article.get("sections") or [])
+                  if s.get("section_id")}
+    whole = "\n".join(str(r.get("text") or "") for r in segs)
+    for f in findings:
+        if f.get("code") != "unattested_entity" or probe is None:
+            kept.append(f)
+            continue
+        name = str(f.get("name") or "")
+        sec = by_section.get(str(f.get("section_id") or ""))
+        heading = str((sec or {}).get("heading") or "")
+        body = str((sec or {}).get("body") or "")
+        claim = _claim_context(body, heading, name)
+        if sec is not None:
+            evidence = _evidence_text(segs, _spans_of(sec))
+        else:
+            evidence = whole
+        res = probe_claim_support(probe, name, claim, evidence or whole)
+        verdict = res.get("verdict")
+        if verdict == "entailed":
+            d = dict(f)
+            d["adjudication"] = {
+                "verdict": "entailed",
+                "support": res.get("support", ""),
+                "note": "lexical triage discharged by evidence-grounded "
+                        "entailment; rationale recorded, not silent",
+            }
+            discharged.append(d)
+        elif verdict == "contradicted":
+            k = dict(f)
+            k["severity"] = CRITICAL
+            k["adjudication"] = {
+                "verdict": "contradicted",
+                "support": res.get("support", ""),
+                "note": "evidence conflicts with the claim; blocks",
+            }
+            kept.append(k)
+        elif verdict == "uncertain":
+            k = dict(f)
+            k["adjudication"] = {
+                "verdict": "uncertain",
+                "support": res.get("support", ""),
+                "evidence_excerpt": (evidence or whole)[:500],
+                "note": "support genuinely uncertain; needs operator review",
+            }
+            kept.append(k)
+        else:  # error — fail safe, lexical finding stands unchanged
+            kept.append(f)
+    return kept, discharged
 
 
 _GIT_BRANCH_DEF = re.compile(r"\bgit\s+branch\s+([A-Za-z][\w.\-]*)(?![\w.\-])")
@@ -1121,11 +1339,17 @@ def _frontmatter_sections(article: dict[str, Any],
 def validate_typed(decision: dict[str, Any], plan: dict[str, Any],
                    index: dict[str, Any], article: dict[str, Any],
                    segs: list[dict[str, Any]],
-                   duration_s: float) -> dict[str, Any]:
-    """Full type-aware gate. Returns {status, findings}.
+                   duration_s: float,
+                   probe=None) -> dict[str, Any]:
+    """Full type-aware gate. Returns {status, findings, ...}.
 
     ``refused`` when the article has no usable sections; ``needs_review``
-    on any critical finding; otherwise ``ready`` with majors recorded.
+    on any critical finding or any genuinely uncertain semantic
+    verification; otherwise ``ready`` with majors recorded.
+    ``probe`` is an optional ``(claim, evidence) -> dict`` entailment
+    callable; without it entity triage behaves exactly as before.
+    Discharged findings are returned separately for audit, never silently
+    dropped. The validator version trails every record.
     """
     sections = [s for s in (article.get("sections") or [])
                 if str(s.get("body") or "").strip()
@@ -1150,11 +1374,17 @@ def validate_typed(decision: dict[str, Any], plan: dict[str, Any],
     findings.extend(check_procedure_order(scoped))
     findings.extend(check_no_injection_echo(wide))
     findings.extend(check_exact_values(wide, segs, duration_s))
-    findings.extend(check_entities(wide, segs))
+    entity_findings = check_entities(wide, segs)
+    kept, discharged = adjudicate_entities(entity_findings, wide, segs, probe)
+    findings.extend(kept)
     findings.extend(check_temporal(scoped, segs, duration_s))
     findings.extend(check_origin(scoped, decision))
     findings.extend(check_coverage(scoped, index, decision))
     findings.extend(check_reader_integrity(wide))
     criticals = [f for f in findings if f["severity"] == CRITICAL]
-    return {"status": "needs_review" if criticals else "ready",
-            "findings": findings}
+    uncertain = [f for f in findings
+                 if (f.get("adjudication") or {}).get("verdict") == "uncertain"]
+    return {"status": "needs_review" if (criticals or uncertain) else "ready",
+            "findings": findings,
+            "discharged": discharged,
+            "validator_version": VALIDATOR_VERSION}

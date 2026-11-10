@@ -54,13 +54,21 @@ V9 until the flag is enabled after qualification). Stages:
 `src/yt2wiki/v9/validate.py` runs on the same normalized bodies the reader
 sees: slot invariants, executable-block rules (only procedures carry them),
 exact-value support per section span (quantities, prices, names, measures —
-word numerals and unit spellings normalised symmetrically), proper-name
-support (near-miss spellings are critical, plural-only style is major, no
-transcript neighbour is major for operator adjudication), span bounds,
-excluded-span quarantine, coverage accounting, reader-integrity (no internal
-ids, raw dicts or model HTML), procedure step ordering (use-before-define),
-and prompt-injection echo rejection. Only `critical` findings block
-publication; `major` findings are recorded in the report and manifest.
+word numerals, indefinite articles before hour-plus durations ("after a
+year" is one year) and unit spellings normalised symmetrically),
+proper-name support (near-miss spellings are critical, plural-only style
+is major, no transcript neighbour starts as major for operator
+adjudication), span bounds, excluded-span quarantine, coverage
+accounting, reader-integrity (no internal ids, raw dicts or model HTML),
+procedure step ordering (use-before-define), and prompt-injection echo
+rejection. Entity triage is semantic, not lexical (gate v2,
+`VALIDATOR_VERSION = 2`): every `unattested_entity` candidate goes
+through bounded evidence-grounded entailment — entailed-with-verbatim-
+quote discharges with rationale recorded; uncertain stays for human
+review with evidence; contradicted blocks; probe failure retains the
+lexical finding. Only `critical` findings and genuinely uncertain
+semantic verifications block publication; `major` findings are recorded
+in the report and manifest.
 
 Exact domestic values live in `src/yt2wiki/v9/values.py`, which reuses
 `yt2wiki.literals` normalization and adds cooking measures, fractions,

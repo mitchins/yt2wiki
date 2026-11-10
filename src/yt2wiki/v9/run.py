@@ -751,17 +751,25 @@ def run_source(settings, db, service, source_id: str, *,
                     dict(s, body=v9publish._section_body(s, provenance_v, dur_v))
                     for s in sections]
                 norm_article = dict(article, sections=norm_sections)
+                # Semantic verification of entity triage (gate v2): the
+                # probe can only discharge lexically-flagged names against
+                # quoted evidence, never invent support — probe failure
+                # retains the lexical finding (fail safe).
+                _chat = _typed_chat(manager)
                 vres = v9validate.validate_typed(
                     typed["decision"], typed["plan"], typed["index"],
                     norm_article, _load_segs(db, source_id),
-                    float(srow_v["duration_s"] or 0))
+                    float(srow_v["duration_s"] or 0),
+                    probe=v9validate.chat_probe(_chat))
                 validation = vres
                 n_crit = sum(1 for f in vres["findings"]
                              if f["severity"] == "critical")
                 _record(db, v9job, "v9_validate", "done",
                         {"validation": vres["status"],
                          "findings": len(vres["findings"]),
-                         "critical": n_crit},
+                         "critical": n_crit,
+                         "validator_version": vres.get("validator_version"),
+                         "discharged": len(vres.get("discharged") or [])},
                         started=t,
                         artifacts={"validation": vres})
             except Exception as exc:  # noqa: BLE001
@@ -773,6 +781,8 @@ def run_source(settings, db, service, source_id: str, *,
             result["validation"] = {
                 "status": validation["status"],
                 "n_findings": len(validation["findings"]),
+                "validator_version": validation.get("validator_version"),
+                "discharged": validation.get("discharged", [])[:20],
                 "findings": validation["findings"][:20]}
             if validation["status"] in ("needs_review", "refused"):
                 cand_dir = settings.paths.job_stage_dir(v9job, "v9_validate")
