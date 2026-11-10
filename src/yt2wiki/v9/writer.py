@@ -1199,12 +1199,18 @@ def _write_typed_sections(chat, plan_sections, segs, video_title,
                 # shorter sample rather than failing the section. An empty
                 # or otherwise unusable full-schema reply also gets one
                 # minimal-schema retry, keeping the two-attempt contract.
+                # The retry additionally samples at temperature 0.5: at the
+                # near-greedy default the writer can repeat a degenerate
+                # empty-body reply verbatim, while a varied sample escapes
+                # it (Close-01 Dwarkesh probe). The gate still validates.
                 _calls["n"] += 1
                 attempt_text = _texts[min(_calls["n"] - 1, len(_texts) - 1)]
                 if _calls["n"] > 1:
                     user = _user_minimal_for(attempt_text)
+                    temp = 0.5
                 else:
                     user = _user_for(attempt_text)
+                    temp = 0.15
                 msg = user + ("\n\n" + extra if extra else "")
                 # Dense multi-window spans need room: 1600 tokens
                 # truncated longer sections into unusable stubs. Compact
@@ -1213,7 +1219,7 @@ def _write_typed_sections(chat, plan_sections, segs, video_title,
                 return chat(
                     [{"role": "system", "content": "Return JSON only, compact (minimal whitespace)."},
                      {"role": "user", "content": msg}],
-                    max_new_tokens=2400, temperature=0.15)
+                    max_new_tokens=2400, temperature=temp)
 
             out = _run_attempt(_section_call, validate=validate_section_response,
                                editorial=True, section_id=p["section_id"],

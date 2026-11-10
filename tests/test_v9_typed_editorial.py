@@ -643,8 +643,11 @@ def test_typed_section_retry_uses_minimal_schema_after_empty_body():
                       "t_start": 0.0, "t_end": 60.0, "window_ids": ["w-000"]}]
     seen = []
 
+    temps = []
+
     def chat(messages, **kw):
         seen.append(messages[-1]["content"])
+        temps.append(kw.get("temperature"))
         if len(seen) == 1:
             return {"heading": "Positions", "body": "", "key_points": [],
                     "warnings": []}
@@ -658,6 +661,8 @@ def test_typed_section_retry_uses_minimal_schema_after_empty_body():
     assert '"key_points"' in seen[0]
     assert '"key_points"' not in seen[1]
     assert '"body"' in seen[1]
+    # The bounded retry varies sampling to escape degenerate repeats.
+    assert temps == [0.15, 0.5], temps
     assert sections[0]["section_id"] == "s"
     assert len(sections[0]["body"]) >= 40
     assert represented == [[[0.0, 60.0]]]
