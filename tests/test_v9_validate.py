@@ -581,3 +581,22 @@ def test_compound_spelling_is_attested():
     article = _article(bodies=["Combine.", "Use SteamOS daily.", "Done."])
     res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
     assert not any("SteamOS" in f["detail"] for f in res["findings"]), res["findings"]
+
+
+def test_bare_and_comma_integers_are_gated():
+    segs = _segs(["About fifty people came."])
+    article = _article(bodies=["Combine.", "Fifty people came.", "Done."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert res["status"] == "ready", res["findings"]
+    bad = _article(bodies=["Combine.", "Three hundred people came.", "Done."])
+    res = V.validate_typed(_decision(), _plan(), _index(), bad, segs, 20.0)
+    assert any(f["code"] == "unsupported_exact_value" for f in res["findings"])
+
+
+def test_majors_are_recorded_not_silent():
+    segs = _segs(["Bake the loaf."])
+    article = _article(bodies=["Combine.", "Mix well.",
+                               "Knead 12.5-13.0 well."])
+    res = V.validate_typed(_decision(), _plan(), _index(), article, segs, 20.0)
+    assert res["status"] == "ready"
+    assert any(f["severity"] == "major" for f in res["findings"])

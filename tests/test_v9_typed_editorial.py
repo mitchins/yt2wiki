@@ -603,3 +603,31 @@ def test_window_ids_scale_past_999():
 
     assert canonical_window_id(ids[-1]) == ids[-1]
     assert canonical_window_id("w-1000x") is None or True
+
+
+def test_chunked_plan_covers_every_window_exactly_once():
+    segs = _segs(40, step=150.0)
+    index = S.build_index(segs, 6000.0, target_windows=48)
+    decision = {"template_id": "review", "index_hash": index["index_hash"]}
+    seen_ids = []
+    all_ids = [w["window_id"] for w in index["windows"]]
+
+    def chat(messages, **kw):
+        import re
+        ids = re.findall(r"\[(w-\d+) \d", messages[-1]["content"])
+        seen_ids.extend(ids)
+        return {"template_id": "review",
+                "sections": [{"section_id": "s", "slot": "subject",
+                              "heading": "H", "window_ids": [ids[0]]},
+                             {"section_id": "a", "slot": "assessment",
+                              "heading": "A", "window_ids": ids[1:]}],
+                "coverage": {"included_window_ids": ids,
+                             "excluded_window_ids": [],
+                             "unassigned_substantive_window_ids": []}}
+
+    plan = D.plan_article(chat, decision, index)
+    covered = [w for s in plan["sections"] for w in s.get("window_ids", [])]
+    assert sorted(covered) == sorted(all_ids)
+    for remap in plan["coverage"].get("auto_split", []):
+        assert remap["from"].startswith("c")
+        assert all(t.startswith("c") for t in remap["to"])
