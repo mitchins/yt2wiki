@@ -442,6 +442,30 @@ def render_reader(paths, article_id: str, markdown: str, *, numbered: bool = Fal
             "n_images": body_html.count('<figure class="frame"')}
 
 
+def factcheck_context(db, article_id: str) -> dict[str, Any] | None:
+    """Independent fact-check overlay for the reader (None when absent/stale).
+
+    Inert when no current overlay exists: returns None and the template
+    renders nothing, keeping legacy output byte-identical. A stored
+    overlay bound to an older article revision is historical only and is
+    never presented as current.
+    """
+    from markupsafe import Markup
+
+    from ..factcheck import panel as _panel
+    from ..factcheck import store as _store
+    overlay = _store.current_overlay(db, article_id)
+    if overlay is None:
+        return None
+    # Pre-sanitised HTML boundary: render_panel_html html-escapes all
+    # overlay text (quotes, reasons, excerpts) and only adds our own
+    # markup; Markup marks that contract, autoescape stays on.
+    return {"panel_html": Markup(_panel.render_panel_html(overlay)),
+            "overlay_id": overlay.overlay_id,
+            "run_status": overlay.run_status,
+            "checked_at": overlay.checked_at}
+
+
 def article_context(db, paths, article_id: str) -> dict[str, Any] | None:
     row = db.query_one("SELECT * FROM articles WHERE article_id=?", (article_id,))
     if row is None:
@@ -487,6 +511,7 @@ def article_context(db, paths, article_id: str) -> dict[str, Any] | None:
                                 frame_ok=lambda fid: _frame_exists(db, paths, article["source_id"], fid)),
         "others": others,
         "revision_count": revisions,
+        "factcheck": factcheck_context(db, article_id),
     }
 
 

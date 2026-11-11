@@ -85,11 +85,22 @@ currency and comma-thousands. The shared extractor is untouched.
 
 ## Qualification status
 
-DRAFT stack, unmerged: PR A (contracts + reader), PR B (editorial pass),
-PR C (validation + matrix). Ten-video qualification corpus
+MERGED and qualified on `main`: PR #30 (contracts + reader), PR #31
+(editorial pass), PR #32 (validation + matrix), PR #33 (`--typed`
+operator entry, default off), PR #34 (gate v2 semantic verification,
+`VALIDATOR_VERSION = 2`). Ten-video qualification corpus
 (`data/qual-shapes-01`, private): five genres, same cached sources and
 pinned model for baseline and candidate. Full per-case ledger in the
 PR C report.
+
+Canary-01 (private, `data/canary-01`, CLOSED BY OPERATOR at 7 of 10
+attempted; first-pass records frozen): 5 articles approved through
+operator gates (3 intervention-free), 2 faithful-but-unverifiable
+candidates correctly held (one exact-value fabrication, one
+verbatim-literalism false-positive pair later discharged by gate v2
+replays). Disposition: typed contracts and autonomous classification
+COMPLETE; source-fidelity gate v2 QUALIFIED; human-reviewed typed
+publishing READY; unattended publishing NOT QUALIFIED.
 
 - Published with zero critical findings: DART `report` (v10,
   verification-fix revision — see below), Vox `report`, Hermes
