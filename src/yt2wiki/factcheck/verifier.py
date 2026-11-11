@@ -92,12 +92,20 @@ def _invoke_bounded(chat: ChatFn, messages: list[dict[str, str]],
         except TypeError:
             return chat(messages)
 
-    with _futures.ThreadPoolExecutor(max_workers=1) as pool:
+    pool = _futures.ThreadPoolExecutor(max_workers=1)
+    try:
         future = pool.submit(_call)
         try:
             return future.result(timeout=timeout_s)
         except _futures.TimeoutError as exc:
+            # Do NOT join the hung worker: shutdown(wait=False) abandons it
+            # so the caller actually receives the timeout now. One thread
+            # may linger until the backend itself returns (documented cost
+            # of bounding an uncooperative call).
+            pool.shutdown(wait=False, cancel_futures=True)
             raise TimeoutError(f"verifier call exceeded {timeout_s}s") from exc
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def verifier_from_chat(chat: ChatFn, *,

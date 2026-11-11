@@ -127,7 +127,8 @@ def _gated_verifier(budgets: RunBudgets, report: RunReport):
 
 
 def _assess_one(provider: EvidenceProvider, record: ClaimRecord,
-                budgets: RunBudgets, report: RunReport) -> ClaimRecord:
+                budgets: RunBudgets, report: RunReport,
+                verifier=None) -> ClaimRecord:
     verified: list[EvidenceRecord] = []
     seen_urls: set[str] = set()
     # Origin collapse: byte-identical fetched text is the same report, not
@@ -189,9 +190,8 @@ def _assess_one(provider: EvidenceProvider, record: ClaimRecord,
                 break
         if len(verified) >= budgets.pages_per_claim:
             break
-    gated = _gated_verifier(budgets, report)
-    record = assess_claim(record, verified, verifier=gated)
-    if getattr(gated, "state", {}).get("exhausted"):
+    record = assess_claim(record, verified, verifier=verifier)
+    if getattr(verifier, "state", {}).get("exhausted"):
         record.reason += " (verifier budget exhausted; remaining passages unassessed)"
         report.verifier_exhausted = True
     if budgets.verifier is None and verified:
@@ -310,6 +310,8 @@ def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
     candidates = extract_candidates(markdown)
     selected, skipped = select_claims(candidates, budgets.max_claims)
     report = RunReport(overlay=None)  # type: ignore[arg-type]
+    # One gate per run: the verifier budget is run-scoped, not per-claim.
+    gated = _gated_verifier(budgets, report)
     assessed: list[ClaimRecord] = []
     # Non-checkable kinds (opinion, normative, preference, prediction,
     # satire) are recorded as not_applicable verdicts — never hidden in
@@ -333,7 +335,8 @@ def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
             claim_kind=cand.claim_kind,
             attribution=cand.attribution,
             video_provenance=list(cand.video_provenance))
-        assessed.append(_assess_one(provider, record, budgets, report))
+        assessed.append(_assess_one(provider, record, budgets, report,
+                                    verifier=gated))
 
     # checked_claims counts selected material claims only: not_applicable
     # records and retrieval failures are reported separately, never folded

@@ -365,15 +365,66 @@ def test_verifier_budget_exhaustion_yields_partial(tmp_path):
 
 
 def test_verifier_timeout_is_not_a_verdict():
+    import time as _t
+    started = _t.monotonic()
+
     def _slow(messages):
-        import time as _t
-        _t.sleep(5)
+        _t.sleep(30)
         return "{}"
-    verify = vf.verifier_from_chat(_slow, timeout_s=0.2)
-    rel, group, reason = verify("some claim here today", "a sufficiently long excerpt here",
-                                "https://example.com/x")
+    verify = vf.verifier_from_chat(_slow, timeout_s=0.5)
+    rel, group, reason = verify("some claim here today", "a sufficiently long excerpt here for gates",
+           "https://example.com/x")
+    elapsed = _t.monotonic() - started
     assert rel == "context_only"
     assert "TimeoutError" in reason
+    # The timeout is actually enforced: the caller is released promptly,
+    # not joined on the hung worker.
+    assert elapsed < 10
+
+
+def test_verifier_budget_is_run_scoped(tmp_path):
+    """40-call budget (or a tiny test one) spans the whole run: with two
+    two-evidence claims and a budget of 3, exactly 3 calls happen."""
+    from tests.fixtures import in_memory_db
+    _, db = in_memory_db(tmp_path)
+    md = ("# T\n\n## Facts\n\nThe bridge span measures 380 meters in total "
+          "length across the river valley here today.\n\n"
+          "Torque each bolt to 42 newton meters before testing today here.\n")
+    _article(db, "art9-fc-scope", md)
+
+    def _chat(messages):
+        import json as _json
+        return _json.dumps({"relationship": "supports", "independence_group": "",
+                            "reason": "Passage states it."})
+    verify = vf.verifier_from_chat(_chat)
+    provider = _P(
+        hits={
+            "The bridge span measures 380 meters in total length across the river valley here today.": [
+                ev.SearchHit(url="https://a-one.example/1", title="A"),
+                ev.SearchHit(url="https://b-two.example/2", title="B")],
+            "Torque each bolt to 42 newton meters before testing today here.": [
+                ev.SearchHit(url="https://c-three.example/3", title="C"),
+                ev.SearchHit(url="https://d-four.example/4", title="D")],
+        },
+        pages={
+            "https://a-one.example/1": ev.FetchedPage(
+                url="https://a-one.example/1",
+                text="Report one: the bridge span measures 380 meters in total length across the river valley here today, confirmed."),
+            "https://b-two.example/2": ev.FetchedPage(
+                url="https://b-two.example/2",
+                text="Report two: the bridge span measures 380 meters in total length across the river valley here today, verified."),
+            "https://c-three.example/3": ev.FetchedPage(
+                url="https://c-three.example/3",
+                text="Manual three: torque each bolt to 42 newton meters before testing today here, then verify."),
+            "https://d-four.example/4": ev.FetchedPage(
+                url="https://d-four.example/4",
+                text="Manual four: torque each bolt to 42 newton meters before testing today here, then verify again."),
+        })
+    report = runmod.run_factcheck(db, "art9-fc-scope", provider=provider,
+                                  verifier=verify, max_verifier_calls=3)
+    assert report.verifier_calls == 3
+    assert report.verifier_exhausted is True
+    assert report.overlay.run_status == "partial"
 
 
 def test_verifier_records_limits_and_backend_caps_tokens():
