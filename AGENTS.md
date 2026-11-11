@@ -41,7 +41,7 @@ export UV_CACHE_DIR=$PWD/.cache/uv TMPDIR=$PWD/.cache/tmp HF_HOME=$PWD/.cache/hu
 uv pip install --python .venv/bin/python --index-url https://download.pytorch.org/whl/cu130 torch==2.11.0
 uv pip install --python .venv/bin/python "faster-whisper>=1.1" "transformers>=4.57" \
     "accelerate>=1.0" "bitsandbytes>=0.45" "av>=14" yt-dlp "fastapi>=0.115" \
-    "uvicorn[standard]" jinja2 python-multipart httpx pyyaml pytest pytest-asyncio psutil
+    "uvicorn[standard]" jinja2 python-multipart httpx pyyaml pytest pytest-asyncio psutil ddgs
 ```
 
 `HF_HOME` must live on `/usbpool` — the root filesystem is full.  The same

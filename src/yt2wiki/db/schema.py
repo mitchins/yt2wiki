@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Additive v4 delta: immutable per-publication generation records. Applied by
 # _migrate() to databases created at v3; fresh databases get it from SCHEMA.
@@ -285,6 +285,25 @@ CREATE TABLE IF NOT EXISTS generations (
 );
 CREATE INDEX IF NOT EXISTS generations_article ON generations(article_id, created_at);
 
+-- ------------------------------------------------------------ factcheck ----
+-- v5: independent fact-check overlays (see MIGRATION_V5). Advisory only:
+-- rows bind to an exact article revision and never alter articles.
+CREATE TABLE IF NOT EXISTS factcheck_overlays (
+    overlay_id               TEXT PRIMARY KEY,
+    article_id               TEXT NOT NULL REFERENCES articles(article_id) ON DELETE CASCADE,
+    article_revision_sha256  TEXT NOT NULL,
+    article_type             TEXT,
+    schema_version           INTEGER NOT NULL DEFAULT 1,
+    checked_at               TEXT NOT NULL,
+    verifier_json            TEXT NOT NULL DEFAULT '{}',
+    run_status               TEXT NOT NULL DEFAULT 'failed',
+    coverage_json            TEXT NOT NULL DEFAULT '{}',
+    claims_json              TEXT NOT NULL DEFAULT '[]',
+    created_at               REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS factcheck_overlays_article
+    ON factcheck_overlays(article_id, created_at);
+
 -- ------------------------------------------------------------ verification --
 CREATE TABLE IF NOT EXISTS findings (
     finding_id  TEXT PRIMARY KEY,
@@ -436,6 +455,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
     if current < 4 and current > 0:
         conn.executescript(MIGRATION_V4)
+    if current < 5 and current > 0:
+        from ..factcheck.store import MIGRATION_V5
+        conn.executescript(MIGRATION_V5)
     # The generation pointer is ensured on every supported open, not just
     # during the 3→4 upgrade: a stamp alone never proves the column exists
     # (a library can reach stamp 4 through a path that skipped the ALTER).

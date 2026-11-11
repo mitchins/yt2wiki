@@ -999,8 +999,20 @@ def _save_article_markdown(settings, db, article_id: str, markdown: str, note: s
     import zipfile as _zipfile
     assets = settings.paths.article_assets(article_id)
     zp = settings.paths.article_dir(article_id) / "article.zip"
+    # Fact-check sidecar: included only when a current overlay binds to
+    # this exact revision. A manual edit invalidates the overlay by hash,
+    # so a stale overlay is never shipped as current. The sidecar is
+    # regenerated from the current overlay object — a stale file on disk
+    # is replaced or removed, never trusted. No overlay in the default
+    # path: legacy exports stay byte-identical.
+    from ..factcheck import store as _fcstore
+    _fc_overlay = _fcstore.current_overlay(db, article_id)
+    _fcstore.ship_sidecar_in_zip(settings.paths, article_id, _fc_overlay)
+    _fc_sidecar = settings.paths.article_dir(article_id) / "factcheck.md"
     with _zipfile.ZipFile(zp, "w", _zipfile.ZIP_DEFLATED) as zf:
         zf.write(settings.paths.article_markdown(article_id), "article.md")
+        if _fc_overlay is not None and _fc_sidecar.is_file():
+            zf.write(_fc_sidecar, "factcheck.md")
         for fid in _image_order(markdown):
             for ext in _IMAGE_EXTS:
                 p = assets / f"{fid}{ext}"

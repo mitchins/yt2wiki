@@ -61,6 +61,11 @@
         {# S5247: view.body_html is pre-sanitised Markup from views.render_reader (html.escape-sanitized in article.markdown_to_html) — autoescape stays on, no |safe bypass. #}
         <div class="a-body">{{ view.body_html }}</div>
 
+        {% if factcheck %}
+        {# Pre-sanitised Markup from views.factcheck_context (html.escape-sanitized) — autoescape stays on, no |safe bypass. Absent when no current overlay exists. #}
+        <div class="a-factcheck">{{ factcheck.panel_html }}</div>
+        {% endif %}
+
         <section class="about no-print" aria-labelledby="about-h">
           <h2 id="about-h">About this article</h2>
           <p>Written from the video’s narration; every image is an original frame. Timestamps open the source at that moment.</p>
