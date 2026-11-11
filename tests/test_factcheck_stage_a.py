@@ -92,8 +92,8 @@ def test_overlay_validation_rejects_bad_records():
         article_revision_sha256="0" * 64, article_type="report",
         checked_at="2026-01-01T00:00:00+00:00",
         verifier={}, run_status="complete",
-        coverage={"eligible_claims": 0, "checked_claims": 0, "skipped_claims": [],
-                  "by_assessment": {}},
+        coverage={"eligible_claims": 0, "checked_claims": 0, "retrieved_claims": 0,
+                  "skipped_claims": [], "by_assessment": {}},
         claims=[],
     )
     assert overlay.validate() == []
@@ -104,7 +104,7 @@ def test_overlay_validation_rejects_bad_records():
     assert overlay.validate()
     overlay.article_revision_sha256 = "0" * 64
     overlay.coverage = {"eligible_claims": 0, "checked_claims": 0,
-                        "skipped_claims": []}
+                        "retrieved_claims": 0, "skipped_claims": []}
     assert overlay.validate()
     overlay.coverage["by_assessment"] = {"made_up": 1}
     assert overlay.validate()

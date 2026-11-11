@@ -377,9 +377,22 @@ def _cmd_factcheck(args) -> int:
         print(f"overlay  : {overlay.overlay_id}")
         print(f"revision : {overlay.article_revision_sha256[:12]}")
         print(f"checked  : {overlay.checked_at} · run {overlay.run_status}")
+        mode = overlay.verifier.get("mode", "collection")
+        print(f"mode     : {mode} "
+              f"(evidence collection only — no factual verdicts)"
+              if mode != "assessed" else
+              f"mode     : assessed "
+              f"(role={overlay.verifier.get('role')} "
+              f"model={overlay.verifier.get('model')})")
         cov = overlay.coverage
+        skipped = cov.get("skipped_claims", [])
+        n_skipped = len(skipped) if isinstance(skipped, list) else skipped
         print(f"coverage : {cov.get('checked_claims')} of "
-              f"{cov.get('eligible_claims')} material claims checked")
+              f"{cov.get('eligible_claims')} material claims selected; "
+              f"{cov.get('retrieved_claims', 0)} with retrieved passages; "
+              f"{n_skipped} skipped")
+        for verdict, count in (cov.get("by_assessment") or {}).items():
+            print(f"  {verdict}: {count}")
         for claim in overlay.claims:
             print(f"  [{claim.assessment}] {claim.quote[:100]}")
         return 0
@@ -405,6 +418,7 @@ def _cmd_factcheck(args) -> int:
         from .factcheck import evidence as _ev
         provider = _ev.MockProvider()
     verifier = None
+    verifier_role = verifier_model = None
     if args.verifier == "backend":
         from .backends.loader import ModelManager
         from .factcheck import verifier as _vf
@@ -413,8 +427,15 @@ def _cmd_factcheck(args) -> int:
         try:
             loaded = manager.acquire_all(args.role)
             backend = loaded[args.role]
+            spec = getattr(backend, "spec", None)
+            verifier_role = args.role
+            verifier_model = (getattr(spec, "key", None)
+                              or getattr(backend, "model_key", None)
+                              or type(backend).__name__)
             verifier = _vf.verifier_from_chat(
-                lambda messages: backend.chat(messages))  # noqa: E731
+                lambda messages: backend.chat(  # noqa: E731
+                    messages, max_new_tokens=256),
+                max_tokens=256, timeout_s=90.0)
         except Exception as exc:  # noqa: BLE001
             print(f"backend verifier unavailable: {exc}", file=sys.stderr)
             return 2
@@ -422,7 +443,8 @@ def _cmd_factcheck(args) -> int:
             report = _run.run_factcheck(
                 db, args.article_id, provider=provider,
                 max_claims=max_claims, verifier=verifier,
-                primary_domains=primaries)
+                primary_domains=primaries,
+                verifier_role=verifier_role, verifier_model=verifier_model)
         finally:
             manager.release_all(loaded)
     else:
@@ -438,8 +460,23 @@ def _cmd_factcheck(args) -> int:
     overlay = report.overlay
     print(f"overlay  : {overlay.overlay_id} ({overlay.run_status})")
     print(f"revision : {overlay.article_revision_sha256[:12]}")
-    print(f"claims   : {overlay.coverage['checked_claims']} checked / "
-          f"{overlay.coverage['eligible_claims']} eligible")
+    mode = overlay.verifier.get("mode", "collection")
+    if mode == "assessed":
+        print(f"mode     : assessed (role={verifier_role} model={verifier_model}; "
+              f"{report.verifier_calls} verifier calls, "
+              f"budget {report.verifier_budget})")
+    else:
+        print("mode     : evidence collection only — passages gathered, "
+              "no categorical factual verdicts rendered")
+    cov = overlay.coverage
+    skipped = cov.get("skipped_claims", [])
+    n_skipped = len(skipped) if isinstance(skipped, list) else skipped
+    print(f"claims   : {cov['checked_claims']} selected / "
+          f"{cov['eligible_claims']} eligible; "
+          f"{cov.get('retrieved_claims', 0)} with retrieved passages; "
+          f"{n_skipped} skipped")
+    for verdict, count in (cov.get("by_assessment") or {}).items():
+        print(f"  {verdict}: {count}")
     print(f"retrieval: {report.searches} searches, {report.fetches} fetches, "
           f"{report.fetch_bytes} bytes")
     for claim in overlay.claims:

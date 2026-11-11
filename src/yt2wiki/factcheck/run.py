@@ -43,6 +43,7 @@ from .evidence import (
     verify_excerpt,
 )
 
+DEFAULT_MAX_VERIFIER_CALLS = 40
 
 @dataclass
 class RunBudgets:
@@ -50,7 +51,8 @@ class RunBudgets:
     queries_per_claim: int = DEFAULT_QUERIES_PER_CLAIM
     pages_per_claim: int = DEFAULT_PAGES_PER_CLAIM
     fetch_bytes: int = DEFAULT_FETCH_BYTES
-    verifier: object = None  # optional VerifierFn; None = deterministic combiner only
+    verifier: object = None  # optional VerifierFn; None = collection only
+    max_verifier_calls: int = DEFAULT_MAX_VERIFIER_CALLS
     primary_domains: tuple[str, ...] = ()  # issuer/official domains, operator-set
 
 
@@ -61,6 +63,10 @@ class RunReport:
     fetches: int = 0
     fetch_bytes: int = 0
     failures: list[str] = field(default_factory=list)
+    verifier_calls: int = 0
+    verifier_budget: int | None = None
+    verifier_exhausted: bool = False
+    verifier_errors: int = 0
 
 
 def _utcnow() -> str:
@@ -93,10 +99,42 @@ def _claim_queries(quote: str, limit: int) -> list[str]:
     return seen[:limit]
 
 
+def _gated_verifier(budgets: RunBudgets, report: RunReport):
+    """Wrap the verifier with the finite per-run call budget.
+
+    Exhaustion leaves remaining passages unassessed (context_only) and
+    flags the run partial — never silently, never with invented verdicts.
+    """
+    base = budgets.verifier
+    if base is None:
+        return None
+    state = {"calls": 0, "exhausted": False}
+
+    def gated(claim: str, excerpt: str, url: str):
+        if state["calls"] >= budgets.max_verifier_calls:
+            state["exhausted"] = True
+            return ("context_only", "", "verifier budget exhausted")
+        state["calls"] += 1
+        out = base(claim, excerpt, url)
+        report.verifier_calls = state["calls"]
+        if out[2].startswith("verifier call failed") or out[2] == (
+                "verifier output rejected by schema gate"):
+            report.verifier_errors += 1
+        return out
+
+    gated.state = state  # type: ignore[attr-defined]
+    return gated
+
+
 def _assess_one(provider: EvidenceProvider, record: ClaimRecord,
                 budgets: RunBudgets, report: RunReport) -> ClaimRecord:
     verified: list[EvidenceRecord] = []
     seen_urls: set[str] = set()
+    # Origin collapse: byte-identical fetched text is the same report, not
+    # two independent corroborators. The first page's group stands; exact
+    # copies merge into it. (Near-duplicate rewrites are not detectable
+    # this cheaply — recorded residual, still needs a verifier's judgment.)
+    origin_group: dict[str, str] = {}
     failed = False
     for query in _claim_queries(record.quote, budgets.queries_per_claim):
         try:
@@ -133,6 +171,10 @@ def _assess_one(provider: EvidenceProvider, record: ClaimRecord,
                 continue
             grouper = getattr(provider, "independence_group", None)
             group = grouper(page.url) if callable(grouper) else ""
+            if page.content_hash and page.content_hash in origin_group:
+                group = origin_group[page.content_hash]
+            elif page.content_hash:
+                origin_group[page.content_hash] = group
             # Collection only: a verbatim excerpt proves the quotation is
             # authentic, not the relationship. Only a verifier may propose
             # supports/contradicts/qualifies, and the combiner still disposes.
@@ -147,7 +189,11 @@ def _assess_one(provider: EvidenceProvider, record: ClaimRecord,
                 break
         if len(verified) >= budgets.pages_per_claim:
             break
-    record = assess_claim(record, verified, verifier=budgets.verifier)
+    gated = _gated_verifier(budgets, report)
+    record = assess_claim(record, verified, verifier=gated)
+    if getattr(gated, "state", {}).get("exhausted"):
+        record.reason += " (verifier budget exhausted; remaining passages unassessed)"
+        report.verifier_exhausted = True
     if budgets.verifier is None and verified:
         record.reason += (" Passages were collected but no verifier assessed "
                           "their relationship to the claim: keyword overlap "
@@ -234,10 +280,15 @@ def _relevant_passage(page_text: str, quote: str) -> str | None:
 def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
                   max_claims: int = DEFAULT_MAX_CLAIMS,
                   verifier=None,
-                  primary_domains: tuple[str, ...] = ()) -> RunReport:
+                  primary_domains: tuple[str, ...] = (),
+                  verifier_role: str | None = None,
+                  verifier_model: str | None = None,
+                  max_verifier_calls: int = DEFAULT_MAX_VERIFIER_CALLS,
+                  ) -> RunReport:
     """Explicit fact-check run: read canonical revision, persist new overlay."""
     budgets = RunBudgets(max_claims=max_claims, verifier=verifier,
-                         primary_domains=primary_domains)
+                         primary_domains=primary_domains,
+                         max_verifier_calls=max_verifier_calls)
     grouper = getattr(provider, "independence_group", None)
     if callable(grouper):
         try:
@@ -282,14 +333,21 @@ def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
 
     checked = len(assessed)
     by_assessment: dict[str, int] = {}
+    retrieved = 0
     for c in assessed:
         by_assessment[c.assessment] = by_assessment.get(c.assessment, 0) + 1
+        if c.evidence:
+            retrieved += 1
     failed_claims = sum(1 for c in assessed
                         if c.assessment in ("not_checked", "insufficient_evidence")
                         and "retrieval partially failed" in c.reason)
+    report.verifier_budget = (budgets.max_verifier_calls
+                              if budgets.verifier is not None else None)
+    exhausted = report.verifier_exhausted
     if checked == 0 and skipped:
         status = "unavailable"
-    elif failed_claims or any("retrieval partially failed" in c.reason for c in assessed):
+    elif failed_claims or exhausted or report.verifier_errors > 0 or any(
+            "retrieval partially failed" in c.reason for c in assessed):
         status = "partial"
     else:
         status = "complete"
@@ -301,11 +359,19 @@ def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
         article_revision_sha256=revision,
         article_type=row["article_type"],
         checked_at=_utcnow(),
-        verifier={"provider": getattr(provider, "name", "unknown"),
-                  "model": None, "policy_version": 1},
+        verifier={
+            "provider": getattr(provider, "name", "unknown"),
+            "mode": "assessed" if verifier is not None else "collection",
+            "role": verifier_role, "model": verifier_model,
+            "policy_version": 1,
+            **(getattr(verifier, "limits", None) or {}),
+            **({"max_verifier_calls": budgets.max_verifier_calls}
+               if verifier is not None else {}),
+        },
         run_status=status,
         coverage={"eligible_claims": len(candidates),
                   "checked_claims": checked,
+                  "retrieved_claims": retrieved,
                   "skipped_claims": skipped,
                   "by_assessment": by_assessment},
         claims=assessed,

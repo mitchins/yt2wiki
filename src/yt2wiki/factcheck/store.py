@@ -106,7 +106,7 @@ def _row_to_overlay(row) -> OverlayRecord:
         verifier=json.loads(row["verifier_json"] or "{}"),
         run_status=row["run_status"],
         coverage={
-            "eligible_claims": 0, "checked_claims": 0,
+            "eligible_claims": 0, "checked_claims": 0, "retrieved_claims": 0,
             "skipped_claims": [], "by_assessment": {},
             **json.loads(row["coverage_json"] or "{}"),
         },

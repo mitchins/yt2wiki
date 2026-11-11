@@ -147,8 +147,8 @@ class OverlayRecord:
             errors.append("article_revision_sha256 must be a sha256 hex digest")
         if self.run_status not in RUN_STATUSES:
             errors.append(f"run_status must be one of {RUN_STATUSES}")
-        for key in ("eligible_claims", "checked_claims", "skipped_claims",
-                    "by_assessment"):
+        for key in ("eligible_claims", "checked_claims", "retrieved_claims",
+                    "skipped_claims", "by_assessment"):
             if key not in self.coverage:
                 errors.append(f"coverage.{key} is required")
         by_assessment = self.coverage.get("by_assessment", {})

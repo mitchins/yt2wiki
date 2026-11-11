@@ -13,6 +13,7 @@ import contextlib
 import hashlib
 import json
 import socket
+import threading
 import time
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -29,6 +30,13 @@ _TWO_LEVEL_SUFFIXES = frozenset({
 
 _USER_AGENT = "yt2wiki-factcheck/1 (operator-invoked research; local use only)"
 _SEARCH_PAUSE_S = 1.5
+
+# Evidence fetches serialize process-wide. The DNS pin below swaps a
+# process-global resolver entry for the duration of one request, so two
+# concurrent fetches to different hosts could otherwise steer each
+# other. Runs are sequential anyway; the lock makes the constraint
+# explicit and keeps the web worker pool safe.
+_FETCH_LOCK = threading.Lock()
 
 
 def registrable_domain(host: str) -> str:
@@ -250,6 +258,14 @@ class DDGSProvider:
         import httpx
         policy = self.fetch_policy
         current = url
+        # One fetch (whole redirect chain) holds the process fetch lock:
+        # the DNS pin below is process-global by necessity (httpx resolves
+        # internally), so concurrent chains must not interleave.
+        with _FETCH_LOCK:
+            return self._fetch_chain(httpx, policy, current)
+
+    def _fetch_chain(self, httpx, policy: FetchPolicy, url: str) -> FetchedPage:
+        current = url
         for _ in range(policy.max_redirects + 1):
             if safe_url(current) is None:
                 raise SearchFailure("unsupported_url",
@@ -263,8 +279,12 @@ class DDGSProvider:
             try:
                 # Nested (not parenthesised): the pin must wrap the client.
                 with _pinned_dns(host, port, ips):  # noqa: SIM117
+                    # trust_env=False: environment proxies (HTTP_PROXY and
+                    # friends) must never steer or observe evidence traffic;
+                    # a proxy would bypass the resolve-and-pin decision.
                     with httpx.Client(
                             follow_redirects=False, timeout=policy.timeout_s,
+                            trust_env=False,
                             headers={"User-Agent": _USER_AGENT}) as client, \
                             client.stream("GET", current) as resp:
                         if resp.status_code in (301, 302, 303, 307, 308):

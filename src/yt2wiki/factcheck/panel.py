@@ -57,19 +57,35 @@ def _claim_meta_html(claim) -> str:
     return f'<p class="fc-meta">{"; ".join(bits)}</p>'
 
 
+def _collection_banner(overlay: OverlayRecord) -> str:
+    """True when the run collected evidence without semantic assessment."""
+    if overlay.verifier.get("mode", "collection") == "assessed":
+        return ""
+    return ("No semantic assessment was run (no verifier): passages below "
+            "were collected as authentic quotations of their sources. "
+            "Collection is not fact-checking — no factual verdict is rendered.")
+
+
 def render_panel_html(overlay: OverlayRecord) -> str:
     """Accessible overlay panel HTML for the shared reader."""
     checked = overlay.coverage.get("checked_claims", len(overlay.claims))
     eligible = overlay.coverage.get("eligible_claims", checked)
+    retrieved = overlay.coverage.get("retrieved_claims", 0)
+    skipped = overlay.coverage.get("skipped_claims", [])
+    n_skipped = len(skipped) if isinstance(skipped, list) else int(skipped or 0)
     status = _STATUS_LABEL.get(overlay.run_status, overlay.run_status)
     date = _esc(overlay.checked_at[:10] if overlay.checked_at else "unknown date")
+    banner = _collection_banner(overlay)
     parts = [
         '<section class="factcheck-panel" aria-label="Independent fact-check">',
         "<h2>Independent fact-check</h2>",
         f"<p>External corroboration checked {date}: "
-        f"{checked} of {eligible} material claims checked. "
+        f"{checked} of {eligible} material claims checked "
+        f"({retrieved} with retrieved passages, {n_skipped} skipped). "
         f"Run {status}.</p>",
     ]
+    if banner:
+        parts.append(f"<p><strong>{_esc(banner)}</strong></p>")
     breakdown = _breakdown_line(overlay)
     if breakdown:
         parts.append(f"<p>{_esc(breakdown)}</p>")
@@ -148,6 +164,18 @@ def render_factcheck_md(overlay: OverlayRecord) -> str:
         "citations, or its publication status. Unchecked text was not verified.",
         "",
     ]
+    banner = _collection_banner(overlay)
+    if banner:
+        lines.append(f"NOTE: {banner}")
+        lines.append("")
+    else:
+        verifier = overlay.verifier
+        lines.append(f"Verifier: assessed (role={verifier.get('role')} "
+                     f"model={verifier.get('model')} "
+                     f"policy v{verifier.get('policy_version')}; "
+                     f"output cap {verifier.get('max_tokens')} tokens, "
+                     f"call timeout {verifier.get('timeout_s')}s)")
+        lines.append("")
     breakdown = _breakdown_line(overlay)
     if breakdown:
         lines.append(f"Verdicts: {breakdown}")
