@@ -9,6 +9,7 @@ never verdicts.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import socket
@@ -98,21 +99,58 @@ class FetchPolicy:
     max_redirects: int = 3
 
 
-def _host_ips_public(host: str, port: int) -> bool:
-    """True when every resolved address is a public unicast address."""
+def _public_ip_ok(ip_str: str) -> bool:
+    """True for a public unicast literal (no private/loopback/link-local)."""
     import ipaddress
     try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except OSError:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
         return False
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return False
-        if not (ip.is_global and not ip.is_multicast):
-            return False
-    return True
+    return bool(ip.is_global and not ip.is_multicast)
+
+
+def _resolve_public_ips(host: str, port: int) -> list[str]:
+    """Resolve and verify: every address must be public, else refuse."""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise SearchFailure("blocked",
+                            f"DNS resolution failed for {host}: {exc}") from exc
+    ips = [info[4][0] for info in infos]
+    if not ips or not all(_public_ip_ok(ip) for ip in ips):
+        raise SearchFailure("blocked",
+                            f"non-public DNS target for {host}")
+    return ips
+
+
+@contextlib.contextmanager
+def _pinned_dns(host: str, port: int, ips: list[str]):
+    """Freeze DNS for one request: close the check/connect rebinding gap.
+
+    The hostname is resolved and verified first; for the duration of the
+    single request, this process resolves that exact (host, port) to the
+    verified addresses only. A hostile resolver flipping answers between
+    the check and the connect (DNS rebinding) cannot steer the connection
+    elsewhere. Scope is one hostname, one request; always restored.
+    """
+    real_getaddrinfo = socket.getaddrinfo
+
+    def _shim(h, p, *args, **kwargs):
+        if h == host and int(p) == int(port):
+            pinned = []
+            for ip in ips:
+                family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+                sockaddr = ((ip, int(port), 0, 0) if family == socket.AF_INET6
+                            else (ip, int(port)))
+                pinned.append((family, socket.SOCK_STREAM, 0, "", sockaddr))
+            return pinned
+        return real_getaddrinfo(h, p, *args, **kwargs)
+
+    socket.getaddrinfo = _shim  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = real_getaddrinfo  # type: ignore[method-assign]
 
 
 @dataclass
@@ -217,14 +255,18 @@ class DDGSProvider:
                 raise SearchFailure("unsupported_url",
                                     f"redirect target rejected: {current[:120]}")
             parts = urlparse(current)
-            if not _host_ips_public(parts.hostname or "", parts.port or 443
-                                    if parts.scheme == "https" else 80):
-                raise SearchFailure("blocked",
-                                    f"non-public redirect/fetch target: {parts.hostname}")
+            host = parts.hostname or ""
+            port = parts.port or (443 if parts.scheme == "https" else 80)
+            # Resolve + verify, then pin for the single request: a resolver
+            # that flips answers between check and connect cannot rebind.
+            ips = _resolve_public_ips(host, port)
             try:
-                with (httpx.Client(follow_redirects=False, timeout=policy.timeout_s,
-                                   headers={"User-Agent": _USER_AGENT}) as client,
-                      client.stream("GET", current) as resp):
+                # Nested (not parenthesised): the pin must wrap the client.
+                with _pinned_dns(host, port, ips):  # noqa: SIM117
+                    with httpx.Client(
+                            follow_redirects=False, timeout=policy.timeout_s,
+                            headers={"User-Agent": _USER_AGENT}) as client, \
+                            client.stream("GET", current) as resp:
                         if resp.status_code in (301, 302, 303, 307, 308):
                             from urllib.parse import urljoin
                             location = resp.headers.get("location", "")

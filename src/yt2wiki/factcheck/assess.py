@@ -96,16 +96,23 @@ VerifierFn = Callable[[str, str, str], tuple[str, str, str]]
 def assess_claim(record: ClaimRecord,
                  verified: list[EvidenceRecord],
                  verifier: VerifierFn | None = None) -> ClaimRecord:
-    """Attach the verdict to an extracted claim record (no rewriting)."""
+    """Attach the verdict to an extracted claim record (no rewriting).
+
+    Source identity is established independently of the verifier: a
+    provider-assigned independence group always stands. A verifier may
+    only fill an empty group, and never with a trusted `primary:` marker —
+    model output can never promote a source into a trusted group.
+    """
     if verifier is not None:
         proposed: list[EvidenceRecord] = []
         for ev in verified:
             rel, group, why = verifier(record.quote, ev.excerpt, ev.url)
             ev.relationship = rel
-            if group:
+            if not ev.independence_group and group \
+                    and not group.startswith("primary:"):
                 ev.independence_group = group
             proposed.append(ev)
-            _ = why  # stage A records the combiner reason, not model prose
+            _ = why  # records carry the combiner reason, not model prose
         verified = proposed
     assessment, reason = combine(record.claim_kind, record.quote, verified)
     record.assessment = assessment

@@ -35,6 +35,28 @@ def _esc(text: str | None) -> str:
     return _html.escape(str(text or ""), quote=True)
 
 
+def _breakdown_line(overlay: OverlayRecord) -> str:
+    by_assessment = overlay.coverage.get("by_assessment", {})
+    bits = [f"{_ASSESSMENT_LABEL.get(k, k)}: {v}"
+            for k, v in by_assessment.items() if v]
+    return " · ".join(bits)
+
+
+def _claim_meta_html(claim) -> str:
+    bits = []
+    if claim.attribution and claim.attribution != "article_narration":
+        bits.append(f"attributed to {_esc(claim.attribution)}")
+    for span in claim.video_provenance or []:
+        try:
+            bits.append(f"source video {_esc(str(span.get('start_s')))}–"
+                        f"{_esc(str(span.get('end_s')))}s")
+        except AttributeError:
+            continue
+    if not bits:
+        return ""
+    return f'<p class="fc-meta">{"; ".join(bits)}</p>'
+
+
 def render_panel_html(overlay: OverlayRecord) -> str:
     """Accessible overlay panel HTML for the shared reader."""
     checked = overlay.coverage.get("checked_claims", len(overlay.claims))
@@ -47,16 +69,24 @@ def render_panel_html(overlay: OverlayRecord) -> str:
         f"<p>External corroboration checked {date}: "
         f"{checked} of {eligible} material claims checked. "
         f"Run {status}.</p>",
-        "<p>What the video claims and what independent evidence says are "
-        "shown separately. Unchecked text was not verified.</p>",
-        "<ul>",
     ]
+    breakdown = _breakdown_line(overlay)
+    if breakdown:
+        parts.append(f"<p>{_esc(breakdown)}</p>")
+    parts.extend([
+        "<p>What the video claims and what independent evidence says are "
+        "shown separately. Unchecked text was not verified. "
+        "Collected passages are authentic quotations of their sources; "
+        "only verifier-assessed relationships support a verdict.</p>",
+        "<ul>",
+    ])
     for claim in overlay.claims:
         label = _ASSESSMENT_LABEL.get(claim.assessment, claim.assessment)
         parts.append(
             f'<li data-section="{_esc(claim.section_id)}">'
             f"<strong>{_esc(label)}</strong> "
             f"<span>{_esc(claim.quote)}</span>"
+            f"{_claim_meta_html(claim)}"
             f"<details><summary>Sources and reasons</summary>"
             f"<p>{_esc(claim.reason)}</p>")
         if claim.evidence:
@@ -75,6 +105,19 @@ def render_panel_html(overlay: OverlayRecord) -> str:
         parts.append("</details></li>")
     parts.append("</ul></section>")
     return "\n".join(parts)
+
+
+def render_stale_html(overlay: OverlayRecord) -> str:
+    """Historical overlay bound to an older revision — never current."""
+    date = _esc(overlay.checked_at[:10] if overlay.checked_at else "unknown date")
+    return (
+        '<section class="factcheck-panel" aria-label="Independent fact-check">'
+        "<h2>Independent fact-check</h2>"
+        f"<p>Checked {date} against an older revision of this article; "
+        "not current for the text shown. No current verification exists — "
+        "nothing here has been verified.</p>"
+        "</section>"
+    )
 
 
 def render_unavailable_html() -> str:
@@ -105,11 +148,22 @@ def render_factcheck_md(overlay: OverlayRecord) -> str:
         "citations, or its publication status. Unchecked text was not verified.",
         "",
     ]
+    breakdown = _breakdown_line(overlay)
+    if breakdown:
+        lines.append(f"Verdicts: {breakdown}")
+        lines.append("")
     for claim in overlay.claims:
         label = _ASSESSMENT_LABEL.get(claim.assessment, claim.assessment)
         lines.append(f"## [{label}] {claim.quote}")
         lines.append("")
-        lines.append(f"- Section: `{claim.section_id}` · kind: {claim.claim_kind}")
+        lines.append(f"- Section: `{claim.section_id}` · kind: {claim.claim_kind} "
+                     f"· attribution: {claim.attribution or 'article_narration'}")
+        for span in claim.video_provenance or []:
+            try:
+                lines.append(f"- Source video span: {span.get('start_s')}–"
+                             f"{span.get('end_s')}s")
+            except AttributeError:
+                continue
         lines.append(f"- Reason: {claim.reason}")
         for ev in claim.evidence:
             lines.append(f"- Evidence ({ev.relationship}): [{ev.title}]({ev.url})"

@@ -105,45 +105,81 @@ def _row_to_overlay(row) -> OverlayRecord:
         checked_at=row["checked_at"],
         verifier=json.loads(row["verifier_json"] or "{}"),
         run_status=row["run_status"],
-        coverage=json.loads(row["coverage_json"] or "{}"),
+        coverage={
+            "eligible_claims": 0, "checked_claims": 0,
+            "skipped_claims": [], "by_assessment": {},
+            **json.loads(row["coverage_json"] or "{}"),
+        },
         claims=[_claim_from_dict(c)
                 for c in json.loads(row["claims_json"] or "[]")],
     )
 
 
-def write_sidecar(paths, article_id: str, overlay: OverlayRecord):
-    """Write the `factcheck.md` export sidecar (canonical files untouched)."""
-    from .panel import render_factcheck_md
-    sidecar = paths.article_dir(article_id) / "factcheck.md"
-    sidecar.write_text(render_factcheck_md(overlay), encoding="utf-8")
-    return sidecar
+def _canonical_revision(db, article_id: str) -> str | None:
+    row = db.query_one("SELECT markdown FROM articles WHERE article_id=?",
+                       (article_id,))
+    if row is None:
+        return None
+    return revision_sha256(row["markdown"])
 
 
-def refresh_export_sidecar(paths, article_id: str, overlay: OverlayRecord):
-    """Write `factcheck.md` and ship it in `article.zip` (others untouched).
+def ship_sidecar_in_zip(paths, article_id: str,
+                        overlay: OverlayRecord | None) -> None:
+    """Add or remove the `factcheck.md` zip entry, atomically.
 
-    Called only by the explicit fact-check command after a successful run.
-    Rewrites only the sidecar entry: every other zip member is copied
-    byte-identically, and the canonical `article.md` is never modified.
+    With a current overlay: regenerate the sidecar from that overlay and
+    ship it. Without one: strip any stale `factcheck.md` (file and entry)
+    so a stale sidecar can never ship. Other members are copied
+    byte-identically; the canonical `article.md` is never modified. The
+    archive is rebuilt to a temp file and atomically replaced.
     """
+    import os as _os
+    import uuid as _uuid
     import zipfile as _zipfile
 
     from .panel import render_factcheck_md
-    sidecar = paths.article_dir(article_id) / "factcheck.md"
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
-    sidecar.write_text(render_factcheck_md(overlay), encoding="utf-8")
-    zp = paths.article_dir(article_id) / "article.zip"
+    adir = paths.article_dir(article_id)
+    sidecar = adir / "factcheck.md"
+    zp = adir / "article.zip"
+    if overlay is not None:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(render_factcheck_md(overlay), encoding="utf-8")
+    else:
+        try:
+            sidecar.unlink()
+        except OSError:
+            pass
     if not zp.is_file():
-        return sidecar
+        return
     with _zipfile.ZipFile(zp, "r") as zin:
         members = [(info, zin.read(info.filename))
                    for info in zin.infolist()
                    if info.filename != "factcheck.md"]
-    with _zipfile.ZipFile(zp, "w", _zipfile.ZIP_DEFLATED) as zout:
+    tmp = adir / f"article.zip.tmp.{_uuid.uuid4().hex[:8]}"
+    with _zipfile.ZipFile(tmp, "w", _zipfile.ZIP_DEFLATED) as zout:
         for info, data in members:
             zout.writestr(info, data)
-        zout.write(sidecar, "factcheck.md")
-    return sidecar
+        if overlay is not None:
+            zout.write(sidecar, "factcheck.md")
+    _os.replace(tmp, zp)
+
+
+def refresh_export_sidecar(db, paths, article_id: str,
+                           overlay: OverlayRecord):
+    """Ship the sidecar after an explicit run — only for the live revision.
+
+    Re-reads the canonical article and refuses when it changed during the
+    run: the overlay is then historical (retained, never presented), and
+    no sidecar ships for a revision it does not describe. Returns the
+    sidecar path, or None on refusal.
+    """
+    live = _canonical_revision(db, article_id)
+    if live is None:
+        raise KeyError(f"no published article {article_id}")
+    if live != overlay.article_revision_sha256:
+        return None
+    ship_sidecar_in_zip(paths, article_id, overlay)
+    return paths.article_dir(article_id) / "factcheck.md"
 
 
 def overlay_history(db, article_id: str) -> list[OverlayRecord]:

@@ -18,6 +18,17 @@ def _page(url, text, published=None, title="Doc"):
     return ev.FetchedPage(url=url, title=title, text=text, published_at=published)
 
 
+def _supports_verifier():
+    """Stub semantic verifier: passage supports the claim (test double)."""
+    from yt2wiki.factcheck import verifier as vf
+
+    def _chat(messages):
+        import json as _json
+        return _json.dumps({"relationship": "supports", "independence_group": "",
+                            "reason": "Passage states the claim."})
+    return vf.verifier_from_chat(_chat)
+
+
 def _hit(url, title="Doc", publisher="pub"):
     return ev.SearchHit(url=url, title=title, publisher=publisher, snippet="...")
 
@@ -64,6 +75,7 @@ def test_dart_correct_claim_corroborated_by_primary(tmp_path):
             "https://nasa-archive.example/dart", text, published="2022-10-01",
             title="DART mission archive")})
     report = _run(db, "art9-fc-dart", DART_MD, provider,
+                  verifier=_supports_verifier(),
                   primary_domains=("nasa-archive.example",))
     claim = report.overlay.claims[0]
     assert claim.assessment == "corroborated"
@@ -140,6 +152,7 @@ def test_historical_claim_qualified_by_archival_dates(tmp_path):
         pages={"https://archive-national.example/treaty": _page(
             "https://archive-national.example/treaty", text, published="1919-08-01")})
     report = _run(db, "art9-fc-hist", md, provider,
+                  verifier=_supports_verifier(),
                   primary_domains=("archive-national.example",))
     claim = report.overlay.claims[0]
     assert claim.assessment == "corroborated"
@@ -303,6 +316,7 @@ def test_matrix_adjudication_zero_fabrication_zero_mutation(tmp_path):
                 for r in db.query("SELECT article_id, markdown, version, status "
                                  "FROM articles")}
     report = runmod.run_factcheck(db, "art9-fc-adjud", provider=provider,
+                                  verifier=_supports_verifier(),
                                   primary_domains=("nasa-archive.example",))
     overlay = report.overlay
     assert overlay.validate() == []

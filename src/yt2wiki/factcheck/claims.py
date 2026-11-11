@@ -24,6 +24,7 @@ MIN_CLAIM_CHARS = 25
 _ATTRIBUTION_VERBS = (
     "said", "says", "argues", "claimed", "claims", "thinks", "feels",
     "believes", "believe", "loves", "hates", "prefers", "admits",
+    "calls", "call", "describes", "describe",
     "according to",
 )
 
@@ -46,7 +47,39 @@ _ADVICE_MARKERS = (
     "make sure", "avoid ", "don't ", "do not ",
 )
 
+# Evaluative / subjective language: the sentence expresses a judgment,
+# not a checkable assertion — even when it carries no number.
+_SUBJECTIVE_MARKERS = (
+    "beautiful", "ugly", "finest", "best", "worst", "greatest",
+    "terrible", "awful", "amazing", "inspiring", "incredible",
+    "love", "loves", "hate", "hates", "prefer", "prefers",
+    "think ", "thinks ", "feel ", "feels ", "believe ", "opinion ",
+)
+
+# Meta-discourse: kept empirical (honest default) but deprioritised so the
+# claim cap spends retrieval on material assertions first.
+_DISCOURSE_MARKERS = (
+    "in this section", "this section", "let's ", "as mentioned",
+    "see below", "shown below", "as shown",
+)
+
 _FUTURE_MARKERS = ("will ", "going to", "predict", "forecast", "by 203")
+
+_YEAR_RE = re.compile(r"\b(19|20)\d{2}s?\b")
+_TIME_UNIT_RE = re.compile(
+    r"\b(seconds?|minutes?|hours?|days?|weeks?|months?|years?)\b", re.I)
+
+
+def _has_measure(sentence: str) -> bool:
+    """A quantity beyond bare calendar references.
+
+    "Next year" and "in 2022" are temporal settings, not measurements: a
+    future-tense sentence whose only numbers are calendar references is a
+    prediction, while "5 percent" or "380 meters" stays empirical.
+    """
+    scrubbed = _YEAR_RE.sub(" ", sentence)
+    scrubbed = _TIME_UNIT_RE.sub(" ", scrubbed)
+    return bool(_NUMBER_RE.search(scrubbed) or _UNIT_RE.search(scrubbed))
 
 _HIGH_STAKES = (
     "safe", "safety", "danger", "risk", "fee", "fees", "percent", "%",
@@ -71,6 +104,12 @@ class CandidateClaim:
     claim_kind: str
     priority: int
     checkable: bool
+    attribution: str = "article_narration"
+    video_provenance: list = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.video_provenance is None:
+            self.video_provenance = []
 
 
 def _section_id(heading: str) -> str:
@@ -79,46 +118,50 @@ def _section_id(heading: str) -> str:
 
 
 def _classify(sentence: str) -> tuple[str, bool]:
-    """Return (claim_kind, checkable). Never editorialises the wording."""
+    """Return (claim_kind, checkable). Never editorialises the wording.
+
+    Corrective rule: a declarative sentence is empirical by default. Only
+    explicit subjectivity (evaluative language, cognition/emotion verbs),
+    quantity-free prediction, or non-factual kinds mark a sentence
+    non-checkable. Attribution never demotes a factual assertion: an
+    attributed empirical premise is checkable with attribution kept.
+    """
     low = f" {sentence.lower()} "
     quoted = bool(_QUOTED_RE.search(sentence))
     attributed = quoted or any(v in low for v in _ATTRIBUTION_VERBS)
     first_person = any(p in low for p in _FIRST_PERSON)
 
-    has_number = bool(_NUMBER_RE.search(sentence) or _UNIT_RE.search(sentence))
     is_causal = any(m in low for m in _CAUSAL_MARKERS)
     is_advice = sentence.strip().rstrip(".").split()
     imperative = bool(is_advice) and is_advice[0][0].isupper() and is_advice[0].lower() not in (
-        "the", "this", "that", "these", "those", "it", "they", "he", "she", "a", "an")
+        "the", "this", "that", "these", "those", "it", "they", "he", "she",
+        "a", "an", "i", "we")
     is_advice_flag = imperative or any(m in low for m in _ADVICE_MARKERS)
     is_future = any(m in low for m in _FUTURE_MARKERS)
-
     is_effect = any(m in low for m in _EFFECT_MARKERS)
-    # Normative / preference language without checkable content.
-    if (attributed or first_person) and not has_number and not is_causal \
-            and not is_effect:
-        kind = "attributed_opinion" if attributed else "personal_preference"
-        return kind, False
-    if is_effect and not has_number and not is_causal:
-        # Reported effectiveness claim: the embedded premise is checkable.
-        return "causal", True
-    if is_future and not has_number:
+    is_subjective = any(m in low for m in _SUBJECTIVE_MARKERS)
+
+    if is_future and not _has_measure(sentence):
         return "prediction", False
-    if is_advice_flag and has_number:
-        # The factual premise of the advice is checkable (e.g. an asserted
-        # fee, effectiveness or safety property); the advice itself is not.
+    if is_advice_flag:
+        # The factual premise of advice (an asserted fee, effectiveness,
+        # or safety property) is checkable; the advice itself is not.
         return "actionable_factual_premise", True
-    if is_causal:
+    if is_causal or is_effect:
+        # Reported effectiveness claims carry a checkable embedded premise.
         return "causal", True
-    if has_number:
-        return "empirical", True
-    if attributed and has_number:
-        return "empirical", True
-    return "attributed_opinion", False
+    if is_subjective:
+        if first_person:
+            return "personal_preference", False
+        if attributed:
+            return "attributed_opinion", False
+        return "normative_judgment", False
+    # Default: declarative factual assertion (attributed or not).
+    return "empirical", True
 
 
 def _priority(sentence: str, kind: str) -> int:
-    low = sentence.lower()
+    low = f" {sentence.lower()} "
     score = 0
     if _NUMBER_RE.search(sentence):
         score += 2  # quantitatively precise
@@ -128,7 +171,41 @@ def _priority(sentence: str, kind: str) -> int:
         score += 1  # consequential to conclusions
     if any(w in low for w in _HIGH_STAKES):
         score += 1  # high-stakes
+    if any(m in low for m in _DISCOURSE_MARKERS):
+        score -= 5  # meta-discourse sinks below material assertions
     return score
+
+
+def _attribution(sentence: str) -> str:
+    """Who the article attributes the sentence to (kept, never resolved)."""
+    low = f" {sentence.lower()} "
+    if _QUOTED_RE.search(sentence):
+        return "quoted_person"
+    if any(v in low for v in _ATTRIBUTION_VERBS):
+        return "presenter"
+    return "article_narration"
+
+
+_CLOCK_RANGE_RE = re.compile(
+    r"(\d{1,2}):(\d{2})(?::(\d{2}))?\s*[–-]\s*(\d{1,2}):(\d{2})(?::(\d{2}))?")
+
+
+def _clock_to_seconds(mm: str, ss: str, hh: str | None) -> float:
+    if hh is not None:
+        return int(hh) * 3600 + int(mm) * 60 + int(ss)
+    return int(mm) * 60 + int(ss)
+
+
+def _section_windows(line: str) -> list[dict]:
+    """Video provenance from a per-section source-reference line, if any."""
+    m = _CLOCK_RANGE_RE.search(line)
+    if not m:
+        return []
+    a = _clock_to_seconds(m.group(1), m.group(2), m.group(3))
+    b = _clock_to_seconds(m.group(4), m.group(5), m.group(6))
+    if b < a:
+        a, b = b, a
+    return [{"start_s": a, "end_s": b}]
 
 
 def _is_structural(line: str) -> bool:
@@ -142,12 +219,34 @@ def _is_structural(line: str) -> bool:
     return False
 
 
+def _section_window_map(lines: list[str]) -> dict[str, list[dict]]:
+    """First pass: admitted video windows per section.
+
+    Source-reference lines may follow the prose they describe, so windows
+    are collected up front and bound section-wide during extraction.
+    """
+    windows: dict[str, list[dict]] = {}
+    section_id = ""
+    for line in lines:
+        m = re.match(r"^##\s+(.*)", line)
+        if m:
+            section_id = _section_id(m.group(1).strip())
+            continue
+        if section_id and line.strip().startswith("*Source"):
+            found = _section_windows(line)
+            if found:
+                windows[section_id] = found
+    return windows
+
+
 def extract_candidates(markdown: str) -> list[CandidateClaim]:
     """All atomic candidates in document order (section order, then offset)."""
     lines = markdown.replace("\r\n", "\n").split("\n")
+    window_map = _section_window_map(lines)
     candidates: list[CandidateClaim] = []
     heading = ""
     section_id = ""
+    section_windows: list[dict] = []
     body_chars = 0  # offset base within the current section body
     in_fence = False
     for line in lines:
@@ -160,9 +259,12 @@ def extract_candidates(markdown: str) -> list[CandidateClaim]:
         if m:
             heading = m.group(1).strip()
             section_id = _section_id(heading)
+            section_windows = window_map.get(section_id, [])
             body_chars = 0
             continue
-        if not section_id or _is_structural(line):
+        if not section_id:
+            continue
+        if _is_structural(line):
             continue
         for sent in _SENTENCE_SPLIT_RE.split(line.strip()):
             sent = sent.strip()
@@ -173,7 +275,8 @@ def extract_candidates(markdown: str) -> list[CandidateClaim]:
             candidates.append(CandidateClaim(
                 section_id=section_id, quote=sent, offset=offset,
                 claim_kind=kind, priority=_priority(sent, kind),
-                checkable=checkable))
+                checkable=checkable, attribution=_attribution(sent),
+                video_provenance=list(section_windows)))
         body_chars += len(line) + 1
     return candidates
 

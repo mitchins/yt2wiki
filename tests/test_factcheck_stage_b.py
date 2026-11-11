@@ -73,9 +73,10 @@ def server():
 def _allow_localhost(monkeypatch):
     # Serve the test HTTP server through the real fetch path: static
     # safe_url screening is covered by dedicated stage-A tests, so the
-    # loopback literal is passed through here while DNS/public-IP checks
-    # keep running for real.
-    monkeypatch.setattr(dd, "_host_ips_public", lambda host, port: True)
+    # loopback literal is passed through here. DNS resolution is pinned
+    # to loopback for the test server; the pinning path itself stays live.
+    monkeypatch.setattr(dd, "_resolve_public_ips",
+                        lambda host, port: ["127.0.0.1"])
     monkeypatch.setattr("yt2wiki.factcheck.ddgs_provider.safe_url",
                         lambda url: url.strip() or None)
 
@@ -287,6 +288,16 @@ def test_syndication_does_not_corroborate(tmp_path):
     assert report.overlay.claims[0].assessment == "insufficient_evidence"
 
 
+def _supports_stub():
+    import json as _json
+
+    def _chat(messages):
+        return _json.dumps({"relationship": "supports", "independence_group": "",
+                            "reason": "Passage states the measured span."})
+    from yt2wiki.factcheck import verifier as _vf
+    return _vf.verifier_from_chat(_chat)
+
+
 def test_primary_domain_corroborates(tmp_path):
     from tests.fixtures import in_memory_db
     _, db = in_memory_db(tmp_path)
@@ -299,7 +310,10 @@ def test_primary_domain_corroborates(tmp_path):
             ev.SearchHit(url="https://survey-office.example/report", title="Official")]},
         pages={"https://survey-office.example/report": ev.FetchedPage(
             url="https://survey-office.example/report", text=text)})
+    # A verifier must semantically assess the passage: collection alone
+    # never corroborates, even from a primary domain.
     report = runmod.run_factcheck(db, "art9-fc-prim", provider=provider,
+                                  verifier=_supports_stub(),
                                   primary_domains=("survey-office.example",))
     assert report.overlay.claims[0].assessment == "corroborated"
 

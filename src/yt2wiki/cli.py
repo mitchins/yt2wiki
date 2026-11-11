@@ -130,8 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--max-claims", type=int, default=10,
                    help="cap on claims assessed per run (8-12 recommended)")
     q.add_argument("--verifier", default="none", choices=["none", "backend"],
-                   help="none: deterministic combiner only; backend: propose via a "
-                   "configured text backend, still citation-gated")
+                   help="none: evidence collection only, no categorical factual "
+                   "verdict (keyword overlap is not corroboration); backend: "
+                   "a configured text backend assesses each passage, still "
+                   "citation-gated")
     q.add_argument("--role", default="text",
                    help="inference registry role for --verifier backend")
     q.add_argument("--primary-domains", default="",
@@ -427,7 +429,12 @@ def _cmd_factcheck(args) -> int:
         report = _run.run_factcheck(
             db, args.article_id, provider=provider,
             max_claims=max_claims, primary_domains=primaries)
-    _store.refresh_export_sidecar(settings.paths, args.article_id, report.overlay)
+    shipped = _store.refresh_export_sidecar(db, settings.paths, args.article_id,
+                                              report.overlay)
+    if shipped is None:
+        print("article edited during run: overlay retained as historical for "
+              f"revision {report.overlay.article_revision_sha256[:12]}; "
+              "no sidecar shipped")
     overlay = report.overlay
     print(f"overlay  : {overlay.overlay_id} ({overlay.run_status})")
     print(f"revision : {overlay.article_revision_sha256[:12]}")

@@ -456,7 +456,15 @@ def factcheck_context(db, article_id: str) -> dict[str, Any] | None:
     from ..factcheck import store as _store
     overlay = _store.current_overlay(db, article_id)
     if overlay is None:
-        return None
+        # A historical overlay bound to an older revision is shown as
+        # stale — never as current. No overlay at all: render nothing.
+        history = _store.overlay_history(db, article_id)
+        if not history:
+            return None
+        return {"panel_html": Markup(_panel.render_stale_html(history[-1])),
+                "overlay_id": history[-1].overlay_id,
+                "run_status": "stale",
+                "checked_at": history[-1].checked_at}
     # Pre-sanitised HTML boundary: render_panel_html html-escapes all
     # overlay text (quotes, reasons, excerpts) and only adds our own
     # markup; Markup marks that contract, autoescape stays on.

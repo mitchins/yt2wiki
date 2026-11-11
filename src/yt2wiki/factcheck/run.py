@@ -133,20 +133,37 @@ def _assess_one(provider: EvidenceProvider, record: ClaimRecord,
                 continue
             grouper = getattr(provider, "independence_group", None)
             group = grouper(page.url) if callable(grouper) else ""
+            # Collection only: a verbatim excerpt proves the quotation is
+            # authentic, not the relationship. Only a verifier may propose
+            # supports/contradicts/qualifies, and the combiner still disposes.
             verified.append(EvidenceRecord(
                 url=page.url, title=page.title or hit.title,
-                publisher=hit.publisher, published_at=page.published_at,
+                publisher=hit.publisher or _host_publisher(page.url),
+                published_at=page.published_at,
                 retrieved_at=_utcnow(), locator=locator, excerpt=excerpt,
-                relationship="supports", independence_group=group,
+                relationship="context_only", independence_group=group,
                 content_hash=page.content_hash))
             if len(verified) >= budgets.pages_per_claim:
                 break
         if len(verified) >= budgets.pages_per_claim:
             break
     record = assess_claim(record, verified, verifier=budgets.verifier)
+    if budgets.verifier is None and verified:
+        record.reason += (" Passages were collected but no verifier assessed "
+                          "their relationship to the claim: keyword overlap "
+                          "is not corroboration.")
     if failed and record.assessment in ("not_checked", "insufficient_evidence"):
         record.reason += " (retrieval partially failed; no verdict invented)"
     return record
+
+
+def _host_publisher(url: str) -> str:
+    """Publisher fallback: registrable host when the hit names none."""
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
 
 
 _PASSAGE_STOPWORDS = frozenset({
@@ -248,7 +265,9 @@ def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
         na_record = ClaimRecord(
             claim_id=f"n{i + 1:02d}", section_id=cand.section_id,
             quote=cand.quote, offset=cand.offset,
-            claim_kind=cand.claim_kind)
+            claim_kind=cand.claim_kind,
+            attribution=cand.attribution,
+            video_provenance=list(cand.video_provenance))
         assessed.append(assess_claim(na_record, []))
     skipped = [s for s in skipped
                if (s["section_id"], s["quote"]) not in na_keys]
@@ -256,10 +275,15 @@ def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
         record = ClaimRecord(
             claim_id=f"c{i + 1:02d}", section_id=cand.section_id,
             quote=cand.quote, offset=cand.offset,
-            claim_kind=cand.claim_kind)
+            claim_kind=cand.claim_kind,
+            attribution=cand.attribution,
+            video_provenance=list(cand.video_provenance))
         assessed.append(_assess_one(provider, record, budgets, report))
 
     checked = len(assessed)
+    by_assessment: dict[str, int] = {}
+    for c in assessed:
+        by_assessment[c.assessment] = by_assessment.get(c.assessment, 0) + 1
     failed_claims = sum(1 for c in assessed
                         if c.assessment in ("not_checked", "insufficient_evidence")
                         and "retrieval partially failed" in c.reason)
@@ -282,7 +306,8 @@ def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
         run_status=status,
         coverage={"eligible_claims": len(candidates),
                   "checked_claims": checked,
-                  "skipped_claims": skipped},
+                  "skipped_claims": skipped,
+                  "by_assessment": by_assessment},
         claims=assessed,
     )
     errors = overlay.validate()

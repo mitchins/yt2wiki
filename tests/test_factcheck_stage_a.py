@@ -92,7 +92,8 @@ def test_overlay_validation_rejects_bad_records():
         article_revision_sha256="0" * 64, article_type="report",
         checked_at="2026-01-01T00:00:00+00:00",
         verifier={}, run_status="complete",
-        coverage={"eligible_claims": 0, "checked_claims": 0, "skipped_claims": []},
+        coverage={"eligible_claims": 0, "checked_claims": 0, "skipped_claims": [],
+                  "by_assessment": {}},
         claims=[],
     )
     assert overlay.validate() == []
@@ -100,6 +101,12 @@ def test_overlay_validation_rejects_bad_records():
     assert overlay.validate()
     overlay.run_status = "complete"
     overlay.article_revision_sha256 = "short"
+    assert overlay.validate()
+    overlay.article_revision_sha256 = "0" * 64
+    overlay.coverage = {"eligible_claims": 0, "checked_claims": 0,
+                        "skipped_claims": []}
+    assert overlay.validate()
+    overlay.coverage["by_assessment"] = {"made_up": 1}
     assert overlay.validate()
 
 
@@ -222,11 +229,14 @@ def test_run_persists_overlay_and_leaves_article_untouched(tmp_path):
     assert ov.validate() == []
     assert ov.run_status in ("complete", "partial")
     assert ov.coverage["checked_claims"] >= 1
-    by_kind = {c.claim_kind: c for c in ov.claims}
-    assert by_kind["empirical"].assessment == "corroborated"
-    # Two distinct groups corroborate the span claim.
+    # Collection only without a verifier: passages are gathered as
+    # context_only; keyword overlap is not corroboration.
     span = next(c for c in ov.claims if "380 meters" in c.quote)
-    assert span.assessment == "corroborated" and len(span.evidence) == 2
+    assert span.assessment == "insufficient_evidence"
+    assert len(span.evidence) == 2
+    assert {e.relationship for e in span.evidence} == {"context_only"}
+    assert "no verifier" in span.reason
+    assert ov.coverage["by_assessment"].get("insufficient_evidence", 0) >= 1
     # History + currency.
     assert store.current_overlay(db, "art9-fc-test").overlay_id == ov.overlay_id
     assert len(store.overlay_history(db, "art9-fc-test")) == 1
