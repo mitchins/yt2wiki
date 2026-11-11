@@ -69,19 +69,26 @@ def _utcnow() -> str:
 
 
 def _claim_queries(quote: str, limit: int) -> list[str]:
-    """Bounded query proposals: the claim itself, then key-phrase variants.
+    """Bounded query proposals: the claim, a head variant, keywords.
 
-    Stage A proposes queries deterministically (no model). Stage B may use
-    a model proposer; the per-claim budget stays enforced here.
+    Stage C qualification showed tail fragments routinely return zero
+    results ("No results found") while wasting a request and a politeness
+    pause; the third slot is a keyword query from distinctive content
+    words instead. Deterministic; the per-claim budget stays enforced here.
     """
     words = quote.split()
     queries = [quote[:220]]
     if len(words) > 8:
         queries.append(" ".join(words[:12])[:220])
-        queries.append(" ".join(words[-12:])[:220])
+    keywords = [w.strip(".,;:!?\"'()").lower() for w in words]
+    keywords = [w for w in dict.fromkeys(keywords)
+                if len(w) >= 5 and w.isalpha()
+                and w not in _PASSAGE_STOPWORDS][:6]
+    if len(keywords) >= 3:
+        queries.append(" ".join(keywords)[:220])
     seen: list[str] = []
     for q in queries:
-        if q not in seen:
+        if q and q not in seen:
             seen.append(q)
     return seen[:limit]
 
@@ -89,6 +96,7 @@ def _claim_queries(quote: str, limit: int) -> list[str]:
 def _assess_one(provider: EvidenceProvider, record: ClaimRecord,
                 budgets: RunBudgets, report: RunReport) -> ClaimRecord:
     verified: list[EvidenceRecord] = []
+    seen_urls: set[str] = set()
     failed = False
     for query in _claim_queries(record.quote, budgets.queries_per_claim):
         try:
@@ -99,6 +107,9 @@ def _assess_one(provider: EvidenceProvider, record: ClaimRecord,
             failed = True
             continue
         for hit in hits[:budgets.pages_per_claim]:
+            if hit.url in seen_urls:
+                continue
+            seen_urls.add(hit.url)
             if safe_url(hit.url) is None:
                 report.failures.append(
                     f"rejected unsafe evidence URL for {record.claim_id}")
@@ -138,22 +149,35 @@ def _assess_one(provider: EvidenceProvider, record: ClaimRecord,
     return record
 
 
-def _relevant_passage(page_text: str, quote: str) -> str | None:
-    """Longest claim-token window present verbatim in the page, if any.
+_PASSAGE_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
+    "from", "that", "this", "these", "those", "are", "was", "were", "has",
+    "have", "had", "been", "will", "would", "can", "could", "its", "as",
+    "at", "by", "be", "is", "it", "not", "but", "they", "their", "he",
+    "she", "them", "his", "her", "you", "your", "our", "we", "then",
+    "than", "when", "where", "which", "who", "what", "how", "all", "any",
+    "more", "most", "other", "into", "out", "over", "after", "before",
+    "between", "during", "through", "according", "says", "said",
+})
 
-    Stage A overlap heuristic (offline): finds the longest run ofClaim
-    words appearing in order in the fetched text and returns that passage.
-    Stage B keeps this gate and adds model-proposed passages — still
-    verified here before any verdict.
+
+def _relevant_passage(page_text: str, quote: str) -> str | None:
+    """Claim-relevant passage genuinely present in the fetched page, if any.
+
+    First the longest ordered run of claim words (a direct statement of
+    the claim). Fallback: a window covering several distinct claim content
+    words — contradictions rarely repeat the claim verbatim, but a page
+    that shares its entities and still says otherwise is exactly what the
+    verifier must assess. Either way the verifier disposes; the gate only
+    establishes genuine presence in the fetched material.
     """
     import re as _re
-    words = [w for w in _re.findall(r"[A-Za-z0-9%.'-]+", quote.lower()) if len(w) > 2]
+    words = [w for w in _re.findall(r"[A-Za-z0-9%.'-]+", quote.lower())
+             if len(w) > 1]
     if len(words) < 4:
         return None
     norm = _re.sub(r"\s+", " ", page_text).strip()
     low = norm.lower()
-    # Longest ordered run of claim words present in the page.
-    best = ""
     for width in range(min(len(words), 14), 3, -1):
         for i in range(len(words) - width + 1):
             run = " ".join(words[i:i + width])
@@ -162,9 +186,32 @@ def _relevant_passage(page_text: str, quote: str) -> str | None:
                 start = max(0, at - 120)
                 end = min(len(norm), at + len(run) + 120)
                 return norm[start:end].strip()
-        if best:
-            return best
-    return None
+    # Fallback: minimal window covering distinct claim content words.
+    content = [w for w in dict.fromkeys(words)
+               if len(w) >= 4 and w.isalpha() and w not in _PASSAGE_STOPWORDS]
+    need = max(3, len(content) // 3)
+    occurrences: list[tuple[int, str]] = []
+    for w in content:
+        at = low.find(w)
+        while at >= 0:
+            occurrences.append((at, w))
+            at = low.find(w, at + 1)
+    occurrences.sort()
+    best_span: tuple[int, int] | None = None
+    for i in range(len(occurrences)):
+        seen: set[str] = set()
+        for j in range(i, len(occurrences)):
+            seen.add(occurrences[j][1])
+            if len(seen) >= need:
+                span = (occurrences[i][0], occurrences[j][0])
+                if best_span is None or span[1] - span[0] < best_span[1] - best_span[0]:
+                    best_span = span
+                break
+    if best_span is None or best_span[1] - best_span[0] > 2_000:
+        return None
+    start = max(0, best_span[0] - 80)
+    end = min(len(norm), best_span[1] + 80)
+    return norm[start:end].strip()
 
 
 def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
@@ -192,6 +239,19 @@ def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
     selected, skipped = select_claims(candidates, budgets.max_claims)
     report = RunReport(overlay=None)  # type: ignore[arg-type]
     assessed: list[ClaimRecord] = []
+    # Non-checkable kinds (opinion, normative, preference, prediction,
+    # satire) are recorded as not_applicable verdicts — never hidden in
+    # `skipped`, never sent for retrieval.
+    na_keys = set()
+    for i, cand in enumerate(c for c in candidates if not c.checkable):
+        na_keys.add((cand.section_id, cand.quote))
+        na_record = ClaimRecord(
+            claim_id=f"n{i + 1:02d}", section_id=cand.section_id,
+            quote=cand.quote, offset=cand.offset,
+            claim_kind=cand.claim_kind)
+        assessed.append(assess_claim(na_record, []))
+    skipped = [s for s in skipped
+               if (s["section_id"], s["quote"]) not in na_keys]
     for i, cand in enumerate(selected):
         record = ClaimRecord(
             claim_id=f"c{i + 1:02d}", section_id=cand.section_id,

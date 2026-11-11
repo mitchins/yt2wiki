@@ -262,7 +262,12 @@ def test_provider_failure_marks_unavailable_without_verdicts(tmp_path):
     assert report.overlay.run_status in ("partial", "unavailable")
     assert report.searches == 0
     for claim in report.overlay.claims:
-        assert claim.assessment in ("not_checked", "insufficient_evidence")
+        if claim.claim_kind in ("attributed_opinion", "normative_judgment",
+                                "personal_preference", "prediction", "satire"):
+            # Classification verdicts need no retrieval.
+            assert claim.assessment == "not_applicable"
+        else:
+            assert claim.assessment in ("not_checked", "insufficient_evidence")
         assert not claim.evidence
 
 

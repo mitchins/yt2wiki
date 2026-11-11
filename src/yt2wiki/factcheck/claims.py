@@ -34,6 +34,13 @@ _CAUSAL_MARKERS = (
     "due to", "makes it", "triggers", "prevents",
 )
 
+# Attributed effectiveness assertions ("X cures Y", "X prevents Z") carry a
+# separately checkable embedded factual premise even when merely reported.
+_EFFECT_MARKERS = (
+    "cure", "cures", "treat", "treats", "prevent", "prevents", "heal",
+    "heals", "kills", "efficacy", "effective",
+)
+
 _ADVICE_MARKERS = (
     "should", "must", "never ", "always ", "keep ", "use ",
     "make sure", "avoid ", "don't ", "do not ",
@@ -86,10 +93,15 @@ def _classify(sentence: str) -> tuple[str, bool]:
     is_advice_flag = imperative or any(m in low for m in _ADVICE_MARKERS)
     is_future = any(m in low for m in _FUTURE_MARKERS)
 
+    is_effect = any(m in low for m in _EFFECT_MARKERS)
     # Normative / preference language without checkable content.
-    if (attributed or first_person) and not has_number and not is_causal:
+    if (attributed or first_person) and not has_number and not is_causal \
+            and not is_effect:
         kind = "attributed_opinion" if attributed else "personal_preference"
         return kind, False
+    if is_effect and not has_number and not is_causal:
+        # Reported effectiveness claim: the embedded premise is checkable.
+        return "causal", True
     if is_future and not has_number:
         return "prediction", False
     if is_advice_flag and has_number:
