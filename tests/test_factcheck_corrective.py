@@ -195,9 +195,12 @@ def test_coverage_counts_every_verdict_class(tmp_path):
     report = _run(db, "art9-fc-cov", md, _P(hits={}, pages={}))
     cov = report.overlay.coverage
     by_assessment = cov["by_assessment"]
-    assert cov["checked_claims"] == sum(by_assessment.values())
     assert by_assessment.get("insufficient_evidence", 0) >= 1
     assert by_assessment.get("not_applicable", 0) >= 1
+    # checked counts selected material claims only; classification-only
+    # records are reported separately, never folded into "checked".
+    assert cov["checked_claims"] + by_assessment.get("not_applicable", 0) == (
+        sum(by_assessment.values()))
     assert "not_checked" not in by_assessment  # absent when nothing failed
 
 

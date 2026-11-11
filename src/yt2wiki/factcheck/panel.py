@@ -80,7 +80,7 @@ def render_panel_html(overlay: OverlayRecord) -> str:
         '<section class="factcheck-panel" aria-label="Independent fact-check">',
         "<h2>Independent fact-check</h2>",
         f"<p>External corroboration checked {date}: "
-        f"{checked} of {eligible} material claims checked "
+        f"{checked} of {eligible} material claims selected for assessment "
         f"({retrieved} with retrieved passages, {n_skipped} skipped). "
         f"Run {status}.</p>",
     ]
@@ -157,7 +157,8 @@ def render_factcheck_md(overlay: OverlayRecord) -> str:
         f"Article: `{overlay.article_id}`",
         f"Article revision: `{overlay.article_revision_sha256}`",
         f"Checked: {overlay.checked_at} · run {overlay.run_status}",
-        f"Coverage: {checked} of {eligible} material claims checked.",
+        f"Coverage: {checked} of {eligible} material claims selected; "
+        f"{overlay.coverage.get('retrieved_claims', 0)} with retrieved passages.",
         "",
         "This addendum assesses selected claims against independent "
         "retrieved evidence. It does not alter the canonical article, its "

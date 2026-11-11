@@ -9,9 +9,11 @@ Corroboration rules (independent corroboration, not recycled assertion):
 - `corroborated`: support from >=1 primary record, or from >=2 distinct
   independence groups of secondary records. One strong primary record can
   outweigh several recycled articles.
+- `insufficient_evidence`: no usable evidence, single uncorroborated
+  secondary, primary evidence absent where required — or retrieved passages
+  that only qualify or mention the claim without deciding it.
 - `contradicted`: credible contradiction with no credible support.
-- `disputed`: credible support and credible contradiction coexist, or the
-  retrieved passages do not directly decide the claim.
+- `disputed`: credible support and credible contradiction coexist.
 - `insufficient_evidence`: no usable evidence, single uncorroborated
   secondary, or primary evidence absent where the matrix requires it.
 - `not_applicable`: claim kind carries no truth verdict.
@@ -78,6 +80,12 @@ def combine(claim_kind: str, claim_text: str,
                 "Credible retrieved material both supports and contradicts "
                 "the claim; shown separately, not resolved.")
     support_groups = _groups(supports, "supports")
+    if not supports and not contradicts:
+        # Passages present but none directly supports or contradicts (only
+        # context or qualifiers): not corroboration, and nothing to dispute.
+        return ("insufficient_evidence",
+                "Retrieved passages only qualify or mention the claim; none "
+                "directly supports or contradicts it.")
     if _has_primary(supports, "supports") or len(support_groups) >= _MIN_SECONDARY_GROUPS:
         src = supports[0]
         return ("corroborated",

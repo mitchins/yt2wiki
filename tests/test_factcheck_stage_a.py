@@ -269,7 +269,8 @@ def test_provider_failure_marks_unavailable_without_verdicts(tmp_path):
         raise evidence.SearchFailure("network", "offline")
     failing.search = _boom  # type: ignore[method-assign]
     report = run.run_factcheck(db, "art9-fc-test", provider=failing)
-    assert report.overlay.run_status in ("partial", "unavailable")
+    # Claims selected but no search ran: unavailable, never a silent partial.
+    assert report.overlay.run_status == "unavailable"
     assert report.searches == 0
     for claim in report.overlay.claims:
         if claim.claim_kind in ("attributed_opinion", "normative_judgment",
@@ -313,7 +314,7 @@ def test_panel_escapes_and_labels(tmp_path):
     html = panel.render_panel_html(report.overlay)
     assert "<script>" not in html
     assert "Independent fact-check" in html
-    assert "of " in html and "material claims checked" in html
+    assert "material claims selected for assessment" in html
     md_side = panel.render_factcheck_md(report.overlay)
     assert md_side.startswith("# Independent fact-check (addendum)")
     assert "article.md" in md_side or "canonical article" in md_side

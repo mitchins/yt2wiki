@@ -22,8 +22,8 @@ from .contracts import NON_CHECKABLE_KINDS
 MIN_CLAIM_CHARS = 25
 
 _ATTRIBUTION_VERBS = (
-    "said", "says", "argues", "claimed", "claims", "thinks", "feels",
-    "believes", "believe", "loves", "hates", "prefers", "admits",
+    "said", "says", "say", "argues", "claimed", "claims", "thinks",
+    "feels", "believes", "believe", "loves", "hates", "prefers", "admits",
     "calls", "call", "describes", "describe",
     "according to",
 )
@@ -46,6 +46,26 @@ _ADVICE_MARKERS = (
     "should", "must", "never ", "always ", "keep ", "use ",
     "make sure", "avoid ", "don't ", "do not ",
 )
+
+# Allowlist for the sentence-initial imperative test. The old rule treated
+# any capitalised first word as an imperative, misclassifying uppercase
+# declaratives ("Dimorphos is larger than Didymos") and attributed
+# judgments ("Critics say this is the worst film") as advice. A genuine
+# imperative starts with a command verb (or a command adverbial); anything
+# else falls through to the normal kinds — still checkable when factual.
+_IMPERATIVE_VERBS = frozenset({
+    "torque", "keep", "use", "avoid", "make", "take", "ensure", "check",
+    "verify", "install", "run", "set", "add", "remove", "turn", "plug",
+    "tighten", "loosen", "replace", "clean", "measure", "test", "try",
+    "remember", "note", "see", "refer", "consult", "follow", "repeat",
+    "wait", "let", "do", "don't", "never", "always", "apply", "attach",
+    "connect", "disconnect", "cut", "strip", "solder", "mount", "secure",
+    "adjust", "calibrate", "configure", "enable", "disable", "start",
+    "stop", "open", "close", "read", "write", "save", "click", "press",
+    "hold", "release", "pull", "push", "twist", "align", "compare",
+    "record", "report", "send", "store", "wear", "handle", "inspect",
+    "confirm",
+})
 
 # Evaluative / subjective language: the sentence expresses a judgment,
 # not a checkable assertion — even when it carries no number.
@@ -132,10 +152,9 @@ def _classify(sentence: str) -> tuple[str, bool]:
     first_person = any(p in low for p in _FIRST_PERSON)
 
     is_causal = any(m in low for m in _CAUSAL_MARKERS)
-    is_advice = sentence.strip().rstrip(".").split()
-    imperative = bool(is_advice) and is_advice[0][0].isupper() and is_advice[0].lower() not in (
-        "the", "this", "that", "these", "those", "it", "they", "he", "she",
-        "a", "an", "i", "we")
+    first = sentence.strip().lstrip("\"“'(").split()
+    first_word = first[0].rstrip(".,;:!?").lower() if first else ""
+    imperative = first_word in _IMPERATIVE_VERBS
     is_advice_flag = imperative or any(m in low for m in _ADVICE_MARKERS)
     is_future = any(m in low for m in _FUTURE_MARKERS)
     is_effect = any(m in low for m in _EFFECT_MARKERS)
@@ -208,15 +227,35 @@ def _section_windows(line: str) -> list[dict]:
     return [{"start_s": a, "end_s": b}]
 
 
+_LIST_MARKER_RE = re.compile(r"^[-*+]\s+(.*)$")
+
+
 def _is_structural(line: str) -> bool:
+    """True for lines that carry no mineable prose.
+
+    Bullet items are mined (marker stripped by the caller), not skipped:
+    procedures and reports routinely put steps and key facts in lists.
+    Skipped: source-reference lines, figures, tables, quotes, headings,
+    fences, HTML, and full-italic caption/emphasis lines.
+    """
     s = line.strip()
     if not s:
         return True
-    if s.startswith(("![", "|", ">", "*", "#", "-", "```", "<")):
+    if s.startswith("*Source"):
         return True
+    if s.startswith(("![", "|", ">", "#", "```", "<")):
+        return True
+    if s.startswith("*") and s.endswith("*") and len(s) > 2:
+        return True  # *caption* / *emphasis* lines, not claims
     if re.match(r"^\d+[.)]\s", s):
         return False  # numbered steps carry claims
     return False
+
+
+def _strip_list_marker(line: str) -> str:
+    """Remove one Markdown list marker so item text can be mined."""
+    m = _LIST_MARKER_RE.match(line.strip())
+    return m.group(1) if m else line.strip()
 
 
 def _section_window_map(lines: list[str]) -> dict[str, list[dict]]:
@@ -266,7 +305,7 @@ def extract_candidates(markdown: str) -> list[CandidateClaim]:
             continue
         if _is_structural(line):
             continue
-        for sent in _SENTENCE_SPLIT_RE.split(line.strip()):
+        for sent in _SENTENCE_SPLIT_RE.split(_strip_list_marker(line)):
             sent = sent.strip()
             if len(sent) < MIN_CLAIM_CHARS or not re.search(r"[A-Za-z0-9]", sent):
                 continue

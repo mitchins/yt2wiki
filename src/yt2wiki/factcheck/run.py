@@ -256,10 +256,14 @@ def _relevant_passage(page_text: str, quote: str) -> str | None:
     occurrences: list[tuple[int, str]] = []
     for w in content:
         at = low.find(w)
-        while at >= 0:
+        hits = 0
+        while at >= 0 and hits < 200:
             occurrences.append((at, w))
+            hits += 1
             at = low.find(w, at + 1)
     occurrences.sort()
+    if len({w for _, w in occurrences}) < need:
+        return None  # too few distinct words: scanning further is O(n^2)
     best_span: tuple[int, int] | None = None
     for i in range(len(occurrences)):
         seen: set[str] = set()
@@ -331,7 +335,10 @@ def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
             video_provenance=list(cand.video_provenance))
         assessed.append(_assess_one(provider, record, budgets, report))
 
-    checked = len(assessed)
+    # checked_claims counts selected material claims only: not_applicable
+    # records and retrieval failures are reported separately, never folded
+    # into a "checked" number that overstates verification coverage.
+    checked = len(selected)
     by_assessment: dict[str, int] = {}
     retrieved = 0
     for c in assessed:
@@ -344,7 +351,9 @@ def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
     report.verifier_budget = (budgets.max_verifier_calls
                               if budgets.verifier is not None else None)
     exhausted = report.verifier_exhausted
-    if checked == 0 and skipped:
+    if selected and report.searches == 0:
+        # Claims were selected but no search ran: nothing was retrieved,
+        # so the run is unavailable — never a silent partial.
         status = "unavailable"
     elif failed_claims or exhausted or report.verifier_errors > 0 or any(
             "retrieval partially failed" in c.reason for c in assessed):

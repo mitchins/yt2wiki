@@ -208,6 +208,71 @@ def test_distinct_reports_still_corroborate(tmp_path):
     assert report.overlay.claims[0].assessment == "corroborated"
 
 
+# ------------------------------------------- reviewer-driven corrections ----
+
+@pytest.mark.parametrize("sentence, kind, checkable", [
+    ("Dimorphos is larger than Didymos and hosts an ocean.", "empirical", True),
+    ("NASA launched the DART mission in 2021.", "empirical", True),
+    ("Critics say this is the worst film ever made.", "attributed_opinion", False),
+    ("Torque each bolt to 42 newton meters now.", "actionable_factual_premise", True),
+    ("Keep the fee below 0.5 percent today.", "actionable_factual_premise", True),
+    ("Never touch live contacts with wet hands.", "actionable_factual_premise", True),
+])
+def test_imperative_allowlist(sentence, kind, checkable):
+    from yt2wiki.factcheck import claims as _claims
+    got, ok = _claims._classify(sentence)
+    assert (got, ok) == (kind, checkable), sentence
+
+
+def test_bullet_items_are_mined_not_skipped():
+    from yt2wiki.factcheck import claims as _claims
+    md = ("# T\n\n## Method\n\n- Torque each bolt to 42 newton meters today.\n\n"
+          "*Source 1:00–2:00 — [1:00](https://example.com/watch?v=x&t=60)*\n")
+    cands = _claims.extract_candidates(md)
+    assert any("Torque each bolt" in c.quote for c in cands)
+    mined = next(c for c in cands if "Torque each bolt" in c.quote)
+    assert mined.video_provenance == [{"start_s": 60.0, "end_s": 120.0}]
+
+
+def test_qualifies_only_is_insufficient_not_support():
+    from yt2wiki.factcheck import assess as _assess
+    from yt2wiki.factcheck.contracts import EvidenceRecord
+    ev = EvidenceRecord(url="https://a.example/1", excerpt="X is Y and Z today here.",
+                        locator="char 0-10", relationship="qualifies",
+                        independence_group="a.example", content_hash="h")
+    verdict, reason = _assess.combine("empirical", "X is Y and Z today here.", [ev])
+    assert verdict == "insufficient_evidence"
+    assert "supports" not in reason.lower().replace("supports or contradicts", "")
+
+
+def test_cli_rejects_non_chat_backend(tmp_path, capsys, monkeypatch):
+    from tests.fixtures import in_memory_db
+    from yt2wiki import cli as _cli
+    from yt2wiki.backends.loader import ModelManager
+    _, db = in_memory_db(tmp_path)
+    _article(db, "art9-fc-nochat", "# T\n\n## F\n\nNothing checkable here.\n")
+
+    class _NoChat:
+        pass
+
+    released: list = []
+
+    def _fake_acquire(self, *roles):
+        return {"text": _NoChat()}
+
+    def _fake_release(self, loaded):
+        released.append(dict(loaded))
+
+    monkeypatch.setattr(ModelManager, "acquire_all", _fake_acquire)
+    monkeypatch.setattr(ModelManager, "release_all", _fake_release)
+    rc = _cli.main(["--data-dir", str(tmp_path), "factcheck", "run",
+                    "art9-fc-nochat", "--provider", "mock",
+                    "--verifier", "backend", "--role", "text"])
+    assert rc == 2
+    assert released, "loaded backends must be released on the reject path"
+    assert "does not support chat" in capsys.readouterr().err
+
+
 # ------------------------------------------------- evidence-only reporting ----
 
 def test_cli_reports_collection_without_verdicts(tmp_path, capsys):

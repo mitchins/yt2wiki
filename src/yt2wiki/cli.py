@@ -427,6 +427,10 @@ def _cmd_factcheck(args) -> int:
         try:
             loaded = manager.acquire_all(args.role)
             backend = loaded[args.role]
+            if not callable(getattr(backend, "chat", None)):
+                raise TypeError(
+                    f"role {args.role!r} ({type(backend).__name__}) does not "
+                    "support chat: it cannot assess passages")
             spec = getattr(backend, "spec", None)
             verifier_role = args.role
             verifier_model = (getattr(spec, "key", None)
@@ -437,6 +441,7 @@ def _cmd_factcheck(args) -> int:
                     messages, max_new_tokens=256),
                 max_tokens=256, timeout_s=90.0)
         except Exception as exc:  # noqa: BLE001
+            manager.release_all(loaded)
             print(f"backend verifier unavailable: {exc}", file=sys.stderr)
             return 2
         try:
