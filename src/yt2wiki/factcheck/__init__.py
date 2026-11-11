@@ -5,6 +5,7 @@ retrieved evidence and presents cited reasons separately. Never rewrites
 the canonical article, its citations, or its publication status.
 """
 
-from . import assess, claims, contracts, evidence, panel, run, store
+from . import assess, claims, contracts, ddgs_provider, evidence, panel, run, store, verifier
 
-__all__ = ["assess", "claims", "contracts", "evidence", "panel", "run", "store"]
+__all__ = ["assess", "claims", "contracts", "ddgs_provider", "evidence",
+           "panel", "run", "store", "verifier"]

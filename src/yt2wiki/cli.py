@@ -42,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_schemas(args)
         if args.command == "inference":
             return _cmd_inference(args)
+        if args.command == "factcheck":
+            return _cmd_factcheck(args)
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
@@ -116,6 +118,29 @@ def build_parser() -> argparse.ArgumentParser:
                         parents=[common])
     q.add_argument("--name", required=True, help="provider name as saved")
     q.add_argument("--timeout", type=float, default=6.0, help="seconds for the /models probe")
+
+    p = sub.add_parser("factcheck", help="independent fact-check overlay (explicit, opt-in)",
+                       parents=[common])
+    fsub = p.add_subparsers(dest="factcheck_command")
+    q = fsub.add_parser("run", help="run external corroboration for one article revision",
+                        parents=[common])
+    q.add_argument("article_id")
+    q.add_argument("--provider", default="ddgs", choices=["ddgs", "mock"],
+                   help="evidence provider (keyless DDGS search + bounded fetch)")
+    q.add_argument("--max-claims", type=int, default=10,
+                   help="cap on claims assessed per run (8-12 recommended)")
+    q.add_argument("--verifier", default="none", choices=["none", "backend"],
+                   help="none: deterministic combiner only; backend: propose via a "
+                   "configured text backend, still citation-gated")
+    q.add_argument("--role", default="text",
+                   help="inference registry role for --verifier backend")
+    q.add_argument("--primary-domains", default="",
+                   help="comma-separated issuer/official domains treated as primary records")
+    q.add_argument("--no-cache", action="store_true",
+                   help="bypass the local fetched-page cache for this run")
+    q = fsub.add_parser("show", help="show the current overlay for an article revision",
+                        parents=[common])
+    q.add_argument("article_id")
     return parser
 
 
@@ -331,6 +356,93 @@ def _cmd_export(args) -> int:
     print(json.dumps(metrics, indent=1, default=str))
     print(f"markdown : {settings.paths.article_markdown(args.article_id)}")
     print(f"standalone: {settings.paths.article_dir(args.article_id) / 'article.standalone.html'}")
+    return 0
+
+
+def _cmd_factcheck(args) -> int:
+    """Explicit fact-check runs. Nothing here runs during generation, viewing or export."""
+    from .factcheck import run as _run
+    from .factcheck import store as _store
+
+    settings, db, _ = _service(args)
+    cmd = getattr(args, "factcheck_command", None)
+    if cmd == "show":
+        overlay = _store.current_overlay(db, args.article_id)
+        if overlay is None:
+            print(f"no current overlay for {args.article_id}: "
+                  "not checked (nothing has been verified)")
+            return 1
+        print(f"overlay  : {overlay.overlay_id}")
+        print(f"revision : {overlay.article_revision_sha256[:12]}")
+        print(f"checked  : {overlay.checked_at} · run {overlay.run_status}")
+        cov = overlay.coverage
+        print(f"coverage : {cov.get('checked_claims')} of "
+              f"{cov.get('eligible_claims')} material claims checked")
+        for claim in overlay.claims:
+            print(f"  [{claim.assessment}] {claim.quote[:100]}")
+        return 0
+    if cmd != "run":
+        print("usage: yt2wiki factcheck {run|show} article_id", file=sys.stderr)
+        return 2
+    row = db.query_one("SELECT article_id FROM articles WHERE article_id=?",
+                       (args.article_id,))
+    if row is None:
+        print(f"no such article: {args.article_id}", file=sys.stderr)
+        return 2
+    max_claims = max(1, min(int(args.max_claims), 25))
+    primaries = tuple(d.strip().lower() for d in
+                      (args.primary_domains or "").split(",") if d.strip())
+    if args.provider == "ddgs":
+        from .factcheck import ddgs_provider as _ddgs
+        cache_dir = (None if args.no_cache
+                     else settings.paths.root / "factcheck-cache")
+        provider = _ddgs.DDGSProvider(
+            cache=_ddgs.FactcheckCache(directory=cache_dir),
+            primary_domains=primaries)
+    else:
+        from .factcheck import evidence as _ev
+        provider = _ev.MockProvider()
+    verifier = None
+    if args.verifier == "backend":
+        from .backends.loader import ModelManager
+        from .factcheck import verifier as _vf
+        manager = ModelManager(settings)
+        loaded: dict = {}
+        try:
+            loaded = manager.acquire_all(args.role)
+            backend = loaded[args.role]
+            verifier = _vf.verifier_from_chat(
+                lambda messages: backend.chat(messages))  # noqa: E731
+        except Exception as exc:  # noqa: BLE001
+            print(f"backend verifier unavailable: {exc}", file=sys.stderr)
+            return 2
+        try:
+            report = _run.run_factcheck(
+                db, args.article_id, provider=provider,
+                max_claims=max_claims, verifier=verifier,
+                primary_domains=primaries)
+        finally:
+            manager.release_all(loaded)
+    else:
+        report = _run.run_factcheck(
+            db, args.article_id, provider=provider,
+            max_claims=max_claims, primary_domains=primaries)
+    _store.refresh_export_sidecar(settings.paths, args.article_id, report.overlay)
+    overlay = report.overlay
+    print(f"overlay  : {overlay.overlay_id} ({overlay.run_status})")
+    print(f"revision : {overlay.article_revision_sha256[:12]}")
+    print(f"claims   : {overlay.coverage['checked_claims']} checked / "
+          f"{overlay.coverage['eligible_claims']} eligible")
+    print(f"retrieval: {report.searches} searches, {report.fetches} fetches, "
+          f"{report.fetch_bytes} bytes")
+    for claim in overlay.claims:
+        print(f"  [{claim.assessment}] {claim.quote[:100]}")
+    for failure in report.failures[:10]:
+        print(f"  failure: {failure}")
+    # Core status is never changed by this command; surface that explicitly.
+    status = db.query_one("SELECT status FROM articles WHERE article_id=?",
+                           (args.article_id,))["status"]
+    print(f"article status unchanged: {status}")
     return 0
 
 

@@ -119,6 +119,33 @@ def write_sidecar(paths, article_id: str, overlay: OverlayRecord):
     return sidecar
 
 
+def refresh_export_sidecar(paths, article_id: str, overlay: OverlayRecord):
+    """Write `factcheck.md` and ship it in `article.zip` (others untouched).
+
+    Called only by the explicit fact-check command after a successful run.
+    Rewrites only the sidecar entry: every other zip member is copied
+    byte-identically, and the canonical `article.md` is never modified.
+    """
+    import zipfile as _zipfile
+
+    from .panel import render_factcheck_md
+    sidecar = paths.article_dir(article_id) / "factcheck.md"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(render_factcheck_md(overlay), encoding="utf-8")
+    zp = paths.article_dir(article_id) / "article.zip"
+    if not zp.is_file():
+        return sidecar
+    with _zipfile.ZipFile(zp, "r") as zin:
+        members = [(info, zin.read(info.filename))
+                   for info in zin.infolist()
+                   if info.filename != "factcheck.md"]
+    with _zipfile.ZipFile(zp, "w", _zipfile.ZIP_DEFLATED) as zout:
+        for info, data in members:
+            zout.writestr(info, data)
+        zout.write(sidecar, "factcheck.md")
+    return sidecar
+
+
 def overlay_history(db, article_id: str) -> list[OverlayRecord]:
     rows = db.query(
         "SELECT * FROM factcheck_overlays WHERE article_id=? "

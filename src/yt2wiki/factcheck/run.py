@@ -50,7 +50,8 @@ class RunBudgets:
     queries_per_claim: int = DEFAULT_QUERIES_PER_CLAIM
     pages_per_claim: int = DEFAULT_PAGES_PER_CLAIM
     fetch_bytes: int = DEFAULT_FETCH_BYTES
-    verifier: object = None  # optional VerifierFn (stage B); None = combiner only
+    verifier: object = None  # optional VerifierFn; None = deterministic combiner only
+    primary_domains: tuple[str, ...] = ()  # issuer/official domains, operator-set
 
 
 @dataclass
@@ -119,11 +120,13 @@ def _assess_one(provider: EvidenceProvider, record: ClaimRecord,
             locator = verify_excerpt(page.text, excerpt) if excerpt else None
             if locator is None:
                 continue
+            grouper = getattr(provider, "independence_group", None)
+            group = grouper(page.url) if callable(grouper) else ""
             verified.append(EvidenceRecord(
                 url=page.url, title=page.title or hit.title,
                 publisher=hit.publisher, published_at=page.published_at,
                 retrieved_at=_utcnow(), locator=locator, excerpt=excerpt,
-                relationship="supports", independence_group="",
+                relationship="supports", independence_group=group,
                 content_hash=page.content_hash))
             if len(verified) >= budgets.pages_per_claim:
                 break
@@ -166,9 +169,17 @@ def _relevant_passage(page_text: str, quote: str) -> str | None:
 
 def run_factcheck(db, article_id: str, *, provider: EvidenceProvider,
                   max_claims: int = DEFAULT_MAX_CLAIMS,
-                  verifier=None) -> RunReport:
+                  verifier=None,
+                  primary_domains: tuple[str, ...] = ()) -> RunReport:
     """Explicit fact-check run: read canonical revision, persist new overlay."""
-    budgets = RunBudgets(max_claims=max_claims, verifier=verifier)
+    budgets = RunBudgets(max_claims=max_claims, verifier=verifier,
+                         primary_domains=primary_domains)
+    grouper = getattr(provider, "independence_group", None)
+    if callable(grouper):
+        try:
+            provider.primary_domains = tuple(primary_domains)  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass
     row = db.query_one(
         "SELECT article_id, title, markdown, article_type FROM articles "
         "WHERE article_id=?", (article_id,))
