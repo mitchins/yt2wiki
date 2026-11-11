@@ -42,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_schemas(args)
         if args.command == "inference":
             return _cmd_inference(args)
+        if args.command == "factcheck":
+            return _cmd_factcheck(args)
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
@@ -116,6 +118,31 @@ def build_parser() -> argparse.ArgumentParser:
                         parents=[common])
     q.add_argument("--name", required=True, help="provider name as saved")
     q.add_argument("--timeout", type=float, default=6.0, help="seconds for the /models probe")
+
+    p = sub.add_parser("factcheck", help="independent fact-check overlay (explicit, opt-in)",
+                       parents=[common])
+    fsub = p.add_subparsers(dest="factcheck_command")
+    q = fsub.add_parser("run", help="run external corroboration for one article revision",
+                        parents=[common])
+    q.add_argument("article_id")
+    q.add_argument("--provider", default="ddgs", choices=["ddgs", "mock"],
+                   help="evidence provider (keyless DDGS search + bounded fetch)")
+    q.add_argument("--max-claims", type=int, default=10,
+                   help="cap on claims assessed per run (8-12 recommended)")
+    q.add_argument("--verifier", default="none", choices=["none", "backend"],
+                   help="none: evidence collection only, no categorical factual "
+                   "verdict (keyword overlap is not corroboration); backend: "
+                   "a configured text backend assesses each passage, still "
+                   "citation-gated")
+    q.add_argument("--role", default="text",
+                   help="inference registry role for --verifier backend")
+    q.add_argument("--primary-domains", default="",
+                   help="comma-separated issuer/official domains treated as primary records")
+    q.add_argument("--no-cache", action="store_true",
+                   help="bypass the local fetched-page cache for this run")
+    q = fsub.add_parser("show", help="show the current overlay for an article revision",
+                        parents=[common])
+    q.add_argument("article_id")
     return parser
 
 
@@ -331,6 +358,140 @@ def _cmd_export(args) -> int:
     print(json.dumps(metrics, indent=1, default=str))
     print(f"markdown : {settings.paths.article_markdown(args.article_id)}")
     print(f"standalone: {settings.paths.article_dir(args.article_id) / 'article.standalone.html'}")
+    return 0
+
+
+def _cmd_factcheck(args) -> int:
+    """Explicit fact-check runs. Nothing here runs during generation, viewing or export."""
+    from .factcheck import run as _run
+    from .factcheck import store as _store
+
+    settings, db, _ = _service(args)
+    cmd = getattr(args, "factcheck_command", None)
+    if cmd == "show":
+        overlay = _store.current_overlay(db, args.article_id)
+        if overlay is None:
+            print(f"no current overlay for {args.article_id}: "
+                  "not checked (nothing has been verified)")
+            return 1
+        print(f"overlay  : {overlay.overlay_id}")
+        print(f"revision : {overlay.article_revision_sha256[:12]}")
+        print(f"checked  : {overlay.checked_at} · run {overlay.run_status}")
+        mode = overlay.verifier.get("mode", "collection")
+        print(f"mode     : {mode} "
+              f"(evidence collection only — no factual verdicts)"
+              if mode != "assessed" else
+              f"mode     : assessed "
+              f"(role={overlay.verifier.get('role')} "
+              f"model={overlay.verifier.get('model')})")
+        cov = overlay.coverage
+        skipped = cov.get("skipped_claims", [])
+        n_skipped = len(skipped) if isinstance(skipped, list) else skipped
+        print(f"coverage : {cov.get('checked_claims')} of "
+              f"{cov.get('eligible_claims')} material claims selected; "
+              f"{cov.get('retrieved_claims', 0)} with retrieved passages; "
+              f"{n_skipped} skipped")
+        for verdict, count in (cov.get("by_assessment") or {}).items():
+            print(f"  {verdict}: {count}")
+        for claim in overlay.claims:
+            print(f"  [{claim.assessment}] {claim.quote[:100]}")
+        return 0
+    if cmd != "run":
+        print("usage: yt2wiki factcheck {run|show} article_id", file=sys.stderr)
+        return 2
+    row = db.query_one("SELECT article_id FROM articles WHERE article_id=?",
+                       (args.article_id,))
+    if row is None:
+        print(f"no such article: {args.article_id}", file=sys.stderr)
+        return 2
+    max_claims = max(1, min(int(args.max_claims), 25))
+    primaries = tuple(d.strip().lower() for d in
+                      (args.primary_domains or "").split(",") if d.strip())
+    if args.provider == "ddgs":
+        from .factcheck import ddgs_provider as _ddgs
+        cache_dir = (None if args.no_cache
+                     else settings.paths.root / "factcheck-cache")
+        provider = _ddgs.DDGSProvider(
+            cache=_ddgs.FactcheckCache(directory=cache_dir),
+            primary_domains=primaries)
+    else:
+        from .factcheck import evidence as _ev
+        provider = _ev.MockProvider()
+    verifier = None
+    verifier_role = verifier_model = None
+    if args.verifier == "backend":
+        from .backends.loader import ModelManager
+        from .factcheck import verifier as _vf
+        manager = ModelManager(settings)
+        loaded: dict = {}
+        try:
+            loaded = manager.acquire_all(args.role)
+            backend = loaded[args.role]
+            if not callable(getattr(backend, "chat", None)):
+                raise TypeError(
+                    f"role {args.role!r} ({type(backend).__name__}) does not "
+                    "support chat: it cannot assess passages")
+            spec = getattr(backend, "spec", None)
+            verifier_role = args.role
+            verifier_model = (getattr(spec, "key", None)
+                              or getattr(backend, "model_key", None)
+                              or type(backend).__name__)
+            verifier = _vf.verifier_from_chat(
+                lambda messages: backend.chat(  # noqa: E731
+                    messages, max_new_tokens=256),
+                max_tokens=256, timeout_s=90.0)
+        except Exception as exc:  # noqa: BLE001
+            manager.release_all(loaded)
+            print(f"backend verifier unavailable: {exc}", file=sys.stderr)
+            return 2
+        try:
+            report = _run.run_factcheck(
+                db, args.article_id, provider=provider,
+                max_claims=max_claims, verifier=verifier,
+                primary_domains=primaries,
+                verifier_role=verifier_role, verifier_model=verifier_model)
+        finally:
+            manager.release_all(loaded)
+    else:
+        report = _run.run_factcheck(
+            db, args.article_id, provider=provider,
+            max_claims=max_claims, primary_domains=primaries)
+    shipped = _store.refresh_export_sidecar(db, settings.paths, args.article_id,
+                                              report.overlay)
+    if shipped is None:
+        print("article edited during run: overlay retained as historical for "
+              f"revision {report.overlay.article_revision_sha256[:12]}; "
+              "no sidecar shipped")
+    overlay = report.overlay
+    print(f"overlay  : {overlay.overlay_id} ({overlay.run_status})")
+    print(f"revision : {overlay.article_revision_sha256[:12]}")
+    mode = overlay.verifier.get("mode", "collection")
+    if mode == "assessed":
+        print(f"mode     : assessed (role={verifier_role} model={verifier_model}; "
+              f"{report.verifier_calls} verifier calls, "
+              f"budget {report.verifier_budget})")
+    else:
+        print("mode     : evidence collection only — passages gathered, "
+              "no categorical factual verdicts rendered")
+    cov = overlay.coverage
+    skipped = cov.get("skipped_claims", [])
+    n_skipped = len(skipped) if isinstance(skipped, list) else skipped
+    print(f"claims   : {cov['checked_claims']} selected / "
+          f"{cov['eligible_claims']} eligible; "
+          f"{cov.get('retrieved_claims', 0)} with retrieved passages; "
+          f"{n_skipped} skipped")
+    for verdict, count in (cov.get("by_assessment") or {}).items():
+        print(f"  {verdict}: {count}")
+    print(f"retrieval: {report.searches} searches, {report.fetches} fetches, "
+          f"{report.fetch_bytes} bytes")
+    for claim in overlay.claims:
+        print(f"  [{claim.assessment}] {claim.quote[:100]}")
+    for failure in report.failures[:10]:
+        print(f"  failure: {failure}")
+    # Core status is never changed by this command; surface that explicitly.
+    status = db.query_one("SELECT status FROM articles WHERE article_id=?",
+                           (args.article_id,))["status"]
+    print(f"article status unchanged: {status}")
     return 0
 
 

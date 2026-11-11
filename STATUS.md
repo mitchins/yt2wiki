@@ -48,9 +48,15 @@ Status board (MarkDeck-compatible). Shipped pillars reflect v0.1.0
 - 🔵 Major claim extractor
     Structured extraction of the actionable claims (commands, settings,
     values, prerequisites) behind each article section.
-- 🔵 Fact checker
-    Depends on the claim extractor: verify extracted claims against the
-    source evidence before publication.
+- 🔵 Fact checker (YT2WIKI-FACTCHECK-01, in progress)
+    Separate advisory overlay, never a publication gate: assess selected
+    externally checkable claims against *independent retrieved evidence*
+    after publication, with cited reasons and source passages. Never
+    rewrites the canonical article, its citations, or its status; a
+    source-faithful but false assertion stays in the article with
+    contrary evidence presented separately. External support can never
+    rescue content the video did not communicate. Default off until
+    qualified; no unattended publishing.
 - 🔵 "Blink"-style short format
     Short-format rendering of the same evidence base (quick-reference
     summary cards).
